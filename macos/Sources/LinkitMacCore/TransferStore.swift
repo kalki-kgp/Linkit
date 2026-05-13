@@ -7,13 +7,15 @@ final class TransferStore {
     private let destination: URL
     private let tmpFolder: URL
     private let logger: LinkitLogger
+    private let history: TransferHistoryStore?
     private let sessionTTL: TimeInterval = 60 * 60
     private let uploadTokenTTL: TimeInterval = 5 * 60
 
-    init(destination: URL, logger: LinkitLogger) throws {
+    init(destination: URL, logger: LinkitLogger, history: TransferHistoryStore? = nil) throws {
         self.destination = destination
         self.tmpFolder = destination.appendingPathComponent(".tmp", isDirectory: true)
         self.logger = logger
+        self.history = history
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: tmpFolder, withIntermediateDirectories: true)
     }
@@ -213,6 +215,7 @@ final class TransferStore {
             if removeTemp {
                 removeTempQuietly(record.tempURL)
             }
+            appendHistory(record)
             logger.error("upload failed transfer id=\(id) error=\(code) message=\(message)")
         }
         lock.unlock()
@@ -224,6 +227,7 @@ final class TransferStore {
             record.status = .canceled
             record.error = "canceled"
             removeTempQuietly(record.tempURL)
+            appendHistory(record)
             logger.info("canceled transfer id=\(id)")
             return statusResponse(record)
         }
@@ -267,6 +271,7 @@ final class TransferStore {
                 )
                 record.finalizeStatusCode = 400
                 record.finalizeResponse = response
+                appendHistory(record)
                 self.logger.error("finalize failed transfer id=\(id) error=\(code) message=\(message)")
                 return (400, response)
             }
@@ -310,6 +315,7 @@ final class TransferStore {
                 )
                 record.finalizeStatusCode = 200
                 record.finalizeResponse = response
+                appendHistory(record)
                 logger.info("finalized transfer id=\(id) path=\(finalURL.path)")
                 return (200, response)
             } catch {
@@ -418,6 +424,22 @@ final class TransferStore {
 
     private func removeTempQuietly(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    private func appendHistory(_ record: TransferRecord) {
+        history?.append(
+            TransferHistoryEntry(
+                transferId: record.id,
+                filename: record.originalName,
+                size: record.expectedSize,
+                senderDeviceId: record.clientDeviceId,
+                completedAt: Date().iso8601(),
+                status: record.status.rawValue,
+                savedPath: record.savedURL?.path,
+                sha256: record.serverSha256,
+                error: record.error
+            )
+        )
     }
 }
 

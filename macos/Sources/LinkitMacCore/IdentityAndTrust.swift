@@ -91,8 +91,8 @@ final class TrustStore {
     }
 }
 
-enum LinkitPaths {
-    static let applicationSupport: URL = FileManager.default.homeDirectoryForCurrentUser
+public enum LinkitPaths {
+    public static let applicationSupport: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library", isDirectory: true)
         .appendingPathComponent("Application Support", isDirectory: true)
         .appendingPathComponent("Linkit", isDirectory: true)

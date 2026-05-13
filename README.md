@@ -47,11 +47,37 @@ Debug log:
 ~/Library/Logs/Linkit/transfer.log
 ```
 
+Recent transfer history:
+
+```txt
+~/Library/Application Support/Linkit/transfer-history.json
+```
+
 ## Verification
 
 ```sh
-cd macos && swift test
-cd android && ./gradlew testDebugUnitTest assembleDebug
+./scripts/verify.sh
+```
+
+Smoke the signed pairing/transfer path without a phone:
+
+```sh
+./scripts/smoke-signed-transfer.sh
+```
+
+## Local Packaging
+
+Build a local menu-bar app bundle:
+
+```sh
+./scripts/build-macos-app.sh
+open dist/Linkit.app
+```
+
+Install the Android debug build:
+
+```sh
+./scripts/install-android-debug.sh
 ```
 
 Protocol details:

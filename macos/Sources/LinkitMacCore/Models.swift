@@ -165,6 +165,18 @@ public struct TransferFileStatus: Codable {
     public let error: String?
 }
 
+public struct TransferHistoryEntry: Codable, Equatable {
+    public let transferId: String
+    public let filename: String
+    public let size: Int64
+    public let senderDeviceId: String
+    public let completedAt: String
+    public let status: String
+    public let savedPath: String?
+    public let sha256: String?
+    public let error: String?
+}
+
 struct TransferRecord {
     let id: String
     let fileIndex: Int

@@ -27,6 +27,7 @@ public final class LinkitReceiverApp {
 
     private let logger: LinkitLogger
     private let store: TransferStore
+    private let history: TransferHistoryStore
     private let server: HTTPServer
     private let bonjour: BonjourAdvertiser?
     private let trustStore: TrustStore
@@ -41,7 +42,8 @@ public final class LinkitReceiverApp {
         self.identity = try IdentityStore().loadOrCreate()
         self.trustStore = try TrustStore()
         self.pairingManager = try PairingManager(identity: identity, trustStore: trustStore, logger: logger)
-        self.store = try TransferStore(destination: configuration.destination, logger: logger)
+        self.history = try TransferHistoryStore()
+        self.store = try TransferStore(destination: configuration.destination, logger: logger, history: history)
         self.store.sweepOrphans()
         self.bonjour = configuration.advertiseBonjour
             ? BonjourAdvertiser(
@@ -58,6 +60,7 @@ public final class LinkitReceiverApp {
             trustStore: trustStore,
             pairingManager: pairingManager,
             store: store,
+            history: history,
             logger: logger
         )
     }
@@ -85,6 +88,10 @@ public final class LinkitReceiverApp {
         trustStore.allDevices()
     }
 
+    public func recentTransfers(limit: Int = 10) -> [TransferHistoryEntry] {
+        history.recent(limit: limit)
+    }
+
     private static func defaultBonjourName() -> String {
         let host = Host.current().localizedName ?? "Mac"
         return "Linkit \(host)"
@@ -100,6 +107,7 @@ final class HTTPServer {
     private let pairingManager: PairingManager
     private let signedVerifier: SignedRequestVerifier
     private let store: TransferStore
+    private let history: TransferHistoryStore
     private let logger: LinkitLogger
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -112,6 +120,7 @@ final class HTTPServer {
         trustStore: TrustStore,
         pairingManager: PairingManager,
         store: TransferStore,
+        history: TransferHistoryStore,
         logger: LinkitLogger
     ) {
         self.port = port
@@ -122,6 +131,7 @@ final class HTTPServer {
         self.pairingManager = pairingManager
         self.signedVerifier = SignedRequestVerifier(trustStore: trustStore, logger: logger)
         self.store = store
+        self.history = history
         self.logger = logger
     }
 
@@ -213,6 +223,11 @@ final class HTTPServer {
             let body = try readJSONBody(request, fd: fd, maxBytes: 32 * 1024)
             let pairRequest: PairRequest = try decodeJSON(body)
             return jsonResponse(status: 200, body: try pairingManager.pair(pairRequest))
+        }
+
+        if request.method == "GET", request.path == "/v1/history" {
+            try _ = authenticateControl(request, body: Data())
+            return jsonResponse(status: 200, body: history.recent(limit: 50))
         }
 
         guard request.path.hasPrefix("/v1/transfers") else {

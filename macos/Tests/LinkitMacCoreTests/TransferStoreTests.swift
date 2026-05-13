@@ -52,6 +52,26 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: first.1.savedPath!)), data)
     }
 
+    func testSuccessfulFinalizeAddsHistoryEntry() throws {
+        let fixture = try StoreFixture()
+        defer { fixture.cleanup() }
+
+        let data = Data("history\n".utf8)
+        let sha = SHA256.hash(data: data).linkitHex
+        let create = try fixture.uploadReadyTransfer(name: "history.txt", data: data, clientDeviceId: "phone-a")
+
+        _ = try fixture.store.finalize(
+            id: create.transferId,
+            request: FinalizeRequest(bytesSent: Int64(data.count), finalSha256: sha)
+        )
+
+        let recent = fixture.history.recent(limit: 1)
+        XCTAssertEqual(recent.first?.transferId, create.transferId)
+        XCTAssertEqual(recent.first?.filename, "history.txt")
+        XCTAssertEqual(recent.first?.status, "complete")
+        XCTAssertEqual(recent.first?.sha256, sha)
+    }
+
     func testFailedFinalizeReplayReturnsSameFailure() throws {
         let fixture = try StoreFixture()
         defer { fixture.cleanup() }
@@ -120,12 +140,14 @@ final class TransferStoreTests: XCTestCase {
 
 private final class StoreFixture {
     let destination: URL
+    let history: TransferHistoryStore
     let store: TransferStore
 
     init() throws {
         destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("linkit-store-tests-\(UUID().uuidString)", isDirectory: true)
-        store = try TransferStore(destination: destination, logger: LinkitLogger())
+        history = try TransferHistoryStore(baseFolder: destination.appendingPathComponent("support", isDirectory: true))
+        store = try TransferStore(destination: destination, logger: LinkitLogger(), history: history)
     }
 
     func cleanup() {
