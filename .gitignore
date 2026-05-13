@@ -1,0 +1,13 @@
+.DS_Store
+
+# SwiftPM
+macos/.build/
+macos/.swiftpm/
+
+# Android/Gradle
+android/.gradle/
+android/local.properties
+android/**/build/
+
+# Local smoke-test output
+*.log

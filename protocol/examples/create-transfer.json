@@ -1,0 +1,11 @@
+{
+  "clientDeviceId": "android-phase0",
+  "files": [
+    {
+      "name": "photo.jpg",
+      "size": 1234567,
+      "mimeType": "image/jpeg",
+      "clientSha256": null
+    }
+  ]
+}
