@@ -7,6 +7,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var statusItem: NSStatusItem?
     private var statusIcon: StatusIconAnimator?
     private var qrWindow: NSWindow?
+    private var retiredWindows: [NSWindow] = []
     private var diagnosticsWindow: NSWindow?
     private var resetStatusWorkItem: DispatchWorkItem?
     private var pairingPoller: DispatchSourceTimer?
@@ -97,18 +98,26 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func announcePairing(_ device: TrustedDevice?) {
         guard let device else { return }
         showTransientIcon(.success, tooltip: "Paired \(device.deviceName)")
-        if qrWindow?.isVisible == true {
-            qrWindow?.close()
-            qrWindow = nil
-        }
+        dismissPairingWindow()
     }
 
     private func announceConnection(_ device: ConnectedDevice?) {
         guard let device else { return }
         showTransientIcon(.success, tooltip: "Connected \(device.deviceName)")
-        if qrWindow?.isVisible == true {
-            qrWindow?.close()
-            qrWindow = nil
+        dismissPairingWindow()
+    }
+
+    private func dismissPairingWindow() {
+        guard let window = qrWindow else { return }
+        qrWindow = nil
+        window.delegate = nil
+        window.animationBehavior = .none
+        window.orderOut(nil)
+
+        retiredWindows.append(window)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.retiredWindows.removeAll { $0 === window }
         }
     }
 
@@ -224,6 +233,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         )
         window.title = "Linkit Pairing"
         window.delegate = self
+        window.animationBehavior = .none
         window.center()
         window.contentView = content
         window.makeKeyAndOrderFront(nil)

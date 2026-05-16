@@ -93,33 +93,34 @@ private final class StatusIconRenderer {
     private let size = NSSize(width: 34, height: 18)
 
     func image(for state: LinkitStatusIconState, frame: Int) -> NSImage {
-        NSImage(size: size, flipped: false) { rect in
-            NSColor.clear.setFill()
-            rect.fill()
+        let image = NSImage(size: size)
+        image.lockFocus()
+        defer { image.unlockFocus() }
 
-            let color = NSColor.black
-            self.drawDevices(color: color)
+        NSColor.clear.setFill()
+        NSRect(origin: .zero, size: size).fill()
 
-            switch state {
-            case .connected:
-                self.drawChain(color: color, alpha: 1)
-            case .disconnected:
-                self.drawBrokenChain(color: color)
-            case .pairing:
-                let phase = self.smoothPingPong(frame, cycle: 54)
-                self.drawPairingChain(color: color, progress: phase)
-            case .transferring(let direction):
-                self.drawChain(color: color, alpha: 0.9)
-                self.drawMovingFiles(color: color, frame: frame, direction: direction)
-            case .success:
-                self.drawChain(color: color, alpha: 1)
-                self.drawTick(color: color, progress: min(1, CGFloat(frame) / 12))
-            case .error:
-                self.drawBrokenChain(color: color)
-            }
+        let color = NSColor.black
+        drawDevices(color: color)
 
-            return true
+        switch state {
+        case .connected:
+            drawChain(color: color, alpha: 1)
+        case .disconnected:
+            drawBrokenChain(color: color)
+        case .pairing:
+            let phase = smoothPingPong(frame, cycle: 54)
+            drawPairingChain(color: color, progress: phase)
+        case .transferring(let direction):
+            drawChain(color: color, alpha: 0.9)
+            drawMovingFiles(color: color, frame: frame, direction: direction)
+        case .success:
+            drawChain(color: color, alpha: 1)
+            drawTick(color: color, progress: min(1, CGFloat(frame) / 12))
+        case .error:
+            drawBrokenChain(color: color)
         }
+        return image
     }
 
     private func drawDevices(color: NSColor) {
