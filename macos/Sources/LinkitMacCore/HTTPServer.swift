@@ -9,6 +9,7 @@ struct HTTPRequest {
     let headers: [String: String]
     let contentLength: Int64
     let bodyRemainder: Data
+    let remoteHost: String?
 }
 
 struct HTTPResponse {
@@ -32,6 +33,7 @@ public final class LinkitReceiverApp {
     private let bonjour: BonjourAdvertiser?
     private let trustStore: TrustStore
     private let pairingManager: PairingManager
+    private let outgoingClient: OutgoingTransferClient
 
     public init(configuration: ReceiverConfiguration = ReceiverConfiguration()) throws {
         self.configuration = configuration
@@ -43,6 +45,7 @@ public final class LinkitReceiverApp {
         self.trustStore = try TrustStore()
         self.pairingManager = try PairingManager(identity: identity, trustStore: trustStore, logger: logger)
         self.history = try TransferHistoryStore()
+        self.outgoingClient = OutgoingTransferClient(identity: identity, logger: logger)
         self.store = try TransferStore(destination: configuration.destination, logger: logger, history: history)
         self.store.sweepOrphans()
         self.bonjour = configuration.advertiseBonjour
@@ -86,6 +89,15 @@ public final class LinkitReceiverApp {
 
     public func trustedDevices() -> [TrustedDevice] {
         trustStore.allDevices()
+    }
+
+    public func sendFilesToFirstAndroid(_ files: [URL]) throws -> [OutgoingTransferResult] {
+        guard let device = trustStore.allDevices().first(where: {
+            $0.platform.lowercased() == "android" && $0.lastKnownHost != nil && $0.receivePort != nil
+        }) else {
+            throw HTTPFailure.badRequest("missing_android_receiver", "Open Linkit on paired Android first, then drop the file again")
+        }
+        return try outgoingClient.send(files: files, to: device)
     }
 
     public func recentTransfers(limit: Int = 10) -> [TransferHistoryEntry] {
@@ -165,23 +177,30 @@ final class HTTPServer {
         logger.info("receiver started port=\(port)")
 
         while true {
-            let clientFD = accept(socketFD, nil, nil)
+            var clientAddress = sockaddr_in()
+            var clientAddressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let clientFD = withUnsafeMutablePointer(to: &clientAddress) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    accept(socketFD, $0, &clientAddressLength)
+                }
+            }
             if clientFD < 0 {
                 if errno == EINTR { continue }
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
+            let remoteHost = HTTPServer.ipv4String(from: clientAddress)
 
             DispatchQueue.global(qos: .userInitiated).async {
-                self.handleConnection(clientFD)
+                self.handleConnection(clientFD, remoteHost: remoteHost)
             }
         }
     }
 
-    private func handleConnection(_ fd: Int32) {
+    private func handleConnection(_ fd: Int32, remoteHost: String?) {
         defer { close(fd) }
 
         do {
-            guard let request = try readRequest(from: fd) else {
+            guard let request = try readRequest(from: fd, remoteHost: remoteHost) else {
                 return
             }
             let response = try route(request, fd: fd)
@@ -222,7 +241,17 @@ final class HTTPServer {
         if request.method == "POST", request.path == "/v1/pair" {
             let body = try readJSONBody(request, fd: fd, maxBytes: 32 * 1024)
             let pairRequest: PairRequest = try decodeJSON(body)
-            return jsonResponse(status: 200, body: try pairingManager.pair(pairRequest))
+            return jsonResponse(status: 200, body: try pairingManager.pair(pairRequest, remoteHost: request.remoteHost))
+        }
+
+        if request.method == "POST", request.path == "/v1/devices/self" {
+            let body = try readJSONBody(request, fd: fd, maxBytes: 16 * 1024)
+            let deviceId = try authenticateControl(request, body: body)
+            guard let deviceId, let remoteHost = request.remoteHost else {
+                throw HTTPFailure.unauthorized("missing_device_connection", "Signed device connection is required")
+            }
+            let update: DeviceUpdateRequest = try decodeJSON(body)
+            return jsonResponse(status: 200, body: try trustStore.updateConnection(deviceId: deviceId, host: remoteHost, receivePort: update.receivePort))
         }
 
         if request.method == "GET", request.path == "/v1/history" {
@@ -421,7 +450,7 @@ final class HTTPServer {
         return body
     }
 
-    private func readRequest(from fd: Int32) throws -> HTTPRequest? {
+    private func readRequest(from fd: Int32, remoteHost: String?) throws -> HTTPRequest? {
         let delimiter = Data([13, 10, 13, 10])
         var buffer = Data()
         var temp = [UInt8](repeating: 0, count: 8192)
@@ -483,8 +512,16 @@ final class HTTPServer {
             path: path,
             headers: headers,
             contentLength: contentLength,
-            bodyRemainder: remainder
+            bodyRemainder: remainder,
+            remoteHost: remoteHost
         )
+    }
+
+    private static func ipv4String(from address: sockaddr_in) -> String {
+        var host = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        var addr = address.sin_addr
+        inet_ntop(AF_INET, &addr, &host, socklen_t(INET_ADDRSTRLEN))
+        return String(cString: host)
     }
 
     private func parsePath(_ target: String) -> String {

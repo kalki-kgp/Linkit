@@ -43,6 +43,7 @@ public struct PairRequest: Codable {
     public let platform: String
     public let publicKey: String
     public let pairingToken: String
+    public let receivePort: UInt16?
 }
 
 public struct PairResponse: Codable {
@@ -177,6 +178,10 @@ public struct TransferHistoryEntry: Codable, Equatable {
     public let error: String?
 }
 
+public struct DeviceUpdateRequest: Codable {
+    public let receivePort: UInt16
+}
+
 struct TransferRecord {
     let id: String
     let fileIndex: Int
@@ -214,6 +219,10 @@ struct HTTPFailure: Error {
     let status: Int
     let error: String
     let message: String
+}
+
+extension HTTPFailure: LocalizedError {
+    var errorDescription: String? { message }
 }
 
 extension HTTPFailure {

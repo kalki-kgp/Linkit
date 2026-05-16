@@ -7,6 +7,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var qrWindow: NSWindow?
     private var diagnosticsWindow: NSWindow?
+    private var resetStatusWorkItem: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -31,6 +32,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
     private func setupMenu() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "Linkit"
+        installDropTarget(on: item.button)
         statusItem = item
         refreshMenu()
     }
@@ -39,6 +41,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
         guard let app else { return }
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Receiving on \(LocalNetwork.bestPrivateIPv4()):\(app.configuration.port)", action: nil, keyEquivalent: ""))
+        let androidTargets = app.trustedDevices().filter { $0.platform.lowercased() == "android" && $0.receivePort != nil && $0.lastKnownHost != nil }
+        menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: open Linkit on Android" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
@@ -162,6 +166,48 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
+    private func installDropTarget(on button: NSStatusBarButton?) {
+        guard let button else { return }
+        let dropView = StatusDropView(frame: button.bounds)
+        dropView.autoresizingMask = [.width, .height]
+        dropView.button = button
+        dropView.onDrop = { [weak self] urls in
+            self?.sendDroppedFiles(urls)
+        }
+        button.addSubview(dropView)
+    }
+
+    private func sendDroppedFiles(_ urls: [URL]) {
+        guard let app else { return }
+        showTransientStatus("Sending...")
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let results = try app.sendFilesToFirstAndroid(urls)
+                DispatchQueue.main.async {
+                    self.showTransientStatus("Sent \(results.count)")
+                    self.refreshMenu()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showTransientStatus("Linkit")
+                    self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                    self.refreshMenu()
+                }
+            }
+        }
+    }
+
+    private func showTransientStatus(_ title: String) {
+        resetStatusWorkItem?.cancel()
+        statusItem?.button?.title = title
+        guard title != "Linkit" else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.statusItem?.button?.title = "Linkit"
+        }
+        resetStatusWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+    }
+
     private func recentTransfersMenuItem(app: LinkitReceiverApp) -> NSMenuItem {
         let item = NSMenuItem(title: "Recent Transfers", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -213,6 +259,53 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .critical
         alert.runModal()
         NSApp.terminate(nil)
+    }
+
+    private func showNonFatalError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Linkit"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+}
+
+final class StatusDropView: NSView {
+    weak var button: NSStatusBarButton?
+    var onDrop: (([URL]) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        button?.performClick(nil)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        fileURLs(from: sender).isEmpty ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = fileURLs(from: sender)
+        guard !urls.isEmpty else { return false }
+        onDrop?(urls)
+        return true
+    }
+
+    private func fileURLs(from sender: NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let objects = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) ?? []
+        return objects.compactMap { object in
+            if let url = object as? URL { return url }
+            return (object as? NSURL)?.absoluteURL
+        }
     }
 }
 

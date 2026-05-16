@@ -46,7 +46,7 @@ final class PairingManager {
         )
     }
 
-    func pair(_ request: PairRequest) throws -> PairResponse {
+    func pair(_ request: PairRequest, remoteHost: String?) throws -> PairResponse {
         let expected = currentToken()
         guard Date() <= expected.1 else {
             throw HTTPFailure.unauthorized("pairing_token_expired", "Pairing token expired")
@@ -69,7 +69,9 @@ final class PairingManager {
             deviceName: request.deviceName,
             platform: request.platform,
             publicKey: request.publicKey,
-            pairedAt: Date().iso8601()
+            pairedAt: Date().iso8601(),
+            lastKnownHost: remoteHost,
+            receivePort: request.receivePort
         )
         try trustStore.add(trusted)
         rotate()

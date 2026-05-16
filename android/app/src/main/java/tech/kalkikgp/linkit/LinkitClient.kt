@@ -74,6 +74,7 @@ class LinkitClient(
             .put("platform", "android")
             .put("publicKey", identity.publicKey)
             .put("pairingToken", payload.pairingToken)
+            .put("receivePort", AndroidDropReceiver.PORT)
 
         val request = Request.Builder()
             .url("$baseUrl/v1/pair")
@@ -90,6 +91,19 @@ class LinkitClient(
         )
         validatePairingResponse(payload, identity, mac, json)
         return mac
+    }
+
+    suspend fun registerReceiver(mac: TrustedMac, identityStore: IdentityStore, receivePort: Int) {
+        val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
+        val body = JSONObject().put("receivePort", receivePort).toString()
+        val request = signedRequest(
+            identityStore = identityStore,
+            method = "POST",
+            url = "$baseUrl/v1/devices/self",
+            path = "/v1/devices/self",
+            body = body
+        )
+        executeJson(request)
     }
 
     private fun validatePairingResponse(

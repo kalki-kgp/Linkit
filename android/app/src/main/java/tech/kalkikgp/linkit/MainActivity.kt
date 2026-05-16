@@ -105,6 +105,8 @@ data class LinkitUiState(
     val speedBytesPerSecond: Double = 0.0,
     val etaSeconds: Long? = null,
     val currentFileName: String? = null,
+    val androidReceiverStatus: String = "Mac drops starting",
+    val lastAndroidDropPath: String? = null,
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
@@ -115,6 +117,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private val client = LinkitClient()
     private val identityStore = IdentityStore(application)
     private val discovery = BonjourDiscovery(application)
+    private val dropReceiver = AndroidDropReceiver(application, identityStore, ::handleDropEvent)
     private val _uiState = MutableStateFlow(
         LinkitUiState(
             trustedMac = identityStore.trustedMac(),
@@ -127,6 +130,17 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private var sendJob: Job? = null
     private var startedAtMillis: Long = 0
+
+    init {
+        dropReceiver.start()
+        identityStore.trustedMac()?.let(::registerAndroidReceiver)
+    }
+
+    override fun onCleared() {
+        dropReceiver.stop()
+        discovery.stop()
+        super.onCleared()
+    }
 
     fun setMacIp(value: String) {
         _uiState.update { it.copy(macIp = value, error = null, tokenRejected = false) }
@@ -221,7 +235,14 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun forgetMac() {
         identityStore.forgetTrustedMac()
-        _uiState.update { it.copy(trustedMac = null, status = "Pair with Mac", savedPath = null) }
+        _uiState.update {
+            it.copy(
+                trustedMac = null,
+                status = "Pair with Mac",
+                savedPath = null,
+                androidReceiverStatus = "Pair with Mac to receive drops"
+            )
+        }
     }
 
     fun discoverMac() {
@@ -271,6 +292,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     identity = identityStore.identity()
                 )
                 identityStore.saveTrustedMac(mac)
+                registerAndroidReceiver(mac)
                 _uiState.update {
                     it.copy(
                         trustedMac = mac,
@@ -410,6 +432,31 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cancelActive() {
         sendJob?.cancel()
+    }
+
+    private fun registerAndroidReceiver(mac: TrustedMac) {
+        viewModelScope.launch {
+            runCatching {
+                client.registerReceiver(mac, identityStore, AndroidDropReceiver.PORT)
+            }.onSuccess {
+                _uiState.update { state ->
+                    state.copy(androidReceiverStatus = "Mac drops enabled")
+                }
+            }.onFailure { error ->
+                _uiState.update { state ->
+                    state.copy(androidReceiverStatus = "Open Linkit on Mac to enable drops: ${error.message}")
+                }
+            }
+        }
+    }
+
+    private fun handleDropEvent(event: AndroidDropEvent) {
+        _uiState.update {
+            it.copy(
+                androidReceiverStatus = event.error ?: event.status,
+                lastAndroidDropPath = event.savedPath ?: it.lastAndroidDropPath
+            )
+        }
     }
 
     private fun updateProgress(sent: Long, total: Long, fileNumber: Int = 1, fileCount: Int = 1) {
@@ -606,6 +653,22 @@ private fun Header(state: LinkitUiState) {
                 text = "Paired with ${mac.deviceName}",
                 color = WorkbenchColors.Signal,
                 style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            text = state.androidReceiverStatus,
+            color = WorkbenchColors.Muted,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        state.lastAndroidDropPath?.let {
+            Text(
+                text = it,
+                color = WorkbenchColors.Signal,
+                style = MaterialTheme.typography.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

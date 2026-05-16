@@ -29,6 +29,14 @@ cd android
 4. In Android, scan the QR or enter Mac private LAN IP, port `52718`, and pairing token.
 5. Pick files or share from Android Files/Photos/WhatsApp into Linkit.
 
+Reverse drop from Mac to Android:
+
+1. Keep Linkit open on the already-paired Android device.
+2. Open the macOS menu-bar app.
+3. Drag one or more regular files onto the `Linkit` menu-bar item.
+
+Android saves Mac-dropped files into `Downloads/Linkit Drop` on modern Android.
+
 The receiver saves verified files into:
 
 ```txt

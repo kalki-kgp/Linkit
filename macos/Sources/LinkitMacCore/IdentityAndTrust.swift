@@ -13,6 +13,8 @@ public struct TrustedDevice: Codable, Equatable {
     public let platform: String
     public let publicKey: String
     public let pairedAt: String
+    public let lastKnownHost: String?
+    public let receivePort: UInt16?
 }
 
 final class IdentityStore {
@@ -58,6 +60,26 @@ final class TrustStore {
         defer { lock.unlock() }
         devices[device.deviceId] = device
         try saveLocked()
+    }
+
+    func updateConnection(deviceId: String, host: String, receivePort: UInt16) throws -> TrustedDevice {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let existing = devices[deviceId] else {
+            throw HTTPFailure.unauthorized("unknown_device", "Device is not paired")
+        }
+        let updated = TrustedDevice(
+            deviceId: existing.deviceId,
+            deviceName: existing.deviceName,
+            platform: existing.platform,
+            publicKey: existing.publicKey,
+            pairedAt: existing.pairedAt,
+            lastKnownHost: host,
+            receivePort: receivePort
+        )
+        devices[deviceId] = updated
+        try saveLocked()
+        return updated
     }
 
     func trustedDevice(id: String) -> TrustedDevice? {
