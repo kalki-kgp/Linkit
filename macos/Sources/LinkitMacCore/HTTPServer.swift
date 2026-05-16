@@ -280,7 +280,12 @@ final class HTTPServer {
             }
             let update: DeviceUpdateRequest = try decodeJSON(body)
             let device = try trustStore.updateConnection(deviceId: deviceId, host: remoteHost, receivePort: update.receivePort)
-            let connected = connections.markConnected(device: device, host: remoteHost, receivePort: update.receivePort)
+            let connected = connections.markConnected(
+                device: device,
+                host: remoteHost,
+                receivePort: update.receivePort,
+                batteryPercent: update.batteryPercent
+            )
             return jsonResponse(status: 200, body: connectionResponse(connected, status: "connected"))
         }
 
@@ -299,6 +304,7 @@ final class HTTPServer {
                     status: "disconnected",
                     host: nil,
                     receivePort: nil,
+                    batteryPercent: nil,
                     connectedAt: nil,
                     lastSeenAt: nil
                 )
@@ -605,6 +611,7 @@ final class HTTPServer {
             status: status,
             host: connected.host,
             receivePort: connected.receivePort,
+            batteryPercent: connected.batteryPercent,
             connectedAt: connected.connectedAt,
             lastSeenAt: connected.lastSeenAt
         )

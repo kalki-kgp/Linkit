@@ -77,7 +77,12 @@ final class PairingManager {
         )
         try trustStore.add(trusted)
         if let remoteHost, let receivePort = request.receivePort {
-            _ = connections.markConnected(device: trusted, host: remoteHost, receivePort: receivePort)
+            _ = connections.markConnected(
+                device: trusted,
+                host: remoteHost,
+                receivePort: receivePort,
+                batteryPercent: request.batteryPercent
+            )
         }
         rotate()
         logger.info("paired trusted device id=\(trusted.deviceId) name=\(trusted.deviceName)")

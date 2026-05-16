@@ -138,7 +138,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             header.isEnabled = false
             menu.addItem(header)
             for device in connected {
-                let item = NSMenuItem(title: "  \(device.deviceName) (\(device.platform))", action: nil, keyEquivalent: "")
+                let item = NSMenuItem(title: "  \(device.deviceName) (\(device.platform))\(batterySuffix(device.batteryPercent))", action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
             }
@@ -421,6 +421,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         item.submenu = submenu
         return item
+    }
+
+    private func batterySuffix(_ percent: Int?) -> String {
+        guard let percent else { return "" }
+        return " - \(percent)% battery"
     }
 
     private func label(_ text: String, frame: NSRect, size: CGFloat, weight: NSFont.Weight) -> NSTextField {

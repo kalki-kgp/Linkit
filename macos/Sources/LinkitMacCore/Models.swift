@@ -44,6 +44,7 @@ public struct PairRequest: Codable {
     public let publicKey: String
     public let pairingToken: String
     public let receivePort: UInt16?
+    public let batteryPercent: Int?
 }
 
 public struct PairResponse: Codable {
@@ -180,6 +181,7 @@ public struct TransferHistoryEntry: Codable, Equatable {
 
 public struct DeviceUpdateRequest: Codable {
     public let receivePort: UInt16
+    public let batteryPercent: Int?
 }
 
 public struct DeviceConnectionResponse: Codable, Equatable {
@@ -189,6 +191,7 @@ public struct DeviceConnectionResponse: Codable, Equatable {
     public let status: String
     public let host: String?
     public let receivePort: UInt16?
+    public let batteryPercent: Int?
     public let connectedAt: String?
     public let lastSeenAt: String?
 }

@@ -66,7 +66,8 @@ class LinkitClient(
     suspend fun pair(
         baseUrl: String,
         payload: MacPairingPayload,
-        identity: AndroidIdentity
+        identity: AndroidIdentity,
+        batteryPercent: Int?
     ): TrustedMac {
         val bodyJson = JSONObject()
             .put("deviceId", identity.deviceId)
@@ -75,6 +76,7 @@ class LinkitClient(
             .put("publicKey", identity.publicKey)
             .put("pairingToken", payload.pairingToken)
             .put("receivePort", AndroidDropReceiver.PORT)
+        batteryPercent?.let { bodyJson.put("batteryPercent", it) }
 
         val request = Request.Builder()
             .url("$baseUrl/v1/pair")
@@ -93,9 +95,11 @@ class LinkitClient(
         return mac
     }
 
-    suspend fun registerReceiver(mac: TrustedMac, identityStore: IdentityStore, receivePort: Int) {
+    suspend fun registerReceiver(mac: TrustedMac, identityStore: IdentityStore, receivePort: Int, batteryPercent: Int?) {
         val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
-        val body = JSONObject().put("receivePort", receivePort).toString()
+        val bodyJson = JSONObject().put("receivePort", receivePort)
+        batteryPercent?.let { bodyJson.put("batteryPercent", it) }
+        val body = bodyJson.toString()
         val request = signedRequest(
             identityStore = identityStore,
             method = "POST",

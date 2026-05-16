@@ -352,7 +352,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 val mac = client.pair(
                     baseUrl = PrivateLanTarget.baseUrl(validatedPayload.ip, validatedPayload.port),
                     payload = validatedPayload,
-                    identity = identityStore.identity()
+                    identity = identityStore.identity(),
+                    batteryPercent = BatteryStatus.percent(getApplication())
                 )
                 identityStore.saveTrustedMac(mac)
                 _uiState.update {
@@ -507,7 +508,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         LinkitReceiverService.start(getApplication())
         viewModelScope.launch {
             runCatching {
-                client.registerReceiver(mac, identityStore, AndroidDropReceiver.PORT)
+                client.registerReceiver(
+                    mac = mac,
+                    identityStore = identityStore,
+                    receivePort = AndroidDropReceiver.PORT,
+                    batteryPercent = BatteryStatus.percent(getApplication())
+                )
             }.onSuccess {
                 _uiState.update { state ->
                     state.copy(
