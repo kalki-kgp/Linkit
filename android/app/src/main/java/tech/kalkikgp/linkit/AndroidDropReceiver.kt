@@ -112,8 +112,13 @@ class AndroidDropReceiver(
                     .put("platform", "android")
                     .put("port", PORT)
                     .put("publicKey", identity.publicKey)
-                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls"))
+                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status"))
             )
+        }
+
+        if (request.method == "GET" && request.path == "/v1/devices/self/status") {
+            verifySigned(request, ByteArray(0))
+            return jsonResponse(200, deviceStatusJson())
         }
 
         if (request.method == "POST" && request.path == "/v1/transfers") {
@@ -440,6 +445,19 @@ class AndroidDropReceiver(
         .put("serverSha256", session.serverSha256)
         .put("savedPath", session.savedPath)
         .put("error", session.error)
+
+    private fun deviceStatusJson(): JSONObject {
+        val identity = identityStore.identity()
+        val json = JSONObject()
+            .put("protocolVersion", 1)
+            .put("deviceId", identity.deviceId)
+            .put("deviceName", identity.deviceName)
+            .put("platform", "android")
+            .put("status", "connected")
+            .put("receivePort", PORT)
+        BatteryStatus.percent(context)?.let { json.put("batteryPercent", it) }
+        return json
+    }
 
     private fun ensureOwner(session: DropSession, deviceId: String) {
         if (session.clientDeviceId != deviceId) {

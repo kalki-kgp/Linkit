@@ -196,6 +196,16 @@ public struct DeviceConnectionResponse: Codable, Equatable {
     public let lastSeenAt: String?
 }
 
+public struct AndroidDeviceStatusResponse: Codable, Equatable {
+    public let protocolVersion: Int
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let status: String
+    public let receivePort: UInt16?
+    public let batteryPercent: Int?
+}
+
 struct TransferRecord {
     let id: String
     let fileIndex: Int

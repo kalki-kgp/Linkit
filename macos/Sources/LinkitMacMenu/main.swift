@@ -141,6 +141,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 let item = NSMenuItem(title: "  \(device.deviceName) (\(device.platform))\(batterySuffix(device.batteryPercent))", action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
+                let refresh = NSMenuItem(title: "    Refresh \(device.deviceName) Status", action: #selector(refreshDeviceStatus(_:)), keyEquivalent: "")
+                refresh.representedObject = device.deviceId
+                menu.addItem(refresh)
             }
         }
         menu.addItem(NSMenuItem.separator())
@@ -310,6 +313,28 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             refreshMenu()
         } catch {
             showNonFatalError("Could not forget device: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func refreshDeviceStatus(_ sender: NSMenuItem) {
+        guard let app, let deviceId = sender.representedObject as? String else { return }
+        statusIcon?.setState(.transferring(direction: .macToAndroid), tooltip: "Refreshing device status")
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let connected = try app.refreshConnectedDevice(deviceId)
+                DispatchQueue.main.async {
+                    let battery = connected.batteryPercent.map { "\($0)%" } ?? "unknown"
+                    self.showTransientIcon(.success, tooltip: "Battery \(battery)")
+                    self.refreshMenu()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    app.disconnectDevice(deviceId)
+                    self.showTransientIcon(.error, tooltip: "Device status unavailable")
+                    self.refreshMenu()
+                    self.showNonFatalError("Could not refresh device status: \(error.localizedDescription)")
+                }
+            }
         }
     }
 

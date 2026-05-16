@@ -37,6 +37,34 @@ final class OutgoingTransferClientTests: XCTestCase {
         XCTAssertEqual(result[0].savedPath, "Downloads/Linkit Drop/linkit-outgoing.txt")
         XCTAssertEqual(receiver.uploadedBody, Data("hello android\n".utf8))
     }
+
+    func testFetchesAndroidDeviceStatus() throws {
+        let receiver = try MockAndroidReceiver()
+        defer { receiver.stop() }
+
+        let key = P256.Signing.PrivateKey()
+        let publicKey = key.publicKey.x963Representation
+        let identity = LinkitIdentity(
+            deviceId: LinkitDeviceId.fromPublicKey(publicKey),
+            publicKey: publicKey.base64EncodedString(),
+            privateKey: key
+        )
+        let target = TrustedDevice(
+            deviceId: "android-device",
+            deviceName: "Pixel",
+            platform: "android",
+            publicKey: "unused",
+            pairedAt: Date().iso8601(),
+            lastKnownHost: "127.0.0.1",
+            receivePort: receiver.port
+        )
+
+        let status = try OutgoingTransferClient(identity: identity, logger: LinkitLogger()).status(of: target)
+
+        XCTAssertEqual(status.deviceId, "android-device")
+        XCTAssertEqual(status.status, "connected")
+        XCTAssertEqual(status.batteryPercent, 77)
+    }
 }
 
 private final class MockAndroidReceiver {
@@ -157,6 +185,19 @@ private final class MockAndroidReceiver {
                   "sha256":"\(SHA256.hash(data: Data("hello android\n".utf8)).linkitHex)",
                   "error":null,
                   "message":null
+                }
+                """)
+            case ("GET", "/v1/devices/self/status"):
+                XCTAssertNotNil(request.headers["x-linkit-signature"])
+                try writeJSON(fd, status: 200, json: """
+                {
+                  "protocolVersion":1,
+                  "deviceId":"android-device",
+                  "deviceName":"Pixel",
+                  "platform":"android",
+                  "status":"connected",
+                  "receivePort":52718,
+                  "batteryPercent":77
                 }
                 """)
             default:

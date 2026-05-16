@@ -53,6 +53,24 @@ final class DeviceConnectionRegistry {
         return connections[id]
     }
 
+    func refreshStatus(deviceId: String, batteryPercent: Int?, now: Date = Date()) -> ConnectedDevice? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let existing = connections[deviceId] else { return nil }
+        let refreshed = ConnectedDevice(
+            deviceId: existing.deviceId,
+            deviceName: existing.deviceName,
+            platform: existing.platform,
+            host: existing.host,
+            receivePort: existing.receivePort,
+            batteryPercent: normalizedBatteryPercent(batteryPercent) ?? existing.batteryPercent,
+            connectedAt: existing.connectedAt,
+            lastSeenAt: now.iso8601()
+        )
+        connections[deviceId] = refreshed
+        return refreshed
+    }
+
     func allConnected() -> [ConnectedDevice] {
         lock.lock()
         defer { lock.unlock() }

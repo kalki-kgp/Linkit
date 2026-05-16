@@ -36,6 +36,29 @@ final class OutgoingTransferClient {
         return results
     }
 
+    func status(of device: TrustedDevice) throws -> AndroidDeviceStatusResponse {
+        guard device.platform.lowercased() == "android" else {
+            throw HTTPFailure.badRequest("unsupported_target", "Target device is not Android")
+        }
+        guard let host = device.lastKnownHost, let port = device.receivePort else {
+            throw HTTPFailure.badRequest("missing_android_receiver", "Android receiver address is missing")
+        }
+
+        let baseURL = "http://\(host.contains(":") ? "[\(host)]" : host):\(port)"
+        let path = "/v1/devices/self/status"
+        let response: AndroidDeviceStatusResponse = try executeJSON(
+            signedRequest(method: "GET", url: baseURL + path, path: path, body: Data()),
+            expectedStatus: 200
+        )
+        guard response.protocolVersion == 1,
+              response.platform.lowercased() == "android",
+              response.deviceId == device.deviceId
+        else {
+            throw HTTPFailure.unauthorized("device_status_mismatch", "Android status response did not match the connected device")
+        }
+        return response
+    }
+
     private func send(file: URL, baseURL: String) throws -> OutgoingTransferResult {
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .localizedNameKey])
         guard values.isRegularFile == true else {

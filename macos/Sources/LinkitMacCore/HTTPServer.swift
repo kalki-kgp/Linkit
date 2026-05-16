@@ -102,6 +102,25 @@ public final class LinkitReceiverApp {
         connections.disconnect(deviceId: deviceId)
     }
 
+    public func refreshConnectedDevice(_ deviceId: String) throws -> ConnectedDevice {
+        guard let connected = connections.connectedDevice(id: deviceId),
+              let trusted = trustStore.trustedDevice(id: deviceId)
+        else {
+            throw HTTPFailure.badRequest("device_not_connected", "Device is not connected")
+        }
+        let target = TrustedDevice(
+            deviceId: trusted.deviceId,
+            deviceName: trusted.deviceName,
+            platform: trusted.platform,
+            publicKey: trusted.publicKey,
+            pairedAt: trusted.pairedAt,
+            lastKnownHost: connected.host,
+            receivePort: connected.receivePort
+        )
+        let status = try outgoingClient.status(of: target)
+        return connections.refreshStatus(deviceId: deviceId, batteryPercent: status.batteryPercent) ?? connected
+    }
+
     public func forgetDevice(_ deviceId: String) throws {
         _ = try trustStore.remove(deviceId: deviceId)
         connections.disconnect(deviceId: deviceId)
