@@ -53,6 +53,7 @@ open class LinkitHttpException(
 ) : Exception(message)
 
 class TokenRejectedException(message: String) : LinkitHttpException(401, "token_rejected", message)
+class PairingTrustException(message: String) : LinkitHttpException(0, "pairing_trust_failed", message)
 
 class LinkitClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
@@ -73,6 +74,7 @@ class LinkitClient(
             .put("platform", "android")
             .put("publicKey", identity.publicKey)
             .put("pairingToken", payload.pairingToken)
+            .put("receivePort", AndroidDropReceiver.PORT)
 
         val request = Request.Builder()
             .url("$baseUrl/v1/pair")
@@ -80,13 +82,56 @@ class LinkitClient(
             .build()
 
         val json = executeJson(request)
-        return TrustedMac(
+        val mac = TrustedMac(
             deviceId = json.getString("deviceId"),
             deviceName = json.optString("deviceName", payload.deviceName),
             publicKey = json.getString("publicKey"),
             ip = payload.ip,
             port = payload.port
         )
+        validatePairingResponse(payload, identity, mac, json)
+        return mac
+    }
+
+    suspend fun registerReceiver(mac: TrustedMac, identityStore: IdentityStore, receivePort: Int) {
+        val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
+        val body = JSONObject().put("receivePort", receivePort).toString()
+        val request = signedRequest(
+            identityStore = identityStore,
+            method = "POST",
+            url = "$baseUrl/v1/devices/self",
+            path = "/v1/devices/self",
+            body = body
+        )
+        executeJson(request)
+    }
+
+    private fun validatePairingResponse(
+        expected: MacPairingPayload,
+        identity: AndroidIdentity,
+        mac: TrustedMac,
+        response: JSONObject
+    ) {
+        if (response.optInt("protocolVersion", 0) != 1) {
+            throw PairingTrustException("Mac returned an unsupported pairing protocol")
+        }
+        if (response.optString("platform") != "macos") {
+            throw PairingTrustException("Pairing response did not come from a Linkit Mac")
+        }
+        if (response.optString("trustedDeviceId").takeIf { it.isNotBlank() } != identity.deviceId) {
+            throw PairingTrustException("Mac did not trust this Android identity")
+        }
+        if (expected.deviceId.isNotBlank() && mac.deviceId != expected.deviceId) {
+            throw PairingTrustException("Scanned QR does not match the Mac that responded")
+        }
+        if (expected.publicKey.isNotBlank() && mac.publicKey != expected.publicKey) {
+            throw PairingTrustException("Mac public key changed during pairing")
+        }
+        val derivedDeviceId = runCatching { IdentityStore.deviceIdFromPublicKey(mac.publicKey) }
+            .getOrElse { throw PairingTrustException("Mac public key is invalid") }
+        if (derivedDeviceId != mac.deviceId) {
+            throw PairingTrustException("Mac device id does not match its public key")
+        }
     }
 
     suspend fun sendFile(

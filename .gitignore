@@ -11,3 +11,4 @@ android/**/build/
 
 # Local smoke-test output
 *.log
+dist/

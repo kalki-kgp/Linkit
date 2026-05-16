@@ -46,13 +46,16 @@ final class PairingManager {
         )
     }
 
-    func pair(_ request: PairRequest) throws -> PairResponse {
+    func pair(_ request: PairRequest, remoteHost: String?) throws -> PairResponse {
         let expected = currentToken()
         guard Date() <= expected.1 else {
             throw HTTPFailure.unauthorized("pairing_token_expired", "Pairing token expired")
         }
         guard request.pairingToken == expected.0 else {
             throw HTTPFailure.unauthorized("pairing_token_rejected", "Pairing token was not accepted")
+        }
+        guard request.platform.lowercased() == "android" else {
+            throw HTTPFailure.badRequest("unsupported_platform", "Only Android senders can pair with this MVP")
         }
         guard let publicKeyData = Data(base64Encoded: request.publicKey), !publicKeyData.isEmpty else {
             throw HTTPFailure.badRequest("invalid_public_key", "Device public key is invalid")
@@ -66,7 +69,9 @@ final class PairingManager {
             deviceName: request.deviceName,
             platform: request.platform,
             publicKey: request.publicKey,
-            pairedAt: Date().iso8601()
+            pairedAt: Date().iso8601(),
+            lastKnownHost: remoteHost,
+            receivePort: request.receivePort
         )
         try trustStore.add(trusted)
         rotate()

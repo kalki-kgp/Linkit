@@ -13,6 +13,8 @@ public struct TrustedDevice: Codable, Equatable {
     public let platform: String
     public let publicKey: String
     public let pairedAt: String
+    public let lastKnownHost: String?
+    public let receivePort: UInt16?
 }
 
 final class IdentityStore {
@@ -60,6 +62,26 @@ final class TrustStore {
         try saveLocked()
     }
 
+    func updateConnection(deviceId: String, host: String, receivePort: UInt16) throws -> TrustedDevice {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let existing = devices[deviceId] else {
+            throw HTTPFailure.unauthorized("unknown_device", "Device is not paired")
+        }
+        let updated = TrustedDevice(
+            deviceId: existing.deviceId,
+            deviceName: existing.deviceName,
+            platform: existing.platform,
+            publicKey: existing.publicKey,
+            pairedAt: existing.pairedAt,
+            lastKnownHost: host,
+            receivePort: receivePort
+        )
+        devices[deviceId] = updated
+        try saveLocked()
+        return updated
+    }
+
     func trustedDevice(id: String) -> TrustedDevice? {
         lock.lock()
         defer { lock.unlock() }
@@ -91,8 +113,8 @@ final class TrustStore {
     }
 }
 
-enum LinkitPaths {
-    static let applicationSupport: URL = FileManager.default.homeDirectoryForCurrentUser
+public enum LinkitPaths {
+    public static let applicationSupport: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library", isDirectory: true)
         .appendingPathComponent("Application Support", isDirectory: true)
         .appendingPathComponent("Linkit", isDirectory: true)

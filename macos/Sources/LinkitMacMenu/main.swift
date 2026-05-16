@@ -2,10 +2,14 @@ import AppKit
 import CoreImage
 import LinkitMacCore
 
-final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
+final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var app: LinkitReceiverApp?
     private var statusItem: NSStatusItem?
     private var qrWindow: NSWindow?
+    private var diagnosticsWindow: NSWindow?
+    private var resetStatusWorkItem: DispatchWorkItem?
+    private var pairingPoller: DispatchSourceTimer?
+    private var lastTrustedSignature: String = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -29,42 +33,133 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
 
     private func setupMenu() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Linkit"
+        installDropTarget(on: item.button)
+        statusItem = item
+        refreshStatusButton()
+        refreshMenu()
+        startPairingPoller()
+    }
 
+    private func refreshStatusButton() {
+        guard let button = statusItem?.button else { return }
+        let trusted = app?.trustedDevices() ?? []
+        let symbolName = trusted.isEmpty ? "link.badge.plus" : "link.circle.fill"
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Linkit") {
+            image.isTemplate = trusted.isEmpty
+            button.image = image
+            button.imagePosition = .imageLeft
+        }
+        button.title = trusted.isEmpty ? "Linkit" : "Linkit (\(trusted.count))"
+    }
+
+    private func startPairingPoller() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in
+            self?.checkForTrustChanges()
+        }
+        timer.resume()
+        pairingPoller = timer
+    }
+
+    private func checkForTrustChanges() {
+        guard let app else { return }
+        let devices = app.trustedDevices()
+        let signature = devices.map { "\($0.deviceId)|\($0.deviceName)" }.joined(separator: ",")
+        if signature != lastTrustedSignature {
+            lastTrustedSignature = signature
+            refreshStatusButton()
+            refreshMenu()
+            if !devices.isEmpty && !signature.isEmpty {
+                announcePairing(devices.last)
+            }
+        }
+    }
+
+    private func announcePairing(_ device: TrustedDevice?) {
+        guard let device else { return }
+        showTransientStatus("Paired \(device.deviceName)")
+        if qrWindow?.isVisible == true {
+            qrWindow?.close()
+            qrWindow = nil
+        }
+    }
+
+    private func refreshMenu() {
+        guard let app else { return }
         let menu = NSMenu()
+        menu.delegate = self
+        menu.addItem(NSMenuItem(title: "Receiving on \(LocalNetwork.bestPrivateIPv4()):\(app.configuration.port)", action: nil, keyEquivalent: ""))
+        let trusted = app.trustedDevices()
+        if trusted.isEmpty {
+            let item = NSMenuItem(title: "No paired devices", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else {
+            let header = NSMenuItem(title: "Paired devices", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for device in trusted {
+                let label = "  • \(device.deviceName) (\(device.platform))"
+                let pairedItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+                pairedItem.isEnabled = false
+                menu.addItem(pairedItem)
+            }
+        }
+        let androidTargets = trusted.filter { $0.platform.lowercased() == "android" && $0.receivePort != nil && $0.lastKnownHost != nil }
+        menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: open Linkit on Android" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
+        menu.addItem(NSMenuItem(title: "Diagnostics", action: #selector(showDiagnostics), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Open Transfer Log", action: #selector(openTransferLog), keyEquivalent: "l"))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(recentTransfersMenuItem(app: app))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Refresh", action: #selector(refreshMenuAction), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Quit Linkit", action: #selector(quit), keyEquivalent: "q"))
-        item.menu = menu
-        statusItem = item
+        statusItem?.menu = menu
     }
 
     @objc private func showPairingQR() {
         guard let app else { return }
 
         let payload = app.pairingPayloadJSON()
-        let imageView = NSImageView(frame: NSRect(x: 30, y: 130, width: 320, height: 320))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 560))
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor(calibratedRed: 0.06, green: 0.07, blue: 0.08, alpha: 1).cgColor
+
+        let title = label("Linkit Pairing", frame: NSRect(x: 28, y: 510, width: 360, height: 26), size: 22, weight: .semibold)
+        title.textColor = .white
+
+        let subtitle = label("Scan this once. Transfers stay local and signed after pairing.", frame: NSRect(x: 28, y: 482, width: 380, height: 22), size: 13, weight: .regular)
+        subtitle.textColor = NSColor(calibratedWhite: 0.72, alpha: 1)
+
+        let qrPanel = NSView(frame: NSRect(x: 60, y: 165, width: 320, height: 320))
+        qrPanel.wantsLayer = true
+        qrPanel.layer?.backgroundColor = NSColor.white.cgColor
+        qrPanel.layer?.cornerRadius = 10
+
+        let imageView = NSImageView(frame: NSRect(x: 18, y: 18, width: 284, height: 284))
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.image = qrImage(from: payload, size: 320)
+        imageView.image = qrImage(from: payload, size: 284)
+        qrPanel.addSubview(imageView)
 
-        let title = NSTextField(labelWithString: "Scan with Linkit on Android")
-        title.font = .systemFont(ofSize: 18, weight: .semibold)
-        title.frame = NSRect(x: 24, y: 465, width: 360, height: 24)
-
-        let ip = LocalNetwork.bestPrivateIPv4()
-        let details = NSTextField(labelWithString: "IP \(ip)  Port \(app.configuration.port)")
-        details.frame = NSRect(x: 24, y: 438, width: 360, height: 20)
+        let details = label("IP \(LocalNetwork.bestPrivateIPv4())  Port \(app.configuration.port)", frame: NSRect(x: 28, y: 130, width: 380, height: 20), size: 13, weight: .medium)
+        details.textColor = NSColor(calibratedRed: 0.45, green: 0.90, blue: 0.70, alpha: 1)
 
         let payloadField = NSTextField(wrappingLabelWithString: payload)
-        payloadField.frame = NSRect(x: 24, y: 20, width: 360, height: 96)
+        payloadField.frame = NSRect(x: 28, y: 24, width: 384, height: 86)
         payloadField.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        payloadField.textColor = NSColor(calibratedWhite: 0.78, alpha: 1)
+        payloadField.backgroundColor = .clear
+        payloadField.isBordered = false
+        payloadField.isSelectable = true
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 408, height: 510))
         content.addSubview(title)
+        content.addSubview(subtitle)
         content.addSubview(details)
-        content.addSubview(imageView)
+        content.addSubview(qrPanel)
         content.addSubview(payloadField)
 
         let window = NSWindow(
@@ -91,8 +186,123 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(app.logFile)
     }
 
+    @objc private func showDiagnostics() {
+        guard let app else { return }
+
+        let trustedCount = app.trustedDevices().count
+        let recent = app.recentTransfers(limit: 5)
+        let body = [
+            "Status: receiving",
+            "IP: \(LocalNetwork.bestPrivateIPv4())",
+            "Port: \(app.configuration.port)",
+            "Drop: \(app.dropFolder.path)",
+            "Trusted devices: \(trustedCount)",
+            "Recent transfers: \(recent.count)",
+            "Log: \(app.logFile.path)"
+        ].joined(separator: "\n")
+
+        let text = NSTextField(wrappingLabelWithString: body)
+        text.frame = NSRect(x: 24, y: 24, width: 420, height: 180)
+        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        text.isSelectable = true
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 468, height: 228))
+        content.addSubview(text)
+
+        let window = NSWindow(contentRect: content.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Linkit Diagnostics"
+        window.center()
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        diagnosticsWindow = window
+    }
+
+    @objc private func openRecentTransfer(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    @objc private func refreshMenuAction() {
+        refreshMenu()
+    }
+
     @objc private func quit() {
+        pairingPoller?.cancel()
+        pairingPoller = nil
         NSApp.terminate(nil)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        checkForTrustChanges()
+        refreshMenu()
+    }
+
+    private func installDropTarget(on button: NSStatusBarButton?) {
+        guard let button else { return }
+        let dropView = StatusDropView(frame: button.bounds)
+        dropView.autoresizingMask = [.width, .height]
+        dropView.button = button
+        dropView.onDrop = { [weak self] urls in
+            self?.sendDroppedFiles(urls)
+        }
+        button.addSubview(dropView)
+    }
+
+    private func sendDroppedFiles(_ urls: [URL]) {
+        guard let app else { return }
+        showTransientStatus("Sending...")
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let results = try app.sendFilesToFirstAndroid(urls)
+                DispatchQueue.main.async {
+                    self.showTransientStatus("Sent \(results.count)")
+                    self.refreshMenu()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showTransientStatus("Linkit")
+                    self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                    self.refreshMenu()
+                }
+            }
+        }
+    }
+
+    private func showTransientStatus(_ title: String) {
+        resetStatusWorkItem?.cancel()
+        statusItem?.button?.title = title
+        guard title != "Linkit" else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.statusItem?.button?.title = "Linkit"
+        }
+        resetStatusWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+    }
+
+    private func recentTransfersMenuItem(app: LinkitReceiverApp) -> NSMenuItem {
+        let item = NSMenuItem(title: "Recent Transfers", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let entries = app.recentTransfers(limit: 8)
+        if entries.isEmpty {
+            submenu.addItem(NSMenuItem(title: "No transfers yet", action: nil, keyEquivalent: ""))
+        } else {
+            for entry in entries {
+                let title = "\(entry.filename)  \(entry.status)"
+                let recentItem = NSMenuItem(title: title, action: entry.savedPath == nil ? nil : #selector(openRecentTransfer(_:)), keyEquivalent: "")
+                recentItem.representedObject = entry.savedPath
+                submenu.addItem(recentItem)
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    private func label(_ text: String, frame: NSRect, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.frame = frame
+        field.font = .systemFont(ofSize: size, weight: weight)
+        return field
     }
 
     private func qrImage(from text: String, size: CGFloat) -> NSImage? {
@@ -121,6 +331,53 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .critical
         alert.runModal()
         NSApp.terminate(nil)
+    }
+
+    private func showNonFatalError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Linkit"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+}
+
+final class StatusDropView: NSView {
+    weak var button: NSStatusBarButton?
+    var onDrop: (([URL]) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        button?.performClick(nil)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        fileURLs(from: sender).isEmpty ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = fileURLs(from: sender)
+        guard !urls.isEmpty else { return false }
+        onDrop?(urls)
+        return true
+    }
+
+    private func fileURLs(from sender: NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let objects = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) ?? []
+        return objects.compactMap { object in
+            if let url = object as? URL { return url }
+            return (object as? NSURL)?.absoluteURL
+        }
     }
 }
 

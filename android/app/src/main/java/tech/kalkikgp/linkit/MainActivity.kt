@@ -12,32 +12,45 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -46,7 +59,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
@@ -56,17 +68,45 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.time.Instant
 import kotlin.math.max
 import kotlin.math.roundToLong
 
 class MainActivity : ComponentActivity() {
+    private val linkitViewModel: LinkitViewModel by viewModels()
+
+    private val notificationPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { /* user choice respected; service still runs */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        linkitViewModel.consumeShareIntent(intent)
+        requestNotificationPermissionIfNeeded()
+        if (IdentityStore(applicationContext).trustedMac() != null) {
+            LinkitReceiverService.start(applicationContext)
+        }
         setContent {
             LinkitTheme {
-                LinkitScreen()
+                LinkitScreen(linkitViewModel)
             }
         }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        linkitViewModel.consumeShareIntent(intent)
     }
 }
 
@@ -82,6 +122,9 @@ data class LinkitUiState(
     val totalBytes: Long = 0,
     val speedBytesPerSecond: Double = 0.0,
     val etaSeconds: Long? = null,
+    val currentFileName: String? = null,
+    val androidReceiverStatus: String = "Mac drops starting",
+    val lastAndroidDropPath: String? = null,
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
@@ -104,6 +147,15 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private var sendJob: Job? = null
     private var startedAtMillis: Long = 0
+
+    init {
+        identityStore.trustedMac()?.let(::registerAndroidReceiver)
+    }
+
+    override fun onCleared() {
+        discovery.stop()
+        super.onCleared()
+    }
 
     fun setMacIp(value: String) {
         _uiState.update { it.copy(macIp = value, error = null, tokenRejected = false) }
@@ -128,11 +180,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     pickedFiles = files,
-                    status = "Ready",
+                    status = if (files.size == 1) "Ready to send" else "Ready to send ${files.size} files",
                     error = null,
                     savedPath = null,
                     bytesSent = 0,
-                    totalBytes = files.sumOf { file -> file.size }
+                    totalBytes = files.sumOf { file -> file.size },
+                    currentFileName = null
                 )
             }
         }.onFailure { error ->
@@ -197,7 +250,14 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun forgetMac() {
         identityStore.forgetTrustedMac()
-        _uiState.update { it.copy(trustedMac = null, status = "Pair with Mac", savedPath = null) }
+        _uiState.update {
+            it.copy(
+                trustedMac = null,
+                status = "Pair with Mac",
+                savedPath = null,
+                androidReceiverStatus = "Pair with Mac to receive drops"
+            )
+        }
     }
 
     fun discoverMac() {
@@ -216,15 +276,38 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun pair(payload: MacPairingPayload) {
         if (_uiState.value.isPairing) return
+        val ip = PrivateLanTarget.validateIp(payload.ip).getOrElse { error ->
+            _uiState.update { it.copy(status = "Pairing failed", error = error.message) }
+            return
+        }
+        val port = PrivateLanTarget.validatePort(payload.port.toString()).getOrElse { error ->
+            _uiState.update { it.copy(status = "Pairing failed", error = error.message) }
+            return
+        }
+        val expiresAt = payload.pairingTokenExpiresAt?.let { raw ->
+            runCatching { Instant.parse(raw) }.getOrElse {
+                _uiState.update { it.copy(status = "Pairing failed", error = "Pairing QR has an invalid expiry") }
+                return
+            }
+        }
+        if (expiresAt != null && Instant.now().isAfter(expiresAt)) {
+            _uiState.update {
+                it.copy(status = "Pairing expired", error = "Refresh the QR on your Mac and scan again", tokenRejected = true)
+            }
+            return
+        }
+        val validatedPayload = payload.copy(ip = ip, port = port)
+
         viewModelScope.launch {
             _uiState.update { it.copy(isPairing = true, status = "Pairing", error = null, tokenRejected = false) }
             try {
                 val mac = client.pair(
-                    baseUrl = PrivateLanTarget.baseUrl(payload.ip, payload.port),
-                    payload = payload,
+                    baseUrl = PrivateLanTarget.baseUrl(validatedPayload.ip, validatedPayload.port),
+                    payload = validatedPayload,
                     identity = identityStore.identity()
                 )
                 identityStore.saveTrustedMac(mac)
+                registerAndroidReceiver(mac)
                 _uiState.update {
                     it.copy(
                         trustedMac = mac,
@@ -285,7 +368,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     bytesSent = 0,
                     totalBytes = files.sumOf { file -> file.size },
                     speedBytesPerSecond = 0.0,
-                    etaSeconds = null
+                    etaSeconds = null,
+                    currentFileName = null
                 )
             }
 
@@ -293,6 +377,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 var completedBytes = 0L
                 var lastSavedPath: String? = null
                 for ((index, file) in files.withIndex()) {
+                    _uiState.update {
+                        it.copy(
+                            currentFileName = file.name,
+                            status = if (files.size > 1) "Sending ${index + 1}/${files.size}" else "Sending"
+                        )
+                    }
                     val result = client.sendFile(
                         contentResolver = getApplication<Application>().contentResolver,
                         mac = mac,
@@ -318,12 +408,13 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         bytesSent = completedBytes,
                         totalBytes = completedBytes,
                         error = null,
-                        etaSeconds = 0
+                        etaSeconds = 0,
+                        currentFileName = null
                     )
                 }
             } catch (cancelled: CancellationException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Canceled", error = null, etaSeconds = null)
+                    it.copy(isSending = false, status = "Canceled", error = null, etaSeconds = null, currentFileName = null)
                 }
             } catch (tokenError: TokenRejectedException) {
                 _uiState.update {
@@ -332,20 +423,21 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         status = "Token rejected",
                         error = tokenError.message,
                         tokenRejected = true,
-                        etaSeconds = null
+                        etaSeconds = null,
+                        currentFileName = null
                     )
                 }
             } catch (http: LinkitHttpException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Failed", error = http.message, etaSeconds = null)
+                    it.copy(isSending = false, status = "Failed", error = http.message, etaSeconds = null, currentFileName = null)
                 }
             } catch (io: IOException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Network failed", error = io.message, etaSeconds = null)
+                    it.copy(isSending = false, status = "Network failed", error = io.message, etaSeconds = null, currentFileName = null)
                 }
             } catch (error: Throwable) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Failed", error = error.message, etaSeconds = null)
+                    it.copy(isSending = false, status = "Failed", error = error.message, etaSeconds = null, currentFileName = null)
                 }
             } finally {
                 sendJob = null
@@ -355,6 +447,32 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cancelActive() {
         sendJob?.cancel()
+    }
+
+    private fun registerAndroidReceiver(mac: TrustedMac) {
+        LinkitReceiverService.start(getApplication())
+        viewModelScope.launch {
+            runCatching {
+                client.registerReceiver(mac, identityStore, AndroidDropReceiver.PORT)
+            }.onSuccess {
+                _uiState.update { state ->
+                    state.copy(androidReceiverStatus = "Mac drops enabled")
+                }
+            }.onFailure { error ->
+                _uiState.update { state ->
+                    state.copy(androidReceiverStatus = "Open Linkit on Mac to enable drops: ${error.message}")
+                }
+            }
+        }
+    }
+
+    private fun handleDropEvent(event: AndroidDropEvent) {
+        _uiState.update {
+            it.copy(
+                androidReceiverStatus = event.error ?: event.status,
+                lastAndroidDropPath = event.savedPath ?: it.lastAndroidDropPath
+            )
+        }
     }
 
     private fun updateProgress(sent: Long, total: Long, fileNumber: Int = 1, fileCount: Int = 1) {
@@ -393,12 +511,9 @@ private fun Intent.streamUris(): List<Uri> {
 }
 
 @Composable
-private fun LinkitScreen(viewModel: LinkitViewModel = viewModel()) {
+private fun LinkitScreen(viewModel: LinkitViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    LaunchedEffect(Unit) {
-        viewModel.consumeShareIntent((context as? ComponentActivity)?.intent)
-    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             runCatching {
@@ -420,102 +535,105 @@ private fun LinkitScreen(viewModel: LinkitViewModel = viewModel()) {
         viewModel.cancelActive()
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(modifier = Modifier.fillMaxSize(), color = WorkbenchColors.Ink) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("Linkit", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+            Header(state)
 
-            state.trustedMac?.let { mac ->
-                Text("Paired: ${mac.deviceName}", style = MaterialTheme.typography.bodyMedium)
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = state.macIp,
-                    onValueChange = viewModel::setMacIp,
-                    label = { Text("Mac IP") },
-                    singleLine = true,
-                    enabled = !state.isSending,
-                    modifier = Modifier.weight(1f)
+            Section("Target") {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    LinkitTextField(
+                        value = state.macIp,
+                        onValueChange = viewModel::setMacIp,
+                        label = "Mac IP",
+                        enabled = !state.isSending,
+                        modifier = Modifier.weight(1f)
+                    )
+                    LinkitTextField(
+                        value = state.port,
+                        onValueChange = viewModel::setPort,
+                        label = "Port",
+                        enabled = !state.isSending,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(0.55f)
+                    )
+                }
+                LinkitTextField(
+                    value = state.pairingToken,
+                    onValueChange = viewModel::setPairingToken,
+                    label = "Pairing token",
+                    enabled = !state.isSending && !state.isPairing,
+                    isError = state.tokenRejected,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
-                    value = state.port,
-                    onValueChange = viewModel::setPort,
-                    label = { Text("Port") },
-                    singleLine = true,
-                    enabled = !state.isSending,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.weight(0.55f)
-                )
-            }
-
-            OutlinedTextField(
-                value = state.pairingToken,
-                onValueChange = viewModel::setPairingToken,
-                label = { Text("Pairing token") },
-                singleLine = true,
-                enabled = !state.isSending && !state.isPairing,
-                isError = state.tokenRejected,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        qrScanner.launch(
-                            ScanOptions()
-                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                .setPrompt("Scan Linkit pairing QR")
-                                .setBeepEnabled(false)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    SecondaryButton(
+                        text = "Scan QR",
+                        onClick = {
+                            qrScanner.launch(
+                                ScanOptions()
+                                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                    .setPrompt("Scan Linkit pairing QR")
+                                    .setBeepEnabled(false)
+                                    .setCaptureActivity(PortraitCaptureActivity::class.java)
+                                    .setOrientationLocked(false)
+                            )
+                        },
+                        enabled = !state.isSending && !state.isPairing,
+                        modifier = Modifier.weight(1f)
+                    )
+                    SecondaryButton(
+                        text = "Discover",
+                        onClick = viewModel::discoverMac,
+                        enabled = !state.isSending && !state.isPairing,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    PrimaryButton(
+                        text = if (state.isPairing) "Pairing" else "Pair",
+                        onClick = viewModel::pairManual,
+                        enabled = !state.isSending && !state.isPairing,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (state.trustedMac != null) {
+                        SecondaryButton(
+                            text = "Forget",
+                            onClick = viewModel::forgetMac,
+                            enabled = !state.isSending,
+                            modifier = Modifier.weight(1f)
                         )
-                    },
-                    enabled = !state.isSending && !state.isPairing
-                ) {
-                    Text("Scan QR")
-                }
-                OutlinedButton(
-                    onClick = viewModel::discoverMac,
-                    enabled = !state.isSending && !state.isPairing
-                ) {
-                    Text("Discover")
-                }
-                Button(
-                    onClick = viewModel::pairManual,
-                    enabled = !state.isSending && !state.isPairing
-                ) {
-                    Text(if (state.isPairing) "Pairing" else "Pair")
-                }
-                if (state.trustedMac != null) {
-                    OutlinedButton(onClick = viewModel::forgetMac, enabled = !state.isSending) {
-                        Text("Forget")
                     }
                 }
             }
 
-            FileCard(state)
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = { picker.launch(arrayOf("*/*")) },
-                    enabled = !state.isSending
-                ) {
-                    Text("Pick file")
-                }
-                Button(
-                    onClick = viewModel::send,
-                    enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.trustedMac != null
-                ) {
-                    Text("Send")
-                }
-                if (state.isSending) {
-                    OutlinedButton(onClick = viewModel::cancelActive) {
-                        Text("Cancel")
+            Section("Payload") {
+                FileCard(state)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    SecondaryButton(
+                        text = "Pick file",
+                        onClick = { picker.launch(arrayOf("*/*")) },
+                        enabled = !state.isSending,
+                        modifier = Modifier.weight(1f)
+                    )
+                    PrimaryButton(
+                        text = "Send",
+                        onClick = viewModel::send,
+                        enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.trustedMac != null,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (state.isSending) {
+                        SecondaryButton(
+                            text = "Cancel",
+                            onClick = viewModel::cancelActive,
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
             }
@@ -526,12 +644,176 @@ private fun LinkitScreen(viewModel: LinkitViewModel = viewModel()) {
 }
 
 @Composable
+private fun Header(state: LinkitUiState) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(WorkbenchColors.PanelLift)
+            ) {
+                Image(
+                    painter = painterResource(R.mipmap.ic_launcher),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Linkit", color = WorkbenchColors.Paper, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                Text("Local signed drop", color = WorkbenchColors.Muted, style = MaterialTheme.typography.bodyMedium)
+            }
+            StatusPill(state)
+        }
+        state.trustedMac?.let { mac ->
+            Text(
+                text = "Paired with ${mac.deviceName}",
+                color = WorkbenchColors.Signal,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            text = state.androidReceiverStatus,
+            color = WorkbenchColors.Muted,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        state.lastAndroidDropPath?.let {
+            Text(
+                text = it,
+                color = WorkbenchColors.Signal,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(state: LinkitUiState) {
+    val color = when {
+        state.error != null -> WorkbenchColors.Error
+        state.isSending || state.isPairing -> WorkbenchColors.Warning
+        state.trustedMac != null -> WorkbenchColors.Signal
+        else -> WorkbenchColors.Muted
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .border(1.dp, color, RoundedCornerShape(999.dp))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(999.dp)).background(color))
+        Text(state.status, color = color, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+    }
+}
+
+@Composable
+private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Text(
+            title.uppercase(),
+            color = WorkbenchColors.Muted,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(WorkbenchColors.Panel)
+                .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(8.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            content = content
+        )
+    }
+}
+
+@Composable
+private fun LinkitTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    isError: Boolean = false,
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        enabled = enabled,
+        isError = isError,
+        visualTransformation = visualTransformation,
+        keyboardOptions = keyboardOptions,
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = WorkbenchColors.Paper,
+            unfocusedTextColor = WorkbenchColors.Paper,
+            focusedLabelColor = WorkbenchColors.Signal,
+            unfocusedLabelColor = WorkbenchColors.Muted,
+            focusedBorderColor = WorkbenchColors.Signal,
+            unfocusedBorderColor = WorkbenchColors.Line,
+            cursorColor = WorkbenchColors.Signal,
+            disabledTextColor = WorkbenchColors.Muted,
+            disabledLabelColor = WorkbenchColors.Muted
+        ),
+        shape = RoundedCornerShape(7.dp),
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun PrimaryButton(text: String, onClick: () -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(7.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = WorkbenchColors.Signal,
+            contentColor = WorkbenchColors.Ink,
+            disabledContainerColor = WorkbenchColors.Line,
+            disabledContentColor = WorkbenchColors.Muted
+        ),
+        modifier = modifier
+    ) {
+        Text(text, maxLines = 1)
+    }
+}
+
+@Composable
+private fun SecondaryButton(text: String, onClick: () -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(7.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = WorkbenchColors.Paper,
+            disabledContentColor = WorkbenchColors.Muted
+        ),
+        modifier = modifier
+    ) {
+        Text(text, maxLines = 1)
+    }
+}
+
+@Composable
 private fun FileCard(state: LinkitUiState) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape = RoundedCornerShape(7.dp),
+        colors = CardDefaults.cardColors(containerColor = WorkbenchColors.PanelLift),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             val file = state.pickedFiles.firstOrNull()
             Text(
                 text = when {
@@ -539,7 +821,9 @@ private fun FileCard(state: LinkitUiState) {
                     state.pickedFiles.size == 1 -> file?.name.orEmpty()
                     else -> "${state.pickedFiles.size} files selected"
                 },
+                color = WorkbenchColors.Paper,
                 style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -551,8 +835,17 @@ private fun FileCard(state: LinkitUiState) {
                         formatBytes(state.pickedFiles.sumOf { it.size })
                     },
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = WorkbenchColors.Muted
                 )
+                if (state.pickedFiles.size > 1) {
+                    Text(
+                        text = state.pickedFiles.take(3).joinToString("  /  ") { it.name },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WorkbenchColors.Muted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
@@ -560,16 +853,41 @@ private fun FileCard(state: LinkitUiState) {
 
 @Composable
 private fun TransferStatus(state: LinkitUiState) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        Text(state.status, style = MaterialTheme.typography.titleMedium)
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(WorkbenchColors.Panel)
+            .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(8.dp))
+            .padding(12.dp)
+    ) {
+        Text(state.status, color = WorkbenchColors.Paper, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
 
         if (state.isSending || state.bytesSent > 0) {
+            state.currentFileName?.let {
+                Text(
+                    text = it,
+                    color = WorkbenchColors.Muted,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             val progress = if (state.totalBytes > 0) {
                 (state.bytesSent.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f)
             } else {
                 0f
             }
-            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            LinearProgressIndicator(
+                progress = { progress },
+                color = WorkbenchColors.Signal,
+                trackColor = WorkbenchColors.Line,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(999.dp))
+            )
             Text(
                 text = buildString {
                     append("${formatBytes(state.bytesSent)} / ${formatBytes(state.totalBytes)}")
@@ -578,6 +896,7 @@ private fun TransferStatus(state: LinkitUiState) {
                     }
                     state.etaSeconds?.let { append("  ${formatEta(it)}") }
                 },
+                color = WorkbenchColors.Muted,
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -586,14 +905,14 @@ private fun TransferStatus(state: LinkitUiState) {
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
+                color = WorkbenchColors.Signal,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
         }
 
         state.error?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            Text(it, color = WorkbenchColors.Error, style = MaterialTheme.typography.bodyMedium)
         }
 
         Spacer(modifier = Modifier.height(1.dp))
@@ -604,12 +923,27 @@ private fun TransferStatus(state: LinkitUiState) {
 private fun LinkitTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = lightColorScheme(
-            primary = androidx.compose.ui.graphics.Color(0xFF2563EB),
-            secondary = androidx.compose.ui.graphics.Color(0xFF0F766E),
-            surfaceVariant = androidx.compose.ui.graphics.Color(0xFFEFF3F8)
+            primary = WorkbenchColors.Signal,
+            secondary = WorkbenchColors.Warning,
+            background = WorkbenchColors.Ink,
+            surface = WorkbenchColors.Panel,
+            surfaceVariant = WorkbenchColors.PanelLift,
+            error = WorkbenchColors.Error
         ),
         content = content
     )
+}
+
+private object WorkbenchColors {
+    val Ink = Color(0xFF101214)
+    val Panel = Color(0xFF171A1D)
+    val PanelLift = Color(0xFF20252A)
+    val Line = Color(0xFF343A40)
+    val Paper = Color(0xFFEFF3F0)
+    val Muted = Color(0xFF9BA7A1)
+    val Signal = Color(0xFF79F2B0)
+    val Warning = Color(0xFFF2C879)
+    val Error = Color(0xFFFF6B6B)
 }
 
 @Composable
