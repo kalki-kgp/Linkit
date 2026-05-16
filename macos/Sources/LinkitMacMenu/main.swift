@@ -2,12 +2,14 @@ import AppKit
 import CoreImage
 import LinkitMacCore
 
-final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
+final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var app: LinkitReceiverApp?
     private var statusItem: NSStatusItem?
     private var qrWindow: NSWindow?
     private var diagnosticsWindow: NSWindow?
     private var resetStatusWorkItem: DispatchWorkItem?
+    private var pairingPoller: DispatchSourceTimer?
+    private var lastTrustedSignature: String = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -31,17 +33,80 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
 
     private func setupMenu() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Linkit"
         installDropTarget(on: item.button)
         statusItem = item
+        refreshStatusButton()
         refreshMenu()
+        startPairingPoller()
+    }
+
+    private func refreshStatusButton() {
+        guard let button = statusItem?.button else { return }
+        let trusted = app?.trustedDevices() ?? []
+        let symbolName = trusted.isEmpty ? "link.badge.plus" : "link.circle.fill"
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Linkit") {
+            image.isTemplate = trusted.isEmpty
+            button.image = image
+            button.imagePosition = .imageLeft
+        }
+        button.title = trusted.isEmpty ? "Linkit" : "Linkit (\(trusted.count))"
+    }
+
+    private func startPairingPoller() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in
+            self?.checkForTrustChanges()
+        }
+        timer.resume()
+        pairingPoller = timer
+    }
+
+    private func checkForTrustChanges() {
+        guard let app else { return }
+        let devices = app.trustedDevices()
+        let signature = devices.map { "\($0.deviceId)|\($0.deviceName)" }.joined(separator: ",")
+        if signature != lastTrustedSignature {
+            lastTrustedSignature = signature
+            refreshStatusButton()
+            refreshMenu()
+            if !devices.isEmpty && !signature.isEmpty {
+                announcePairing(devices.last)
+            }
+        }
+    }
+
+    private func announcePairing(_ device: TrustedDevice?) {
+        guard let device else { return }
+        showTransientStatus("Paired \(device.deviceName)")
+        if qrWindow?.isVisible == true {
+            qrWindow?.close()
+            qrWindow = nil
+        }
     }
 
     private func refreshMenu() {
         guard let app else { return }
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(NSMenuItem(title: "Receiving on \(LocalNetwork.bestPrivateIPv4()):\(app.configuration.port)", action: nil, keyEquivalent: ""))
-        let androidTargets = app.trustedDevices().filter { $0.platform.lowercased() == "android" && $0.receivePort != nil && $0.lastKnownHost != nil }
+        let trusted = app.trustedDevices()
+        if trusted.isEmpty {
+            let item = NSMenuItem(title: "No paired devices", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else {
+            let header = NSMenuItem(title: "Paired devices", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for device in trusted {
+                let label = "  • \(device.deviceName) (\(device.platform))"
+                let pairedItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+                pairedItem.isEnabled = false
+                menu.addItem(pairedItem)
+            }
+        }
+        let androidTargets = trusted.filter { $0.platform.lowercased() == "android" && $0.receivePort != nil && $0.lastKnownHost != nil }
         menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: open Linkit on Android" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
@@ -163,7 +228,14 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
+        pairingPoller?.cancel()
+        pairingPoller = nil
         NSApp.terminate(nil)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        checkForTrustChanges()
+        refreshMenu()
     }
 
     private func installDropTarget(on button: NSStatusBarButton?) {

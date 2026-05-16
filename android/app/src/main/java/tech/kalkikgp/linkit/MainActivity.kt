@@ -75,12 +75,30 @@ import kotlin.math.roundToLong
 class MainActivity : ComponentActivity() {
     private val linkitViewModel: LinkitViewModel by viewModels()
 
+    private val notificationPermission = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { /* user choice respected; service still runs */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         linkitViewModel.consumeShareIntent(intent)
+        requestNotificationPermissionIfNeeded()
+        if (IdentityStore(applicationContext).trustedMac() != null) {
+            LinkitReceiverService.start(applicationContext)
+        }
         setContent {
             LinkitTheme {
                 LinkitScreen(linkitViewModel)
+            }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             }
         }
     }
@@ -117,7 +135,6 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private val client = LinkitClient()
     private val identityStore = IdentityStore(application)
     private val discovery = BonjourDiscovery(application)
-    private val dropReceiver = AndroidDropReceiver(application, identityStore, ::handleDropEvent)
     private val _uiState = MutableStateFlow(
         LinkitUiState(
             trustedMac = identityStore.trustedMac(),
@@ -132,12 +149,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private var startedAtMillis: Long = 0
 
     init {
-        dropReceiver.start()
         identityStore.trustedMac()?.let(::registerAndroidReceiver)
     }
 
     override fun onCleared() {
-        dropReceiver.stop()
         discovery.stop()
         super.onCleared()
     }
@@ -435,6 +450,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun registerAndroidReceiver(mac: TrustedMac) {
+        LinkitReceiverService.start(getApplication())
         viewModelScope.launch {
             runCatching {
                 client.registerReceiver(mac, identityStore, AndroidDropReceiver.PORT)
@@ -565,6 +581,8 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                                     .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                                     .setPrompt("Scan Linkit pairing QR")
                                     .setBeepEnabled(false)
+                                    .setCaptureActivity(PortraitCaptureActivity::class.java)
+                                    .setOrientationLocked(false)
                             )
                         },
                         enabled = !state.isSending && !state.isPairing,

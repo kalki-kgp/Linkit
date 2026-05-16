@@ -1,108 +1,101 @@
 # Linkit
 
-Native Android-to-macOS local file transfer.
+**Drop files between your Android phone and your Mac. Locally. Instantly. No cloud.**
 
-MVP is runnable:
+Linkit is a small, private file-transfer link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar.
 
-1. Start the macOS menu-bar receiver:
+No accounts. No upload to a server. No 25 MB email limit. No "your file is too large for AirDrop." Just your phone and your Mac talking directly over your local network.
 
-```sh
-cd macos
-swift run LinkitMacMenu
-```
+---
 
-Or run the terminal receiver:
+## Why Linkit exists
 
-```sh
-cd macos
-swift run LinkitMacReceiver
-```
+Moving a file from an Android phone to a Mac is annoyingly bad in 2026:
 
-2. Use `Show Pairing QR` from the menu bar, or copy the terminal pairing payload/token.
-3. Install/open the Android debug app:
+- **AirDrop** doesn't exist for Android.
+- **Google Drive** is a round trip through a data center for two devices sitting next to each other.
+- **Email / WhatsApp** silently recompresses photos and caps you at tiny sizes.
+- **USB cable** works, sort of, until macOS decides it doesn't.
+- **Nearby Share** wants both devices on Google's terms.
 
-```sh
-cd android
-./gradlew installDebug
-```
+If you live in both ecosystems — Android in your pocket, Mac on your desk — none of this is acceptable. Linkit fixes that.
 
-4. In Android, scan the QR or enter Mac private LAN IP, port `52718`, and pairing token.
-5. Pick files or share from Android Files/Photos/WhatsApp into Linkit.
+---
 
-Reverse drop from Mac to Android:
+## What it does
 
-1. Keep Linkit open on the already-paired Android device.
-2. Open the macOS menu-bar app.
-3. Drag one or more regular files onto the `Linkit` menu-bar item.
+**Phone → Mac**
+- Pick a file (or 50) in the Linkit app and send.
+- Tap **Share** in any Android app — Files, Gallery, WhatsApp, Chrome — and pick Linkit.
+- Files land in `~/Downloads/Linkit Drop` on your Mac, with the original filename and bytes intact.
 
-Android saves Mac-dropped files into `Downloads/Linkit Drop` on modern Android.
+**Mac → Phone**
+- Drag files onto the Linkit icon in your menu bar.
+- They land in `Downloads/Linkit Drop` on your phone, even if the Linkit app is closed.
 
-The receiver saves verified files into:
+**Same flow, either direction. That's it.**
 
-```txt
-~/Downloads/Linkit Drop
-```
+---
 
-Temp uploads stay inside:
+## Design principles
 
-```txt
-~/Downloads/Linkit Drop/.tmp
-```
+**Local.** Transfers happen over your Wi-Fi or hotspot. Your files do not leave the room.
 
-Debug log:
+**Fast.** Native Swift on the Mac, native Kotlin on Android. No Electron, no React Native, no JavaScript bridge. Linkit moves a 1 GB file at the speed of your LAN.
 
-```txt
-~/Library/Logs/Linkit/transfer.log
-```
+**Verified.** Every file is hashed end-to-end while it streams. If a single byte is off, the transfer fails loudly instead of silently writing a corrupt file.
 
-Recent transfer history:
+**Private.** Devices pair once with a QR code. Every request after that is signed by a key that never leaves the device. An unknown phone on your network cannot send anything.
 
-```txt
-~/Library/Application Support/Linkit/transfer-history.json
-```
+**Quiet.** Linkit lives in your menu bar on Mac and a single silent notification on Android. It doesn't ping you. It doesn't ask for reviews. It does its job.
 
-## Verification
+---
 
-```sh
-./scripts/verify.sh
-```
+## How pairing works
 
-Smoke the signed pairing/transfer path without a phone:
+The Mac shows a QR code. The phone scans it. Done.
 
-```sh
-./scripts/smoke-signed-transfer.sh
-```
+Behind the scenes:
+- Each device generates its own private signing key the first time it runs.
+- Pairing exchanges public keys over the local network with a short-lived token.
+- After that, both sides remember each other forever — close the apps, reboot, switch Wi-Fi networks, it still works.
+- Forget the device and pairing is gone instantly.
 
-## Local Packaging
+You can pair on home Wi-Fi, office Wi-Fi, a coffee shop hotspot, or your phone's own hotspot. Anywhere both devices can see each other.
 
-Build a local menu-bar app bundle:
+---
 
-```sh
-./scripts/build-macos-app.sh
-open dist/Linkit.app
-```
+## What's in the box
 
-Install the macOS app bundle into `/Applications`:
+**macOS app** — menu bar app. Click for paired devices, pairing QR, recent transfers, drop folder, and diagnostics. The icon changes when you're paired so you always know the state at a glance.
 
-```sh
-./scripts/install-macos-app.sh
-open /Applications/Linkit.app
-```
+**Android app** — Compose UI. Send tab for picking files, Share-sheet integration so it appears anywhere you tap Share, and a quiet background receiver so the Mac can push files at any time.
 
-Install the Android debug build:
+---
 
-```sh
-./scripts/install-android-debug.sh
-```
+## What's out of scope (for now)
 
-Protocol details:
+Linkit is deliberately one thing done well. These are not in the MVP:
 
-- [`protocol/phase0.md`](protocol/phase0.md)
-- [`protocol/phase1.md`](protocol/phase1.md)
-- [`protocol/mvp.md`](protocol/mvp.md)
+- Clipboard sync
+- Folder sync
+- Resumable / chunked transfers
+- Sending to multiple devices at once
+- Remote transfers over the internet
+- iPhone / Linux / Windows
 
-The Phase 1 receiver also advertises `_linkit._tcp.local.`:
+Some of these may come later. The first version is about making one phone and one Mac feel like the same machine for file transfer.
 
-```sh
-dns-sd -B _linkit._tcp local
-```
+---
+
+## Status
+
+This is a private MVP for personal use. It is not on the Play Store or in a notarized macOS installer yet.
+
+For local setup, sideloading, scripts, and protocol details, see [`docs/SETUP.md`](docs/SETUP.md).
+
+---
+
+## License & contact
+
+Built by Krishna ([@kalkikgp](https://kalkikgp.tech)). Private project — no public distribution yet.
