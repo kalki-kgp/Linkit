@@ -11,9 +11,15 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class LinkitReceiverService : Service() {
     private var receiver: AndroidDropReceiver? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
@@ -29,7 +35,13 @@ class LinkitReceiverService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            serviceScope.launch {
+                val identityStore = IdentityStore(applicationContext)
+                identityStore.trustedMac()?.let { mac ->
+                    runCatching { LinkitClient().disconnect(mac, identityStore) }
+                }
+                stopSelf()
+            }
             return START_NOT_STICKY
         }
         return START_STICKY
@@ -38,6 +50,7 @@ class LinkitReceiverService : Service() {
     override fun onDestroy() {
         receiver?.stop()
         receiver = null
+        serviceScope.cancel()
         super.onDestroy()
     }
 

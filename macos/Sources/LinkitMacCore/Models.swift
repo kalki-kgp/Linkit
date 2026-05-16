@@ -182,6 +182,17 @@ public struct DeviceUpdateRequest: Codable {
     public let receivePort: UInt16
 }
 
+public struct DeviceConnectionResponse: Codable, Equatable {
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let status: String
+    public let host: String?
+    public let receivePort: UInt16?
+    public let connectedAt: String?
+    public let lastSeenAt: String?
+}
+
 struct TransferRecord {
     let id: String
     let fileIndex: Int

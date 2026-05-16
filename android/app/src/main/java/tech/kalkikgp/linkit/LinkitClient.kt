@@ -106,6 +106,18 @@ class LinkitClient(
         executeJson(request)
     }
 
+    suspend fun disconnect(mac: TrustedMac, identityStore: IdentityStore) {
+        val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
+        val request = signedRequest(
+            identityStore = identityStore,
+            method = "DELETE",
+            url = "$baseUrl/v1/devices/self",
+            path = "/v1/devices/self",
+            body = ""
+        )
+        executeJson(request)
+    }
+
     private fun validatePairingResponse(
         expected: MacPairingPayload,
         identity: AndroidIdentity,

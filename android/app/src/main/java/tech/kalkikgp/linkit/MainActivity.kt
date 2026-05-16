@@ -116,6 +116,7 @@ data class LinkitUiState(
     val pairingToken: String = "",
     val pickedFiles: List<PickedFile> = emptyList(),
     val trustedMac: TrustedMac? = null,
+    val isConnectedToMac: Boolean = false,
     val isPairing: Boolean = false,
     val isSending: Boolean = false,
     val bytesSent: Long = 0,
@@ -140,7 +141,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             trustedMac = identityStore.trustedMac(),
             macIp = identityStore.trustedMac()?.ip.orEmpty(),
             port = identityStore.trustedMac()?.port?.toString() ?: "52718",
-            status = if (identityStore.trustedMac() == null) "Pair with Mac" else "Ready"
+            status = if (identityStore.trustedMac() == null) "Pair with Mac" else "Paired, offline",
+            androidReceiverStatus = if (identityStore.trustedMac() == null) {
+                "Pair with Mac to receive drops"
+            } else {
+                "Connecting to Mac for drops"
+            }
         )
     )
     val uiState: StateFlow<LinkitUiState> = _uiState
@@ -249,15 +255,57 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun forgetMac() {
-        identityStore.forgetTrustedMac()
-        _uiState.update {
-            it.copy(
-                trustedMac = null,
-                status = "Pair with Mac",
-                savedPath = null,
-                androidReceiverStatus = "Pair with Mac to receive drops"
-            )
+        val mac = identityStore.trustedMac()
+        viewModelScope.launch {
+            mac?.let {
+                runCatching { client.disconnect(it, identityStore) }
+            }
+            LinkitReceiverService.stop(getApplication())
+            identityStore.forgetTrustedMac()
+            _uiState.update {
+                it.copy(
+                    trustedMac = null,
+                    isConnectedToMac = false,
+                    status = "Pair with Mac",
+                    savedPath = null,
+                    androidReceiverStatus = "Pair with Mac to receive drops"
+                )
+            }
         }
+    }
+
+    fun disconnectMac() {
+        val mac = _uiState.value.trustedMac ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(status = "Disconnecting", error = null) }
+            runCatching {
+                client.disconnect(mac, identityStore)
+            }.onSuccess {
+                LinkitReceiverService.stop(getApplication())
+                _uiState.update {
+                    it.copy(
+                        isConnectedToMac = false,
+                        status = "Paired, offline",
+                        androidReceiverStatus = "Disconnected from Mac"
+                    )
+                }
+            }.onFailure { error ->
+                LinkitReceiverService.stop(getApplication())
+                _uiState.update {
+                    it.copy(
+                        isConnectedToMac = false,
+                        status = "Paired, offline",
+                        androidReceiverStatus = "Could not notify Mac: ${error.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun connectMac() {
+        val mac = _uiState.value.trustedMac ?: return
+        _uiState.update { it.copy(status = "Connecting", androidReceiverStatus = "Connecting to Mac for drops", error = null) }
+        registerAndroidReceiver(mac)
     }
 
     fun discoverMac() {
@@ -307,18 +355,20 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     identity = identityStore.identity()
                 )
                 identityStore.saveTrustedMac(mac)
-                registerAndroidReceiver(mac)
                 _uiState.update {
                     it.copy(
                         trustedMac = mac,
                         macIp = mac.ip,
                         port = mac.port.toString(),
+                        isConnectedToMac = true,
                         isPairing = false,
-                        status = "Paired",
+                        status = "Connected",
+                        androidReceiverStatus = "Mac drops enabled",
                         error = null,
                         tokenRejected = false
                     )
                 }
+                registerAndroidReceiver(mac)
             } catch (http: LinkitHttpException) {
                 _uiState.update {
                     it.copy(isPairing = false, status = "Pairing failed", error = http.message, tokenRejected = http.statusCode == 401)
@@ -343,6 +393,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         val trusted = state.trustedMac
         if (trusted == null) {
             _uiState.update { it.copy(error = "Pair with your Mac first") }
+            return
+        }
+        if (!state.isConnectedToMac) {
+            _uiState.update { it.copy(error = "Connect to your Mac first") }
             return
         }
         val ip = PrivateLanTarget.validateIp(state.macIp).getOrElse { error ->
@@ -456,11 +510,19 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 client.registerReceiver(mac, identityStore, AndroidDropReceiver.PORT)
             }.onSuccess {
                 _uiState.update { state ->
-                    state.copy(androidReceiverStatus = "Mac drops enabled")
+                    state.copy(
+                        isConnectedToMac = true,
+                        status = if (state.isSending || state.isPairing) state.status else "Connected",
+                        androidReceiverStatus = "Mac drops enabled"
+                    )
                 }
             }.onFailure { error ->
                 _uiState.update { state ->
-                    state.copy(androidReceiverStatus = "Open Linkit on Mac to enable drops: ${error.message}")
+                    state.copy(
+                        isConnectedToMac = false,
+                        status = if (state.trustedMac == null) "Pair with Mac" else "Paired, offline",
+                        androidReceiverStatus = "Open Linkit on Mac to connect: ${error.message}"
+                    )
                 }
             }
         }
@@ -604,6 +666,12 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                     )
                     if (state.trustedMac != null) {
                         SecondaryButton(
+                            text = if (state.isConnectedToMac) "Disconnect" else "Connect",
+                            onClick = if (state.isConnectedToMac) viewModel::disconnectMac else viewModel::connectMac,
+                            enabled = !state.isSending && !state.isPairing,
+                            modifier = Modifier.weight(1f)
+                        )
+                        SecondaryButton(
                             text = "Forget",
                             onClick = viewModel::forgetMac,
                             enabled = !state.isSending,
@@ -625,7 +693,7 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                     PrimaryButton(
                         text = "Send",
                         onClick = viewModel::send,
-                        enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.trustedMac != null,
+                        enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.isConnectedToMac,
                         modifier = Modifier.weight(1f)
                     )
                     if (state.isSending) {
@@ -667,9 +735,10 @@ private fun Header(state: LinkitUiState) {
             StatusPill(state)
         }
         state.trustedMac?.let { mac ->
+            val connectionLabel = if (state.isConnectedToMac) "Connected to" else "Paired with"
             Text(
-                text = "Paired with ${mac.deviceName}",
-                color = WorkbenchColors.Signal,
+                text = "$connectionLabel ${mac.deviceName}",
+                color = if (state.isConnectedToMac) WorkbenchColors.Signal else WorkbenchColors.Muted,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -699,7 +768,8 @@ private fun StatusPill(state: LinkitUiState) {
     val color = when {
         state.error != null -> WorkbenchColors.Error
         state.isSending || state.isPairing -> WorkbenchColors.Warning
-        state.trustedMac != null -> WorkbenchColors.Signal
+        state.isConnectedToMac -> WorkbenchColors.Signal
+        state.trustedMac != null -> WorkbenchColors.Muted
         else -> WorkbenchColors.Muted
     }
     Row(

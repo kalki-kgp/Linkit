@@ -82,6 +82,14 @@ final class TrustStore {
         return updated
     }
 
+    func remove(deviceId: String) throws -> TrustedDevice? {
+        lock.lock()
+        defer { lock.unlock() }
+        let removed = devices.removeValue(forKey: deviceId)
+        try saveLocked()
+        return removed
+    }
+
     func trustedDevice(id: String) -> TrustedDevice? {
         lock.lock()
         defer { lock.unlock() }

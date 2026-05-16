@@ -12,6 +12,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var pairingPoller: DispatchSourceTimer?
     private var transferObservers: [NSObjectProtocol] = []
     private var lastTrustedSignature: String = ""
+    private var lastConnectedSignature: String = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -34,7 +35,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func setupMenu() {
-        let item = NSStatusBar.system.statusItem(withLength: 34)
+        let item = NSStatusBar.system.statusItem(withLength: 38)
         installDropTarget(on: item.button)
         statusItem = item
         if let button = item.button {
@@ -48,8 +49,16 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func refreshStatusButton() {
         let trusted = app?.trustedDevices() ?? []
-        let tooltip = trusted.isEmpty ? "Linkit not connected" : "Linkit connected to \(trusted.count) device\(trusted.count == 1 ? "" : "s")"
-        statusIcon?.setState(trusted.isEmpty ? .disconnected : .connected, tooltip: tooltip)
+        let connected = app?.connectedDevices() ?? []
+        let tooltip: String
+        if connected.isEmpty {
+            tooltip = trusted.isEmpty
+                ? "Linkit not paired"
+                : "Linkit paired with \(trusted.count), not connected"
+        } else {
+            tooltip = "Linkit connected to \(connected.count) device\(connected.count == 1 ? "" : "s")"
+        }
+        statusIcon?.setState(connected.isEmpty ? .disconnected : .connected, tooltip: tooltip)
     }
 
     private func startPairingPoller() {
@@ -65,13 +74,22 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func checkForTrustChanges() {
         guard let app else { return }
         let devices = app.trustedDevices()
-        let signature = devices.map { "\($0.deviceId)|\($0.deviceName)" }.joined(separator: ",")
-        if signature != lastTrustedSignature {
-            lastTrustedSignature = signature
+        let connected = app.connectedDevices()
+        let trustedSignature = devices.map { "\($0.deviceId)|\($0.deviceName)" }.joined(separator: ",")
+        let connectedSignature = connected.map { "\($0.deviceId)|\($0.host)|\($0.receivePort)" }.joined(separator: ",")
+
+        if trustedSignature != lastTrustedSignature || connectedSignature != lastConnectedSignature {
+            let hadTrustedSignature = !lastTrustedSignature.isEmpty
+            let hadConnectedSignature = !lastConnectedSignature.isEmpty
+            lastTrustedSignature = trustedSignature
+            lastConnectedSignature = connectedSignature
             refreshStatusButton()
             refreshMenu()
-            if !devices.isEmpty && !signature.isEmpty {
+
+            if hadTrustedSignature && !devices.isEmpty && !trustedSignature.isEmpty {
                 announcePairing(devices.last)
+            } else if !hadConnectedSignature && !connected.isEmpty {
+                announceConnection(connected.last)
             }
         }
     }
@@ -85,12 +103,38 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
+    private func announceConnection(_ device: ConnectedDevice?) {
+        guard let device else { return }
+        showTransientIcon(.success, tooltip: "Connected \(device.deviceName)")
+        if qrWindow?.isVisible == true {
+            qrWindow?.close()
+            qrWindow = nil
+        }
+    }
+
     private func refreshMenu() {
         guard let app else { return }
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(NSMenuItem(title: "Receiving on \(LocalNetwork.bestPrivateIPv4()):\(app.configuration.port)", action: nil, keyEquivalent: ""))
         let trusted = app.trustedDevices()
+        let connected = app.connectedDevices()
+        let connectedIds = Set(connected.map(\.deviceId))
+        if connected.isEmpty {
+            let item = NSMenuItem(title: "No connected devices", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else {
+            let header = NSMenuItem(title: "Connected devices", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for device in connected {
+                let item = NSMenuItem(title: "  \(device.deviceName) (\(device.platform))", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(NSMenuItem.separator())
         if trusted.isEmpty {
             let item = NSMenuItem(title: "No paired devices", action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -100,14 +144,23 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             header.isEnabled = false
             menu.addItem(header)
             for device in trusted {
-                let label = "  • \(device.deviceName) (\(device.platform))"
+                let state = connectedIds.contains(device.deviceId) ? "connected" : "paired, offline"
+                let label = "  \(device.deviceName) (\(device.platform)) - \(state)"
                 let pairedItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
                 pairedItem.isEnabled = false
                 menu.addItem(pairedItem)
+                if connectedIds.contains(device.deviceId) {
+                    let disconnect = NSMenuItem(title: "    Disconnect \(device.deviceName)", action: #selector(disconnectDevice(_:)), keyEquivalent: "")
+                    disconnect.representedObject = device.deviceId
+                    menu.addItem(disconnect)
+                }
+                let forget = NSMenuItem(title: "    Forget \(device.deviceName)", action: #selector(forgetDevice(_:)), keyEquivalent: "")
+                forget.representedObject = device.deviceId
+                menu.addItem(forget)
             }
         }
-        let androidTargets = trusted.filter { $0.platform.lowercased() == "android" && $0.receivePort != nil && $0.lastKnownHost != nil }
-        menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: open Linkit on Android" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
+        let androidTargets = connected.filter { $0.platform.lowercased() == "android" }
+        menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: connect Android first" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
@@ -226,7 +279,28 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc private func refreshMenuAction() {
+        checkForTrustChanges()
         refreshMenu()
+    }
+
+    @objc private func disconnectDevice(_ sender: NSMenuItem) {
+        guard let deviceId = sender.representedObject as? String else { return }
+        app?.disconnectDevice(deviceId)
+        refreshStatusButton()
+        refreshMenu()
+    }
+
+    @objc private func forgetDevice(_ sender: NSMenuItem) {
+        guard let app, let deviceId = sender.representedObject as? String else { return }
+        do {
+            try app.forgetDevice(deviceId)
+            lastTrustedSignature = ""
+            lastConnectedSignature = ""
+            refreshStatusButton()
+            refreshMenu()
+        } catch {
+            showNonFatalError("Could not forget device: \(error.localizedDescription)")
+        }
     }
 
     @objc private func quit() {

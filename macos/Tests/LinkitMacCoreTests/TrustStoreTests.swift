@@ -26,10 +26,39 @@ final class TrustStoreTests: XCTestCase {
         let trusted = fixture.trust.trustedDevice(id: phoneDeviceId)
         XCTAssertEqual(trusted?.lastKnownHost, "10.0.0.42")
         XCTAssertEqual(trusted?.receivePort, 52718)
+        XCTAssertEqual(fixture.connections.connectedDevice(id: phoneDeviceId)?.host, "10.0.0.42")
+        XCTAssertEqual(fixture.connections.connectedDevice(id: phoneDeviceId)?.receivePort, 52718)
 
         let updated = try fixture.trust.updateConnection(deviceId: phoneDeviceId, host: "10.0.0.43", receivePort: 52719)
         XCTAssertEqual(updated.lastKnownHost, "10.0.0.43")
         XCTAssertEqual(updated.receivePort, 52719)
+    }
+
+    func testDisconnectAndForgetDoNotMutateOtherTrust() throws {
+        let fixture = try TrustFixture()
+        defer { fixture.cleanup() }
+
+        let phoneKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        let phoneDeviceId = LinkitDeviceId.fromPublicKey(phoneKey)
+        let trusted = TrustedDevice(
+            deviceId: phoneDeviceId,
+            deviceName: "Pixel",
+            platform: "android",
+            publicKey: phoneKey.base64EncodedString(),
+            pairedAt: Date().iso8601(),
+            lastKnownHost: "10.0.0.42",
+            receivePort: 52718
+        )
+        try fixture.trust.add(trusted)
+        _ = fixture.connections.markConnected(device: trusted, host: "10.0.0.42", receivePort: 52718)
+
+        fixture.connections.disconnect(deviceId: phoneDeviceId)
+        XCTAssertNil(fixture.connections.connectedDevice(id: phoneDeviceId))
+        XCTAssertNotNil(fixture.trust.trustedDevice(id: phoneDeviceId))
+
+        _ = try fixture.trust.remove(deviceId: phoneDeviceId)
+        fixture.connections.disconnect(deviceId: phoneDeviceId)
+        XCTAssertNil(fixture.trust.trustedDevice(id: phoneDeviceId))
     }
 }
 
@@ -37,6 +66,7 @@ private final class TrustFixture {
     let base: URL
     let identity: LinkitIdentity
     let trust: TrustStore
+    let connections: DeviceConnectionRegistry
     let pairing: PairingManager
 
     init() throws {
@@ -44,7 +74,8 @@ private final class TrustFixture {
             .appendingPathComponent("linkit-trust-tests-\(UUID().uuidString)", isDirectory: true)
         identity = try IdentityStore(baseFolder: base).loadOrCreate()
         trust = try TrustStore(baseFolder: base)
-        pairing = try PairingManager(identity: identity, trustStore: trust, logger: LinkitLogger())
+        connections = DeviceConnectionRegistry()
+        pairing = try PairingManager(identity: identity, trustStore: trust, connections: connections, logger: LinkitLogger())
     }
 
     func cleanup() {

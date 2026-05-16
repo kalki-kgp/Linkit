@@ -3,14 +3,16 @@ import Foundation
 final class PairingManager {
     private let identity: LinkitIdentity
     private let trustStore: TrustStore
+    private let connections: DeviceConnectionRegistry
     private let logger: LinkitLogger
     private let lock = NSLock()
     private var token: String
     private var expiresAt: Date
 
-    init(identity: LinkitIdentity, trustStore: TrustStore, logger: LinkitLogger) throws {
+    init(identity: LinkitIdentity, trustStore: TrustStore, connections: DeviceConnectionRegistry, logger: LinkitLogger) throws {
         self.identity = identity
         self.trustStore = trustStore
+        self.connections = connections
         self.logger = logger
         self.token = try LinkitRandom.token(byteCount: 18)
         self.expiresAt = Date().addingTimeInterval(2 * 60)
@@ -74,6 +76,9 @@ final class PairingManager {
             receivePort: request.receivePort
         )
         try trustStore.add(trusted)
+        if let remoteHost, let receivePort = request.receivePort {
+            _ = connections.markConnected(device: trusted, host: remoteHost, receivePort: receivePort)
+        }
         rotate()
         logger.info("paired trusted device id=\(trusted.deviceId) name=\(trusted.deviceName)")
 
