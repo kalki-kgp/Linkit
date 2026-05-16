@@ -72,6 +72,58 @@ final class TransferStoreTests: XCTestCase {
         XCTAssertEqual(recent.first?.sha256, sha)
     }
 
+    func testTransferNotificationsReportBeginAndFinish() throws {
+        let fixture = try StoreFixture()
+        defer { fixture.cleanup() }
+
+        let beginExpectation = expectation(description: "begin upload notification")
+        let finishExpectation = expectation(description: "finish notification")
+        var beginFilename: String?
+        var finishStatus: String?
+
+        let beginObserver = NotificationCenter.default.addObserver(
+            forName: .linkitTransferDidBeginUpload,
+            object: nil,
+            queue: nil
+        ) { notification in
+            beginFilename = notification.userInfo?[LinkitTransferNotification.filenameKey] as? String
+            beginExpectation.fulfill()
+        }
+        let finishObserver = NotificationCenter.default.addObserver(
+            forName: .linkitTransferDidFinish,
+            object: nil,
+            queue: nil
+        ) { notification in
+            finishStatus = notification.userInfo?[LinkitTransferNotification.statusKey] as? String
+            finishExpectation.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(beginObserver)
+            NotificationCenter.default.removeObserver(finishObserver)
+        }
+
+        let data = Data("notify\n".utf8)
+        let sha = SHA256.hash(data: data).linkitHex
+        let create = try fixture.store.create(request: createRequest(name: "notify.txt", size: data.count, clientDeviceId: "phone-a"))
+        let record = try fixture.store.beginUpload(
+            id: create.transferId,
+            index: 0,
+            contentLength: Int64(data.count),
+            uploadToken: create.uploadToken,
+            clientDeviceId: "phone-a"
+        )
+        try data.write(to: record.tempURL)
+        _ = try fixture.store.completeUpload(id: create.transferId, bytesReceived: Int64(data.count), sha256: sha)
+        _ = try fixture.store.finalize(
+            id: create.transferId,
+            request: FinalizeRequest(bytesSent: Int64(data.count), finalSha256: sha)
+        )
+
+        wait(for: [beginExpectation, finishExpectation], timeout: 2)
+        XCTAssertEqual(beginFilename, "notify.txt")
+        XCTAssertEqual(finishStatus, "complete")
+    }
+
     func testFailedFinalizeReplayReturnsSameFailure() throws {
         let fixture = try StoreFixture()
         defer { fixture.cleanup() }

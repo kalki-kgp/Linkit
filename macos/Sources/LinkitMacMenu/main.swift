@@ -2,13 +2,15 @@ import AppKit
 import CoreImage
 import LinkitMacCore
 
-final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var app: LinkitReceiverApp?
     private var statusItem: NSStatusItem?
+    private var statusIcon: StatusIconAnimator?
     private var qrWindow: NSWindow?
     private var diagnosticsWindow: NSWindow?
     private var resetStatusWorkItem: DispatchWorkItem?
     private var pairingPoller: DispatchSourceTimer?
+    private var transferObservers: [NSObjectProtocol] = []
     private var lastTrustedSignature: String = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -32,24 +34,22 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     }
 
     private func setupMenu() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let item = NSStatusBar.system.statusItem(withLength: 34)
         installDropTarget(on: item.button)
         statusItem = item
+        if let button = item.button {
+            statusIcon = StatusIconAnimator(button: button)
+        }
         refreshStatusButton()
         refreshMenu()
+        startTransferObservers()
         startPairingPoller()
     }
 
     private func refreshStatusButton() {
-        guard let button = statusItem?.button else { return }
         let trusted = app?.trustedDevices() ?? []
-        let symbolName = trusted.isEmpty ? "link.badge.plus" : "link.circle.fill"
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Linkit") {
-            image.isTemplate = trusted.isEmpty
-            button.image = image
-            button.imagePosition = .imageLeft
-        }
-        button.title = trusted.isEmpty ? "Linkit" : "Linkit (\(trusted.count))"
+        let tooltip = trusted.isEmpty ? "Linkit not connected" : "Linkit connected to \(trusted.count) device\(trusted.count == 1 ? "" : "s")"
+        statusIcon?.setState(trusted.isEmpty ? .disconnected : .connected, tooltip: tooltip)
     }
 
     private func startPairingPoller() {
@@ -78,7 +78,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     private func announcePairing(_ device: TrustedDevice?) {
         guard let device else { return }
-        showTransientStatus("Paired \(device.deviceName)")
+        showTransientIcon(.success, tooltip: "Paired \(device.deviceName)")
         if qrWindow?.isVisible == true {
             qrWindow?.close()
             qrWindow = nil
@@ -123,6 +123,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     @objc private func showPairingQR() {
         guard let app else { return }
+        statusIcon?.setState(.pairing, tooltip: "Linkit pairing")
 
         let payload = app.pairingPayloadJSON()
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 560))
@@ -169,6 +170,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
             defer: false
         )
         window.title = "Linkit Pairing"
+        window.delegate = self
         window.center()
         window.contentView = content
         window.makeKeyAndOrderFront(nil)
@@ -230,12 +232,20 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     @objc private func quit() {
         pairingPoller?.cancel()
         pairingPoller = nil
+        transferObservers.forEach(NotificationCenter.default.removeObserver)
+        transferObservers.removeAll()
         NSApp.terminate(nil)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         checkForTrustChanges()
         refreshMenu()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closedWindow = notification.object as? NSWindow, closedWindow === qrWindow else { return }
+        qrWindow = nil
+        refreshStatusButton()
     }
 
     private func installDropTarget(on button: NSStatusBarButton?) {
@@ -251,17 +261,17 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     private func sendDroppedFiles(_ urls: [URL]) {
         guard let app else { return }
-        showTransientStatus("Sending...")
+        statusIcon?.setState(.transferring(direction: .macToAndroid), tooltip: "Sending to Android")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let results = try app.sendFilesToFirstAndroid(urls)
                 DispatchQueue.main.async {
-                    self.showTransientStatus("Sent \(results.count)")
+                    self.showTransientIcon(.success, tooltip: "Sent \(results.count) file\(results.count == 1 ? "" : "s")")
                     self.refreshMenu()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.showTransientStatus("Linkit")
+                    self.showTransientIcon(.error, tooltip: "Send failed")
                     self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
                     self.refreshMenu()
                 }
@@ -269,15 +279,46 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         }
     }
 
-    private func showTransientStatus(_ title: String) {
+    private func showTransientIcon(_ state: LinkitStatusIconState, tooltip: String) {
         resetStatusWorkItem?.cancel()
-        statusItem?.button?.title = title
-        guard title != "Linkit" else { return }
+        statusIcon?.setState(state, tooltip: tooltip)
         let workItem = DispatchWorkItem { [weak self] in
-            self?.statusItem?.button?.title = "Linkit"
+            self?.refreshStatusButton()
         }
         resetStatusWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+    }
+
+    private func startTransferObservers() {
+        transferObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .linkitTransferDidBeginUpload,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                let filename = notification.userInfo?[LinkitTransferNotification.filenameKey] as? String
+                let suffix = filename.map { ": \($0)" } ?? ""
+                self?.statusIcon?.setState(.transferring(direction: .androidToMac), tooltip: "Receiving from Android\(suffix)")
+            }
+        )
+
+        transferObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .linkitTransferDidFinish,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                let status = notification.userInfo?[LinkitTransferNotification.statusKey] as? String
+                if status == "complete" {
+                    self?.showTransientIcon(.success, tooltip: "Transfer complete")
+                } else if status == "canceled" {
+                    self?.refreshStatusButton()
+                } else {
+                    self?.showTransientIcon(.error, tooltip: "Transfer failed")
+                }
+                self?.refreshMenu()
+            }
+        )
     }
 
     private func recentTransfersMenuItem(app: LinkitReceiverApp) -> NSMenuItem {

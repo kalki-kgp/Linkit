@@ -136,7 +136,7 @@ final class TransferStore {
         uploadToken: String?,
         clientDeviceId: String?
     ) throws -> TransferRecord {
-        try mutate(id: id) { record in
+        let updated = try mutate(id: id) { record in
             try validateLive(record)
             guard index == record.fileIndex else {
                 throw HTTPFailure.notFound("File index was not found")
@@ -170,6 +170,8 @@ final class TransferStore {
             record.error = nil
             return record
         }
+        postTransferNotification(.linkitTransferDidBeginUpload, record: updated)
+        return updated
     }
 
     func isCanceled(id: String) -> Bool {
@@ -439,6 +441,20 @@ final class TransferStore {
                 sha256: record.serverSha256,
                 error: record.error
             )
+        )
+        postTransferNotification(.linkitTransferDidFinish, record: record)
+    }
+
+    private func postTransferNotification(_ name: Notification.Name, record: TransferRecord) {
+        NotificationCenter.default.post(
+            name: name,
+            object: nil,
+            userInfo: [
+                LinkitTransferNotification.transferIdKey: record.id,
+                LinkitTransferNotification.filenameKey: record.originalName,
+                LinkitTransferNotification.statusKey: record.status.rawValue,
+                LinkitTransferNotification.errorKey: record.error ?? ""
+            ]
         )
     }
 }
