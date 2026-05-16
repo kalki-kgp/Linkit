@@ -36,9 +36,6 @@ final class SignedRequestVerifier {
         guard abs(nowMillis - timestampMillis) <= 60_000 else {
             throw HTTPFailure.unauthorized("clock_skew", "Signed request timestamp is outside tolerance")
         }
-        guard nonceCache.insert(deviceId: deviceId, nonce: nonce) else {
-            throw HTTPFailure.unauthorized("nonce_replay", "Signed request nonce was already used")
-        }
 
         let bodyHash = SHA256.hash(data: body).linkitHex
         let canonical = SignedRequestVerifier.canonicalString(
@@ -53,6 +50,9 @@ final class SignedRequestVerifier {
         guard publicKey.isValidSignature(signature, for: digest) else {
             logger.error("signature verification failed deviceId=\(deviceId) path=\(request.path)")
             throw HTTPFailure.unauthorized("invalid_signature", "Signed request signature is invalid")
+        }
+        guard nonceCache.insert(deviceId: deviceId, nonce: nonce) else {
+            throw HTTPFailure.unauthorized("nonce_replay", "Signed request nonce was already used")
         }
 
         return deviceId

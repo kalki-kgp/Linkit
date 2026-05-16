@@ -54,6 +54,9 @@ final class PairingManager {
         guard request.pairingToken == expected.0 else {
             throw HTTPFailure.unauthorized("pairing_token_rejected", "Pairing token was not accepted")
         }
+        guard request.platform.lowercased() == "android" else {
+            throw HTTPFailure.badRequest("unsupported_platform", "Only Android senders can pair with this MVP")
+        }
         guard let publicKeyData = Data(base64Encoded: request.publicKey), !publicKeyData.isEmpty else {
             throw HTTPFailure.badRequest("invalid_public_key", "Device public key is invalid")
         }

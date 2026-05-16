@@ -12,6 +12,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,9 +27,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -41,22 +44,21 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
@@ -66,17 +68,27 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.time.Instant
 import kotlin.math.max
 import kotlin.math.roundToLong
 
 class MainActivity : ComponentActivity() {
+    private val linkitViewModel: LinkitViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        linkitViewModel.consumeShareIntent(intent)
         setContent {
             LinkitTheme {
-                LinkitScreen()
+                LinkitScreen(linkitViewModel)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        linkitViewModel.consumeShareIntent(intent)
     }
 }
 
@@ -92,6 +104,7 @@ data class LinkitUiState(
     val totalBytes: Long = 0,
     val speedBytesPerSecond: Double = 0.0,
     val etaSeconds: Long? = null,
+    val currentFileName: String? = null,
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
@@ -138,11 +151,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     pickedFiles = files,
-                    status = "Ready",
+                    status = if (files.size == 1) "Ready to send" else "Ready to send ${files.size} files",
                     error = null,
                     savedPath = null,
                     bytesSent = 0,
-                    totalBytes = files.sumOf { file -> file.size }
+                    totalBytes = files.sumOf { file -> file.size },
+                    currentFileName = null
                 )
             }
         }.onFailure { error ->
@@ -226,12 +240,34 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun pair(payload: MacPairingPayload) {
         if (_uiState.value.isPairing) return
+        val ip = PrivateLanTarget.validateIp(payload.ip).getOrElse { error ->
+            _uiState.update { it.copy(status = "Pairing failed", error = error.message) }
+            return
+        }
+        val port = PrivateLanTarget.validatePort(payload.port.toString()).getOrElse { error ->
+            _uiState.update { it.copy(status = "Pairing failed", error = error.message) }
+            return
+        }
+        val expiresAt = payload.pairingTokenExpiresAt?.let { raw ->
+            runCatching { Instant.parse(raw) }.getOrElse {
+                _uiState.update { it.copy(status = "Pairing failed", error = "Pairing QR has an invalid expiry") }
+                return
+            }
+        }
+        if (expiresAt != null && Instant.now().isAfter(expiresAt)) {
+            _uiState.update {
+                it.copy(status = "Pairing expired", error = "Refresh the QR on your Mac and scan again", tokenRejected = true)
+            }
+            return
+        }
+        val validatedPayload = payload.copy(ip = ip, port = port)
+
         viewModelScope.launch {
             _uiState.update { it.copy(isPairing = true, status = "Pairing", error = null, tokenRejected = false) }
             try {
                 val mac = client.pair(
-                    baseUrl = PrivateLanTarget.baseUrl(payload.ip, payload.port),
-                    payload = payload,
+                    baseUrl = PrivateLanTarget.baseUrl(validatedPayload.ip, validatedPayload.port),
+                    payload = validatedPayload,
                     identity = identityStore.identity()
                 )
                 identityStore.saveTrustedMac(mac)
@@ -295,7 +331,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     bytesSent = 0,
                     totalBytes = files.sumOf { file -> file.size },
                     speedBytesPerSecond = 0.0,
-                    etaSeconds = null
+                    etaSeconds = null,
+                    currentFileName = null
                 )
             }
 
@@ -303,6 +340,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 var completedBytes = 0L
                 var lastSavedPath: String? = null
                 for ((index, file) in files.withIndex()) {
+                    _uiState.update {
+                        it.copy(
+                            currentFileName = file.name,
+                            status = if (files.size > 1) "Sending ${index + 1}/${files.size}" else "Sending"
+                        )
+                    }
                     val result = client.sendFile(
                         contentResolver = getApplication<Application>().contentResolver,
                         mac = mac,
@@ -328,12 +371,13 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         bytesSent = completedBytes,
                         totalBytes = completedBytes,
                         error = null,
-                        etaSeconds = 0
+                        etaSeconds = 0,
+                        currentFileName = null
                     )
                 }
             } catch (cancelled: CancellationException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Canceled", error = null, etaSeconds = null)
+                    it.copy(isSending = false, status = "Canceled", error = null, etaSeconds = null, currentFileName = null)
                 }
             } catch (tokenError: TokenRejectedException) {
                 _uiState.update {
@@ -342,20 +386,21 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         status = "Token rejected",
                         error = tokenError.message,
                         tokenRejected = true,
-                        etaSeconds = null
+                        etaSeconds = null,
+                        currentFileName = null
                     )
                 }
             } catch (http: LinkitHttpException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Failed", error = http.message, etaSeconds = null)
+                    it.copy(isSending = false, status = "Failed", error = http.message, etaSeconds = null, currentFileName = null)
                 }
             } catch (io: IOException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Network failed", error = io.message, etaSeconds = null)
+                    it.copy(isSending = false, status = "Network failed", error = io.message, etaSeconds = null, currentFileName = null)
                 }
             } catch (error: Throwable) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Failed", error = error.message, etaSeconds = null)
+                    it.copy(isSending = false, status = "Failed", error = error.message, etaSeconds = null, currentFileName = null)
                 }
             } finally {
                 sendJob = null
@@ -403,12 +448,9 @@ private fun Intent.streamUris(): List<Uri> {
 }
 
 @Composable
-private fun LinkitScreen(viewModel: LinkitViewModel = viewModel()) {
+private fun LinkitScreen(viewModel: LinkitViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    LaunchedEffect(Unit) {
-        viewModel.consumeShareIntent((context as? ComponentActivity)?.intent)
-    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             runCatching {
@@ -544,8 +586,15 @@ private fun Header(state: LinkitUiState) {
                 modifier = Modifier
                     .size(42.dp)
                     .clip(RoundedCornerShape(7.dp))
-                    .background(WorkbenchColors.Signal)
-            )
+                    .background(WorkbenchColors.PanelLift)
+            ) {
+                Image(
+                    painter = painterResource(R.mipmap.ic_launcher),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Text("Linkit", color = WorkbenchColors.Paper, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
                 Text("Local signed drop", color = WorkbenchColors.Muted, style = MaterialTheme.typography.bodyMedium)
@@ -707,6 +756,15 @@ private fun FileCard(state: LinkitUiState) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = WorkbenchColors.Muted
                 )
+                if (state.pickedFiles.size > 1) {
+                    Text(
+                        text = state.pickedFiles.take(3).joinToString("  /  ") { it.name },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WorkbenchColors.Muted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
@@ -726,6 +784,15 @@ private fun TransferStatus(state: LinkitUiState) {
         Text(state.status, color = WorkbenchColors.Paper, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
 
         if (state.isSending || state.bytesSent > 0) {
+            state.currentFileName?.let {
+                Text(
+                    text = it,
+                    color = WorkbenchColors.Muted,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             val progress = if (state.totalBytes > 0) {
                 (state.bytesSent.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f)
             } else {
