@@ -74,6 +74,13 @@ Build a local menu-bar app bundle:
 open dist/Linkit.app
 ```
 
+Install the macOS app bundle into `/Applications`:
+
+```sh
+./scripts/install-macos-app.sh
+open /Applications/Linkit.app
+```
+
 Install the Android debug build:
 
 ```sh
