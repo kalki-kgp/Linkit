@@ -55,6 +55,27 @@ open class LinkitHttpException(
 class TokenRejectedException(message: String) : LinkitHttpException(401, "token_rejected", message)
 class PairingTrustException(message: String) : LinkitHttpException(0, "pairing_trust_failed", message)
 
+object LinkitUploadSignature {
+    fun canonicalString(
+        deviceId: String,
+        transferId: String,
+        fileIndex: Int,
+        uploadToken: String,
+        contentLength: Long,
+        timestamp: String,
+        nonce: String
+    ): String = listOf(
+        "UPLOAD",
+        deviceId,
+        transferId,
+        fileIndex.toString(),
+        uploadToken,
+        contentLength.toString(),
+        timestamp,
+        nonce
+    ).joinToString("\n")
+}
+
 class LinkitClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -66,15 +87,27 @@ class LinkitClient(
     suspend fun pair(
         baseUrl: String,
         payload: MacPairingPayload,
-        identity: AndroidIdentity,
+        identityStore: IdentityStore,
         batteryPercent: Int?
     ): TrustedMac {
+        val identity = identityStore.identity()
+        val challengeSignature = identityStore.sign(
+            LinkitPairingChallenge.canonicalString(
+                macDeviceId = payload.deviceId,
+                androidDeviceId = identity.deviceId,
+                androidPublicKey = identity.publicKey,
+                pairingToken = payload.pairingToken,
+                challenge = payload.pairingChallenge
+            )
+        )
         val bodyJson = JSONObject()
             .put("deviceId", identity.deviceId)
             .put("deviceName", identity.deviceName)
             .put("platform", "android")
             .put("publicKey", identity.publicKey)
             .put("pairingToken", payload.pairingToken)
+            .put("pairingChallenge", payload.pairingChallenge)
+            .put("pairingChallengeSignature", challengeSignature)
             .put("receivePort", AndroidDropReceiver.PORT)
         batteryPercent?.let { bodyJson.put("batteryPercent", it) }
 
@@ -137,10 +170,10 @@ class LinkitClient(
         if (response.optString("trustedDeviceId").takeIf { it.isNotBlank() } != identity.deviceId) {
             throw PairingTrustException("Mac did not trust this Android identity")
         }
-        if (expected.deviceId.isNotBlank() && mac.deviceId != expected.deviceId) {
+        if (mac.deviceId != expected.deviceId) {
             throw PairingTrustException("Scanned QR does not match the Mac that responded")
         }
-        if (expected.publicKey.isNotBlank() && mac.publicKey != expected.publicKey) {
+        if (mac.publicKey != expected.publicKey) {
             throw PairingTrustException("Mac public key changed during pairing")
         }
         val derivedDeviceId = runCatching { IdentityStore.deviceIdFromPublicKey(mac.publicKey) }
@@ -173,6 +206,7 @@ class LinkitClient(
                     contentResolver = contentResolver,
                     baseUrl = baseUrl,
                     create = create,
+                    identityStore = identityStore,
                     identity = identityStore.identity(),
                     file = file,
                     onProgress = onProgress
@@ -180,10 +214,10 @@ class LinkitClient(
 
                 finalizeStarted = true
                 val savedPath = try {
-                    finalizeTransfer(baseUrl, identityStore, create.finalizeUrl, upload)
+                    finalizeTransfer(baseUrl, identityStore, create.transferId, upload)
                 } catch (io: IOException) {
                     Log.w(TAG, "finalize response lost, replaying same finalize payload", io)
-                    finalizeTransfer(baseUrl, identityStore, create.finalizeUrl, upload)
+                    finalizeTransfer(baseUrl, identityStore, create.transferId, upload)
                 }
 
                 return SendResult(
@@ -248,13 +282,13 @@ class LinkitClient(
         )
 
         val json = executeJson(request)
+        val transferId = json.getString("transferId")
         val firstFile = json.optJSONArray("files")?.optJSONObject(0)
         return CreateTransferResult(
-            transferId = json.getString("transferId"),
-            uploadUrl = firstFile?.optString("uploadUrl")?.takeIf { it.isNotBlank() }
-                ?: json.getString("uploadUrl"),
-            finalizeUrl = json.getString("finalizeUrl"),
-            statusUrl = json.getString("statusUrl"),
+            transferId = transferId,
+            uploadUrl = "/v1/transfers/$transferId/files/0",
+            finalizeUrl = "/v1/transfers/$transferId/finalize",
+            statusUrl = "/v1/transfers/$transferId",
             uploadToken = firstFile?.optString("uploadToken")?.takeIf { it.isNotBlank() }
                 ?: json.getString("uploadToken")
         )
@@ -264,6 +298,7 @@ class LinkitClient(
         contentResolver: ContentResolver,
         baseUrl: String,
         create: CreateTransferResult,
+        identityStore: IdentityStore,
         identity: AndroidIdentity,
         file: PickedFile,
         onProgress: (Long, Long) -> Unit
@@ -275,6 +310,16 @@ class LinkitClient(
             .url(baseUrl + create.uploadUrl)
             .header("X-Linkit-Upload-Token", create.uploadToken)
             .header("X-Linkit-Client-Device-Id", identity.deviceId)
+            .apply {
+                signedUploadHeaders(
+                    identityStore = identityStore,
+                    identity = identity,
+                    transferId = create.transferId,
+                    fileIndex = 0,
+                    uploadToken = create.uploadToken,
+                    contentLength = file.size
+                ).forEach { (name, value) -> header(name, value) }
+            }
             .put(body)
             .build()
 
@@ -289,9 +334,10 @@ class LinkitClient(
     private suspend fun finalizeTransfer(
         baseUrl: String,
         identityStore: IdentityStore,
-        finalizeUrl: String,
+        transferId: String,
         upload: UploadResult
     ): String? {
+        val finalizeUrl = "/v1/transfers/$transferId/finalize"
         val bodyJson = JSONObject()
             .put("bytesSent", upload.bytesSent)
             .put("finalSha256", upload.sha256)
@@ -348,6 +394,33 @@ class LinkitClient(
             "GET" -> builder.get().build()
             else -> error("Unsupported signed method $method")
         }
+    }
+
+    private fun signedUploadHeaders(
+        identityStore: IdentityStore,
+        identity: AndroidIdentity,
+        transferId: String,
+        fileIndex: Int,
+        uploadToken: String,
+        contentLength: Long
+    ): Map<String, String> {
+        val timestamp = System.currentTimeMillis().toString()
+        val nonce = IdentityStore.nonce()
+        val canonical = LinkitUploadSignature.canonicalString(
+            deviceId = identity.deviceId,
+            transferId = transferId,
+            fileIndex = fileIndex,
+            uploadToken = uploadToken,
+            contentLength = contentLength,
+            timestamp = timestamp,
+            nonce = nonce
+        )
+        return mapOf(
+            "X-Linkit-Device-Id" to identity.deviceId,
+            "X-Linkit-Timestamp" to timestamp,
+            "X-Linkit-Nonce" to nonce,
+            "X-Linkit-Signature" to identityStore.sign(canonical)
+        )
     }
 
     private suspend fun executeJson(request: Request): JSONObject {

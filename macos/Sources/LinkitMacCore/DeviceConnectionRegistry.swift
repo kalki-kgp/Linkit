@@ -23,7 +23,6 @@ final class DeviceConnectionRegistry {
         now: Date = Date()
     ) -> ConnectedDevice {
         lock.lock()
-        defer { lock.unlock() }
 
         let previous = connections[device.deviceId]
         let connectedAt = connections[device.deviceId]?.connectedAt ?? now.iso8601()
@@ -38,13 +37,18 @@ final class DeviceConnectionRegistry {
             lastSeenAt: now.iso8601()
         )
         connections[device.deviceId] = connected
+        lock.unlock()
+        postDeviceChange()
         return connected
     }
 
     func disconnect(deviceId: String) {
         lock.lock()
-        connections.removeValue(forKey: deviceId)
+        let removed = connections.removeValue(forKey: deviceId)
         lock.unlock()
+        if removed != nil {
+            postDeviceChange()
+        }
     }
 
     func connectedDevice(id: String) -> ConnectedDevice? {
@@ -55,8 +59,10 @@ final class DeviceConnectionRegistry {
 
     func refreshStatus(deviceId: String, batteryPercent: Int?, now: Date = Date()) -> ConnectedDevice? {
         lock.lock()
-        defer { lock.unlock() }
-        guard let existing = connections[deviceId] else { return nil }
+        guard let existing = connections[deviceId] else {
+            lock.unlock()
+            return nil
+        }
         let refreshed = ConnectedDevice(
             deviceId: existing.deviceId,
             deviceName: existing.deviceName,
@@ -68,6 +74,8 @@ final class DeviceConnectionRegistry {
             lastSeenAt: now.iso8601()
         )
         connections[deviceId] = refreshed
+        lock.unlock()
+        postDeviceChange()
         return refreshed
     }
 
@@ -80,5 +88,9 @@ final class DeviceConnectionRegistry {
     private func normalizedBatteryPercent(_ value: Int?) -> Int? {
         guard let value else { return nil }
         return min(100, max(0, value))
+    }
+
+    private func postDeviceChange() {
+        NotificationCenter.default.post(name: .linkitDevicesDidChange, object: nil)
     }
 }

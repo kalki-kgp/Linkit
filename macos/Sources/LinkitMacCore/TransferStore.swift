@@ -453,7 +453,10 @@ final class TransferStore {
                 LinkitTransferNotification.transferIdKey: record.id,
                 LinkitTransferNotification.filenameKey: record.originalName,
                 LinkitTransferNotification.statusKey: record.status.rawValue,
-                LinkitTransferNotification.errorKey: record.error ?? ""
+                LinkitTransferNotification.errorKey: record.error ?? "",
+                LinkitTransferNotification.savedPathKey: record.savedURL?.path ?? "",
+                LinkitTransferNotification.senderDeviceIdKey: record.clientDeviceId,
+                LinkitTransferNotification.sizeKey: record.expectedSize
             ]
         )
     }

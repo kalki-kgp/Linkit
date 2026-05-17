@@ -27,6 +27,7 @@ class LinkitReceiverService : Service() {
         startForegroundWithNotification(currentStatus("Listening for Mac drops"))
         val identityStore = IdentityStore(applicationContext)
         val active = AndroidDropReceiver(applicationContext, identityStore) { event ->
+            AndroidDropEvents.publish(event)
             updateNotification(event.status)
         }
         active.start()
@@ -59,7 +60,7 @@ class LinkitReceiverService : Service() {
     private fun startForegroundWithNotification(text: String) {
         val notification = buildNotification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

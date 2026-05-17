@@ -32,7 +32,7 @@ Open the app once after install so the background receiver service starts. On An
 1. Mac menu bar → **Show Pairing QR**.
 2. Android app → **Scan QR**.
 
-Or enter the Mac's private LAN IP, port `52718`, and pairing token manually.
+Scan the QR from the Mac menu-bar app. Manual token pairing is disabled because QR pairing includes a signed one-time challenge.
 
 The status item icon flips to `link.circle.fill` and the title becomes `Linkit (1)` once paired.
 
@@ -40,7 +40,7 @@ The status item icon flips to `link.circle.fill` and the title becomes `Linkit (
 
 **Phone → Mac:** pick files in the app, or tap **Share** in any Android app and choose Linkit. Files land in `~/Downloads/Linkit Drop` on the Mac.
 
-**Mac → Phone:** drag files onto the `Linkit` menu-bar item. Files land in `Downloads/Linkit Drop` on the phone.
+**Mac → Phone:** open Linkit on Android so the foreground receiver is running, then drag files onto the `Linkit` menu-bar item. Files land in `Downloads/Linkit Drop` on the phone.
 
 ## Where things live
 

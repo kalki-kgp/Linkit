@@ -65,7 +65,7 @@ final class StatusIconAnimator {
     private func startTimer() {
         guard timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + .milliseconds(33), repeating: .milliseconds(33))
+        timer.schedule(deadline: .now() + .milliseconds(67), repeating: .milliseconds(67))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.frame += 1

@@ -24,7 +24,7 @@ public final class TransferHistoryStore {
         do {
             try saveLocked()
         } catch {
-            fputs("Linkit history write failed: \(error)\n", stderr)
+            NSLog("Linkit history write failed: \(String(describing: error))")
         }
     }
 

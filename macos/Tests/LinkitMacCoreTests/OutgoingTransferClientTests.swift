@@ -5,9 +5,6 @@ import XCTest
 
 final class OutgoingTransferClientTests: XCTestCase {
     func testSendsFileToAndroidShapedReceiver() throws {
-        let receiver = try MockAndroidReceiver()
-        defer { receiver.stop() }
-
         let key = P256.Signing.PrivateKey()
         let publicKey = key.publicKey.x963Representation
         let identity = LinkitIdentity(
@@ -15,6 +12,9 @@ final class OutgoingTransferClientTests: XCTestCase {
             publicKey: publicKey.base64EncodedString(),
             privateKey: key
         )
+        let receiver = try MockAndroidReceiver(macIdentity: identity)
+        defer { receiver.stop() }
+
         let target = TrustedDevice(
             deviceId: "android-device",
             deviceName: "Pixel",
@@ -29,8 +29,10 @@ final class OutgoingTransferClientTests: XCTestCase {
         try Data("hello android\n".utf8).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
 
-        let result = try OutgoingTransferClient(identity: identity, logger: LinkitLogger())
-            .send(files: [file], to: target)
+        let result = try runOffMain {
+            try OutgoingTransferClient(identity: identity, logger: LinkitLogger())
+                .send(files: [file], to: target)
+        }
 
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].bytesSent, 14)
@@ -39,9 +41,6 @@ final class OutgoingTransferClientTests: XCTestCase {
     }
 
     func testFetchesAndroidDeviceStatus() throws {
-        let receiver = try MockAndroidReceiver()
-        defer { receiver.stop() }
-
         let key = P256.Signing.PrivateKey()
         let publicKey = key.publicKey.x963Representation
         let identity = LinkitIdentity(
@@ -49,6 +48,9 @@ final class OutgoingTransferClientTests: XCTestCase {
             publicKey: publicKey.base64EncodedString(),
             privateKey: key
         )
+        let receiver = try MockAndroidReceiver(macIdentity: identity)
+        defer { receiver.stop() }
+
         let target = TrustedDevice(
             deviceId: "android-device",
             deviceName: "Pixel",
@@ -59,7 +61,9 @@ final class OutgoingTransferClientTests: XCTestCase {
             receivePort: receiver.port
         )
 
-        let status = try OutgoingTransferClient(identity: identity, logger: LinkitLogger()).status(of: target)
+        let status = try runOffMain {
+            try OutgoingTransferClient(identity: identity, logger: LinkitLogger()).status(of: target)
+        }
 
         XCTAssertEqual(status.deviceId, "android-device")
         XCTAssertEqual(status.status, "connected")
@@ -73,9 +77,11 @@ private final class MockAndroidReceiver {
     private let queue = DispatchQueue(label: "linkit.mock.android.receiver")
     private var stopped = false
     private let lock = NSLock()
+    private let macIdentity: LinkitIdentity
     private(set) var uploadedBody = Data()
 
-    init() throws {
+    init(macIdentity: LinkitIdentity) throws {
+        self.macIdentity = macIdentity
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         socketFD = fd
@@ -133,7 +139,7 @@ private final class MockAndroidReceiver {
             let request = try readRequest(fd)
             switch (request.method, request.path) {
             case ("POST", "/v1/transfers"):
-                XCTAssertNotNil(request.headers["x-linkit-signature"])
+                XCTAssertTrue(try verifyControlSignature(request))
                 try writeJSON(fd, status: 201, json: """
                 {
                   "transferId":"tr_mock",
@@ -160,12 +166,13 @@ private final class MockAndroidReceiver {
                 """)
             case ("PUT", "/v1/transfers/tr_mock/files/0"):
                 XCTAssertEqual(request.headers["x-linkit-upload-token"], "upload-token")
+                XCTAssertTrue(try verifyUploadSignature(request, transferId: "tr_mock", uploadToken: "upload-token"))
                 lock.lock()
                 uploadedBody = request.body
                 lock.unlock()
                 try writeJSON(fd, status: 200, json: "{}")
             case ("POST", "/v1/transfers/tr_mock/finalize"):
-                XCTAssertNotNil(request.headers["x-linkit-signature"])
+                XCTAssertTrue(try verifyControlSignature(request))
                 try writeJSON(fd, status: 200, json: """
                 {
                   "transferId":"tr_mock",
@@ -188,7 +195,7 @@ private final class MockAndroidReceiver {
                 }
                 """)
             case ("GET", "/v1/devices/self/status"):
-                XCTAssertNotNil(request.headers["x-linkit-signature"])
+                XCTAssertTrue(try verifyControlSignature(request))
                 try writeJSON(fd, status: 200, json: """
                 {
                   "protocolVersion":1,
@@ -234,7 +241,44 @@ private final class MockAndroidReceiver {
             if count <= 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             body.append(temp, count: count)
         }
-        return MockRequest(method: requestLine[0], path: requestLine[1], headers: headers, body: body)
+        return MockRequest(method: requestLine[0], path: requestLine[1], headers: headers, contentLength: contentLength, body: body)
+    }
+
+    private func verifyControlSignature(_ request: MockRequest) throws -> Bool {
+        let bodyHash = SHA256.hash(data: request.body).linkitHex
+        let canonical = SignedRequestVerifier.canonicalString(
+            method: request.method,
+            path: request.path,
+            timestamp: request.headers["x-linkit-timestamp"] ?? "",
+            nonce: request.headers["x-linkit-nonce"] ?? "",
+            bodyHash: bodyHash
+        )
+        return try verifySignature(request, canonical: canonical)
+    }
+
+    private func verifyUploadSignature(_ request: MockRequest, transferId: String, uploadToken: String) throws -> Bool {
+        let canonical = SignedRequestVerifier.uploadCanonicalString(
+            deviceId: macIdentity.deviceId,
+            transferId: transferId,
+            fileIndex: 0,
+            uploadToken: uploadToken,
+            contentLength: Int64(request.contentLength),
+            timestamp: request.headers["x-linkit-timestamp"] ?? "",
+            nonce: request.headers["x-linkit-nonce"] ?? ""
+        )
+        return try verifySignature(request, canonical: canonical)
+    }
+
+    private func verifySignature(_ request: MockRequest, canonical: String) throws -> Bool {
+        XCTAssertEqual(request.headers["x-linkit-device-id"], macIdentity.deviceId)
+        guard let signatureText = request.headers["x-linkit-signature"],
+              let signatureData = Data(base64Encoded: signatureText) else {
+            return false
+        }
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: signatureData)
+        let publicKey = try P256.Signing.PublicKey(x963Representation: Data(base64Encoded: macIdentity.publicKey)!)
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return publicKey.isValidSignature(signature, for: digest)
     }
 
     private func writeJSON(_ fd: Int32, status: Int, json: String) throws {
@@ -261,5 +305,18 @@ private struct MockRequest {
     let method: String
     let path: String
     let headers: [String: String]
+    let contentLength: Int
     let body: Data
+}
+
+private func runOffMain<T>(_ body: @escaping () throws -> T) throws -> T {
+    let queue = DispatchQueue(label: "linkit.outgoing.test.off-main")
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: Result<T, Error>!
+    queue.async {
+        result = Result { try body() }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return try result.get()
 }
