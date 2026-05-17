@@ -39,6 +39,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
 
 private const val RECEIVER_TAG = "Linkit"
+private const val SESSION_TTL_MILLIS = 10 * 60 * 1000L
 
 data class AndroidDropEvent(
     val status: String,
@@ -51,6 +52,8 @@ class AndroidDropReceiver(
     private val identityStore: IdentityStore,
     private val onEvent: (AndroidDropEvent) -> Unit
 ) {
+    private val history = TransferHistoryStore.get(context)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = ConcurrentHashMap<String, DropSession>()
     private val nonceCache = AndroidNonceCache()
@@ -68,6 +71,7 @@ class AndroidDropReceiver(
                 onEvent(AndroidDropEvent("Mac drops enabled on port $PORT"))
                 while (isActive) {
                     val client = socket.accept()
+                    client.soTimeout = 60_000
                     launch { handleClient(client) }
                 }
             } catch (closed: IOException) {
@@ -101,6 +105,7 @@ class AndroidDropReceiver(
     }
 
     private fun route(request: DropRequest): DropResponse {
+        sweepExpiredSessions()
         if (request.method == "GET" && request.path == "/v1/info") {
             val identity = identityStore.identity()
             return jsonResponse(
@@ -196,14 +201,21 @@ class AndroidDropReceiver(
 
     private fun uploadFile(request: DropRequest, transferId: String, index: Int): JSONObject {
         val session = sessions[transferId] ?: throw DropHttpFailure(404, "not_found", "Transfer was not found")
+        ensureLive(session)
         if (index != 0) throw DropHttpFailure(404, "not_found", "File index was not found")
         if (request.contentLength != session.expectedSize) {
             throw DropHttpFailure(400, "content_length_mismatch", "Content-Length must match transfer size")
         }
-        if (request.headers["x-linkit-upload-token"] != session.uploadToken) {
+        val uploadToken = request.headers["x-linkit-upload-token"]
+            ?: throw DropHttpFailure(401, "upload_token_rejected", "Upload token was not accepted")
+        if (uploadToken != session.uploadToken) {
             throw DropHttpFailure(401, "upload_token_rejected", "Upload token was not accepted")
         }
-        if (request.headers["x-linkit-client-device-id"] != session.clientDeviceId) {
+        val signedDeviceId = verifyUploadSignature(request, transferId, index, uploadToken)
+        if (request.headers["x-linkit-client-device-id"] != signedDeviceId) {
+            throw DropHttpFailure(401, "client_device_mismatch", "Upload client device id does not match the signature")
+        }
+        if (signedDeviceId != session.clientDeviceId) {
             throw DropHttpFailure(401, "client_device_mismatch", "Upload token is not valid for this client device")
         }
         if (session.uploadTokenConsumed) {
@@ -252,6 +264,7 @@ class AndroidDropReceiver(
 
     private fun finalizeTransfer(transferId: String, json: JSONObject, deviceId: String): JSONObject {
         val session = sessions[transferId] ?: throw DropHttpFailure(404, "not_found", "Transfer was not found")
+        ensureLive(session)
         ensureOwner(session, deviceId)
         session.finalizeResponse?.let { return it }
 
@@ -264,6 +277,7 @@ class AndroidDropReceiver(
             val response = finalizeJson(session, message)
             session.finalizeResponse = response
             onEvent(AndroidDropEvent("Mac drop failed", error = message))
+            recordHistory(session)
             return response
         }
 
@@ -274,7 +288,11 @@ class AndroidDropReceiver(
             return failure("client_sha256_mismatch", "Create-transfer hash does not match streamed hash")
         }
 
-        val savedPath = saveToDownloads(session)
+        val savedPath = try {
+            saveToDownloads(session)
+        } catch (error: Exception) {
+            return failure("final_save_failed", "Could not save to Downloads: ${error.message ?: "unknown error"}")
+        }
         session.status = "complete"
         session.savedPath = savedPath
         session.error = null
@@ -282,7 +300,29 @@ class AndroidDropReceiver(
         val response = finalizeJson(session, null)
         session.finalizeResponse = response
         onEvent(AndroidDropEvent("Saved ${session.safeName}", savedPath = savedPath))
+        recordHistory(session)
         return response
+    }
+
+    private fun recordHistory(session: DropSession) {
+        val status = when (session.status) {
+            "complete" -> TransferHistoryEntry.STATUS_COMPLETE
+            "canceled" -> TransferHistoryEntry.STATUS_CANCELED
+            else -> TransferHistoryEntry.STATUS_FAILED
+        }
+        history.append(
+            TransferHistoryEntry(
+                id = session.id,
+                direction = TransferHistoryEntry.DIRECTION_RECEIVED,
+                filename = session.safeName,
+                size = session.expectedSize,
+                peerName = identityStore.trustedMac()?.deviceName.orEmpty(),
+                completedAt = System.currentTimeMillis(),
+                status = status,
+                savedPath = session.savedPath,
+                error = session.error
+            )
+        )
     }
 
     private fun saveToDownloads(session: DropSession): String {
@@ -296,19 +336,58 @@ class AndroidDropReceiver(
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: throw IOException("Could not create Downloads entry")
-            resolver.openOutputStream(uri)?.use { output ->
-                FileInputStream(session.tempFile).use { input -> input.copyTo(output, 1024 * 1024) }
-            } ?: throw IOException("Could not open Downloads entry")
-            values.clear()
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-            return "Downloads/Linkit Drop/${session.safeName}"
+            try {
+                resolver.openOutputStream(uri)?.use { output ->
+                    FileInputStream(session.tempFile).use { input -> input.copyTo(output, 1024 * 1024) }
+                } ?: throw IOException("Could not open Downloads entry")
+                values.clear()
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                return "Downloads/Linkit Drop/${session.safeName}"
+            } catch (error: Exception) {
+                runCatching { resolver.delete(uri, null, null) }
+                throw error
+            }
         }
 
         val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Linkit Drop").apply { mkdirs() }
         val target = collisionFile(dir, session.safeName)
         session.tempFile.copyTo(target, overwrite = false)
         return target.absolutePath
+    }
+
+    private fun verifyUploadSignature(request: DropRequest, transferId: String, index: Int, uploadToken: String): String {
+        val trusted = trustedMac()
+        val deviceId = request.headers["x-linkit-device-id"] ?: throw DropHttpFailure(401, "missing_upload_signature", "Signed upload request is required")
+        if (deviceId != trusted.deviceId) throw DropHttpFailure(401, "unknown_device", "Device is not paired")
+        val timestamp = request.headers["x-linkit-timestamp"]?.toLongOrNull()
+            ?: throw DropHttpFailure(401, "invalid_timestamp", "Signed upload timestamp is invalid")
+        val nonce = request.headers["x-linkit-nonce"] ?: throw DropHttpFailure(401, "missing_nonce", "Signed upload nonce is required")
+        val signature = request.headers["x-linkit-signature"]?.let { Base64.decode(it, Base64.DEFAULT) }
+            ?: throw DropHttpFailure(401, "invalid_upload_signature", "Upload signature is invalid")
+        val now = System.currentTimeMillis()
+        if (kotlin.math.abs(now - timestamp) > 60_000) {
+            throw DropHttpFailure(401, "clock_skew", "Signed upload timestamp is outside tolerance")
+        }
+        val canonical = LinkitUploadSignature.canonicalString(
+            deviceId = deviceId,
+            transferId = transferId,
+            fileIndex = index,
+            uploadToken = uploadToken,
+            contentLength = request.contentLength,
+            timestamp = timestamp.toString(),
+            nonce = nonce
+        )
+        val verifier = Signature.getInstance("SHA256withECDSA")
+        verifier.initVerify(publicKeyFromX963(trusted.publicKey))
+        verifier.update(canonical.toByteArray(Charsets.UTF_8))
+        if (!verifier.verify(signature)) {
+            throw DropHttpFailure(401, "invalid_upload_signature", "Upload signature is invalid")
+        }
+        if (!nonceCache.insert(deviceId, nonce)) {
+            throw DropHttpFailure(401, "nonce_replay", "Signed request nonce was already used")
+        }
+        return deviceId
     }
 
     private fun verifySigned(request: DropRequest, body: ByteArray): String {
@@ -352,7 +431,8 @@ class AndroidDropReceiver(
             if (header.size() > 64 * 1024) throw DropHttpFailure(400, "headers_too_large", "Request headers are too large")
         }
 
-        val text = String(header.toByteArray().dropLast(4).toByteArray(), Charsets.UTF_8)
+        val headerBytes = header.toByteArray()
+        val text = String(headerBytes.copyOf(headerBytes.size - delimiter.size), Charsets.UTF_8)
         val lines = text.split("\r\n")
         val requestLine = lines.first().split(" ")
         if (requestLine.size != 3) throw DropHttpFailure(400, "bad_request", "Invalid request line")
@@ -465,6 +545,23 @@ class AndroidDropReceiver(
         }
     }
 
+    private fun ensureLive(session: DropSession) {
+        if (System.currentTimeMillis() > session.expiresAtMillis) {
+            sessions.remove(session.id)
+            session.tempFile.delete()
+            throw DropHttpFailure(401, "session_expired", "Transfer session expired")
+        }
+    }
+
+    private fun sweepExpiredSessions() {
+        val now = System.currentTimeMillis()
+        sessions.entries.removeIf { entry ->
+            val expired = now > entry.value.expiresAtMillis
+            if (expired) entry.value.tempFile.delete()
+            expired
+        }
+    }
+
     private fun trustedMac(): TrustedMac {
         return identityStore.trustedMac() ?: throw DropHttpFailure(401, "unknown_device", "Pair with Mac first")
     }
@@ -549,6 +646,7 @@ private data class DropSession(
     val clientSha256: String?,
     val uploadToken: String,
     val tempFile: File,
+    val expiresAtMillis: Long = System.currentTimeMillis() + SESSION_TTL_MILLIS,
     var uploadTokenConsumed: Boolean = false,
     var status: String = "created",
     var bytesReceived: Long = 0,
@@ -560,12 +658,17 @@ private data class DropSession(
 
 private class DropHttpFailure(val status: Int, val error: String, override val message: String) : Exception(message)
 
-private class AndroidNonceCache(private val ttlMillis: Long = 120_000) {
+private class AndroidNonceCache(private val ttlMillis: Long = 120_000, private val maxEntries: Int = 4096) {
     private val entries = ConcurrentHashMap<String, Long>()
 
     fun insert(deviceId: String, nonce: String): Boolean {
         val now = System.currentTimeMillis()
         entries.entries.removeIf { it.value <= now }
+        if (entries.size >= maxEntries) {
+            entries.entries.sortedBy { it.value }
+                .take(entries.size - maxEntries + 1)
+                .forEach { entries.remove(it.key) }
+        }
         val key = "$deviceId:$nonce"
         return entries.putIfAbsent(key, now + ttlMillis) == null
     }

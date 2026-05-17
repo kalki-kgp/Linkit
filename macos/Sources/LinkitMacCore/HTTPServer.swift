@@ -298,7 +298,9 @@ final class HTTPServer {
                 throw HTTPFailure.unauthorized("missing_device_connection", "Signed device connection is required")
             }
             let update: DeviceUpdateRequest = try decodeJSON(body)
-            let device = try trustStore.updateConnection(deviceId: deviceId, host: remoteHost, receivePort: update.receivePort)
+            guard let device = trustStore.trustedDevice(id: deviceId) else {
+                throw HTTPFailure.unauthorized("unknown_device", "Device is not paired")
+            }
             let connected = connections.markConnected(
                 device: device,
                 host: remoteHost,
@@ -382,12 +384,18 @@ final class HTTPServer {
     private func handleUpload(request: HTTPRequest, transferId: String, index: Int, fd: Int32) throws -> HTTPResponse {
         let uploadToken = request.headers["x-linkit-upload-token"]
         let clientDeviceId = request.headers["x-linkit-client-device-id"]
+        let authenticatedDeviceId = try authenticateUpload(
+            request,
+            transferId: transferId,
+            index: index,
+            uploadToken: uploadToken
+        )
         let record = try store.beginUpload(
             id: transferId,
             index: index,
             contentLength: request.contentLength,
             uploadToken: uploadToken,
-            clientDeviceId: clientDeviceId
+            clientDeviceId: authenticatedDeviceId ?? clientDeviceId
         )
 
         let fileFD = open(record.tempURL.path, O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR)
@@ -478,6 +486,29 @@ final class HTTPServer {
             throw HTTPFailure.unauthorized("missing_signature", "Pairing and signed control requests are required")
         }
         try requireBearer(request)
+        return nil
+    }
+
+    private func authenticateUpload(_ request: HTTPRequest, transferId: String, index: Int, uploadToken: String?) throws -> String? {
+        if request.headers["x-linkit-signature"] != nil {
+            guard let uploadToken else {
+                throw HTTPFailure.unauthorized("upload_token_rejected", "Upload token was not accepted")
+            }
+            let deviceId = try signedVerifier.verifyUpload(
+                request: request,
+                transferId: transferId,
+                fileIndex: index,
+                uploadToken: uploadToken,
+                contentLength: request.contentLength
+            )
+            if let clientDeviceId = request.headers["x-linkit-client-device-id"], clientDeviceId != deviceId {
+                throw HTTPFailure.unauthorized("client_device_mismatch", "Upload client device id does not match the signature")
+            }
+            return deviceId
+        }
+        guard allowDevBearerTransfers else {
+            throw HTTPFailure.unauthorized("missing_upload_signature", "Signed upload request is required")
+        }
         return nil
     }
 

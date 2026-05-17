@@ -7,17 +7,29 @@ final class TrustStoreTests: XCTestCase {
         let fixture = try TrustFixture()
         defer { fixture.cleanup() }
 
-        let phoneKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        let phonePrivateKey = P256.Signing.PrivateKey()
+        let phoneKey = phonePrivateKey.publicKey.x963Representation
+        let phonePublicKey = phoneKey.base64EncodedString()
         let phoneDeviceId = LinkitDeviceId.fromPublicKey(phoneKey)
-        let token = fixture.pairing.currentToken().0
+        let payload = fixture.pairing.pairingPayload(ip: "10.0.0.1", port: 52718)
+        let signature = try pairingChallengeSignature(
+            privateKey: phonePrivateKey,
+            macDeviceId: fixture.identity.deviceId,
+            androidDeviceId: phoneDeviceId,
+            androidPublicKey: phonePublicKey,
+            pairingToken: payload.pairingToken,
+            challenge: payload.pairingChallenge
+        )
 
         _ = try fixture.pairing.pair(
             PairRequest(
                 deviceId: phoneDeviceId,
                 deviceName: "Pixel",
                 platform: "android",
-                publicKey: phoneKey.base64EncodedString(),
-                pairingToken: token,
+                publicKey: phonePublicKey,
+                pairingToken: payload.pairingToken,
+                pairingChallenge: payload.pairingChallenge,
+                pairingChallengeSignature: signature,
                 receivePort: 52718,
                 batteryPercent: 88
             ),
@@ -25,15 +37,17 @@ final class TrustStoreTests: XCTestCase {
         )
 
         let trusted = fixture.trust.trustedDevice(id: phoneDeviceId)
-        XCTAssertEqual(trusted?.lastKnownHost, "10.0.0.42")
-        XCTAssertEqual(trusted?.receivePort, 52718)
+        XCTAssertNil(trusted?.lastKnownHost)
+        XCTAssertNil(trusted?.receivePort)
+        let trustedDevice = try XCTUnwrap(trusted)
         XCTAssertEqual(fixture.connections.connectedDevice(id: phoneDeviceId)?.host, "10.0.0.42")
         XCTAssertEqual(fixture.connections.connectedDevice(id: phoneDeviceId)?.receivePort, 52718)
         XCTAssertEqual(fixture.connections.connectedDevice(id: phoneDeviceId)?.batteryPercent, 88)
 
-        let updated = try fixture.trust.updateConnection(deviceId: phoneDeviceId, host: "10.0.0.43", receivePort: 52719)
-        XCTAssertEqual(updated.lastKnownHost, "10.0.0.43")
-        XCTAssertEqual(updated.receivePort, 52719)
+        _ = fixture.connections.markConnected(device: trustedDevice, host: "10.0.0.43", receivePort: 52719, batteryPercent: 77)
+        let persisted = fixture.trust.trustedDevice(id: phoneDeviceId)
+        XCTAssertNil(persisted?.lastKnownHost)
+        XCTAssertNil(persisted?.receivePort)
     }
 
     func testDisconnectAndForgetDoNotMutateOtherTrust() throws {
@@ -85,6 +99,141 @@ final class TrustStoreTests: XCTestCase {
         let preserved = fixture.connections.markConnected(device: trusted, host: "10.0.0.43", receivePort: 52718, batteryPercent: nil)
         XCTAssertEqual(preserved.batteryPercent, 100)
     }
+
+    func testPairingRejectsExpiredToken() throws {
+        let fixture = try TrustFixture()
+        defer { fixture.cleanup() }
+
+        let phonePrivateKey = P256.Signing.PrivateKey()
+        let phoneKey = phonePrivateKey.publicKey.x963Representation
+        let phonePublicKey = phoneKey.base64EncodedString()
+        let phoneDeviceId = LinkitDeviceId.fromPublicKey(phoneKey)
+        let payload = fixture.pairing.pairingPayload(ip: "10.0.0.1", port: 52718)
+        let signature = try pairingChallengeSignature(
+            privateKey: phonePrivateKey,
+            macDeviceId: fixture.identity.deviceId,
+            androidDeviceId: phoneDeviceId,
+            androidPublicKey: phonePublicKey,
+            pairingToken: payload.pairingToken,
+            challenge: payload.pairingChallenge
+        )
+
+        fixture.pairing.expirePairingMaterialForTesting()
+
+        XCTAssertThrowsError(
+            try fixture.pairing.pair(
+                PairRequest(
+                    deviceId: phoneDeviceId,
+                    deviceName: "Pixel",
+                    platform: "android",
+                    publicKey: phonePublicKey,
+                    pairingToken: payload.pairingToken,
+                    pairingChallenge: payload.pairingChallenge,
+                    pairingChallengeSignature: signature,
+                    receivePort: nil,
+                    batteryPercent: nil
+                ),
+                remoteHost: "10.0.0.42"
+            )
+        ) { error in
+            XCTAssertEqual((error as? HTTPFailure)?.error, "pairing_token_expired")
+        }
+    }
+
+    func testPairingRejectsWrongTokenUnsupportedPlatformAndDeviceMismatch() throws {
+        let fixture = try TrustFixture()
+        defer { fixture.cleanup() }
+
+        let phonePrivateKey = P256.Signing.PrivateKey()
+        let phoneKey = phonePrivateKey.publicKey.x963Representation
+        let phonePublicKey = phoneKey.base64EncodedString()
+        let phoneDeviceId = LinkitDeviceId.fromPublicKey(phoneKey)
+        let payload = fixture.pairing.pairingPayload(ip: "10.0.0.1", port: 52718)
+        let signature = try pairingChallengeSignature(
+            privateKey: phonePrivateKey,
+            macDeviceId: fixture.identity.deviceId,
+            androidDeviceId: phoneDeviceId,
+            androidPublicKey: phonePublicKey,
+            pairingToken: payload.pairingToken,
+            challenge: payload.pairingChallenge
+        )
+
+        XCTAssertThrowsError(
+            try fixture.pairing.pair(
+                PairRequest(
+                    deviceId: phoneDeviceId,
+                    deviceName: "Pixel",
+                    platform: "android",
+                    publicKey: phonePublicKey,
+                    pairingToken: "wrong",
+                    pairingChallenge: payload.pairingChallenge,
+                    pairingChallengeSignature: signature,
+                    receivePort: nil,
+                    batteryPercent: nil
+                ),
+                remoteHost: "10.0.0.42"
+            )
+        ) { error in
+            XCTAssertEqual((error as? HTTPFailure)?.error, "pairing_token_rejected")
+        }
+
+        XCTAssertThrowsError(
+            try fixture.pairing.pair(
+                PairRequest(
+                    deviceId: phoneDeviceId,
+                    deviceName: "Laptop",
+                    platform: "macos",
+                    publicKey: phonePublicKey,
+                    pairingToken: payload.pairingToken,
+                    pairingChallenge: payload.pairingChallenge,
+                    pairingChallengeSignature: signature,
+                    receivePort: nil,
+                    batteryPercent: nil
+                ),
+                remoteHost: "10.0.0.42"
+            )
+        ) { error in
+            XCTAssertEqual((error as? HTTPFailure)?.error, "unsupported_platform")
+        }
+
+        XCTAssertThrowsError(
+            try fixture.pairing.pair(
+                PairRequest(
+                    deviceId: "not-\(phoneDeviceId)",
+                    deviceName: "Pixel",
+                    platform: "android",
+                    publicKey: phonePublicKey,
+                    pairingToken: payload.pairingToken,
+                    pairingChallenge: payload.pairingChallenge,
+                    pairingChallengeSignature: signature,
+                    receivePort: nil,
+                    batteryPercent: nil
+                ),
+                remoteHost: "10.0.0.42"
+            )
+        ) { error in
+            XCTAssertEqual((error as? HTTPFailure)?.error, "device_id_mismatch")
+        }
+    }
+}
+
+private func pairingChallengeSignature(
+    privateKey: P256.Signing.PrivateKey,
+    macDeviceId: String,
+    androidDeviceId: String,
+    androidPublicKey: String,
+    pairingToken: String,
+    challenge: String
+) throws -> String {
+    let canonical = LinkitPairingChallenge.canonicalString(
+        macDeviceId: macDeviceId,
+        androidDeviceId: androidDeviceId,
+        androidPublicKey: androidPublicKey,
+        pairingToken: pairingToken,
+        challenge: challenge
+    )
+    let digest = SHA256.hash(data: Data(canonical.utf8))
+    return try privateKey.signature(for: digest).derRepresentation.base64EncodedString()
 }
 
 private final class TrustFixture {

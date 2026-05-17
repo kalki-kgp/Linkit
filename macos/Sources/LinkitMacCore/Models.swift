@@ -43,6 +43,8 @@ public struct PairRequest: Codable {
     public let platform: String
     public let publicKey: String
     public let pairingToken: String
+    public let pairingChallenge: String?
+    public let pairingChallengeSignature: String?
     public let receivePort: UInt16?
     public let batteryPercent: Int?
 }
@@ -66,6 +68,7 @@ public struct PairingPayload: Codable {
     public let port: UInt16
     public let publicKey: String
     public let pairingToken: String
+    public let pairingChallenge: String
     public let pairingTokenExpiresAt: String
 }
 
@@ -239,14 +242,14 @@ enum TransferStatus: String {
     case canceled
 }
 
-struct HTTPFailure: Error {
-    let status: Int
-    let error: String
-    let message: String
+public struct HTTPFailure: Error {
+    public let status: Int
+    public let error: String
+    public let message: String
 }
 
 extension HTTPFailure: LocalizedError {
-    var errorDescription: String? { message }
+    public var errorDescription: String? { message }
 }
 
 extension HTTPFailure {
