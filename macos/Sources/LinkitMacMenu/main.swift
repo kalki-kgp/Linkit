@@ -1,8 +1,9 @@
 import AppKit
 import CoreImage
 import LinkitMacCore
+import UserNotifications
 
-final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     private var app: LinkitReceiverApp?
     private var statusItem: NSStatusItem?
     private var statusIcon: StatusIconAnimator?
@@ -10,12 +11,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var retiredWindows: [NSWindow] = []
     private var diagnosticsWindow: NSWindow?
     private var resetStatusWorkItem: DispatchWorkItem?
-    private var pairingPoller: DispatchSourceTimer?
     private var transferObservers: [NSObjectProtocol] = []
+    private var deviceObserver: NSObjectProtocol?
     private var lastTrustedSignature: String = ""
     private var lastConnectedSignature: String = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configureNotifications()
         do {
             let receiver = try LinkitReceiverApp()
             self.app = receiver
@@ -45,7 +47,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         refreshStatusButton()
         refreshMenu()
         startTransferObservers()
-        startPairingPoller()
+        startDeviceObserver()
     }
 
     private func refreshStatusButton() {
@@ -60,16 +62,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             tooltip = "Linkit connected to \(connected.count) device\(connected.count == 1 ? "" : "s")"
         }
         statusIcon?.setState(connected.isEmpty ? .disconnected : .connected, tooltip: tooltip)
-    }
-
-    private func startPairingPoller() {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 2, repeating: 2)
-        timer.setEventHandler { [weak self] in
-            self?.checkForTrustChanges()
-        }
-        timer.resume()
-        pairingPoller = timer
     }
 
     private func checkForTrustChanges() {
@@ -115,6 +107,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         window.orderOut(nil)
 
         retiredWindows.append(window)
+        // Keep a short strong reference; dropping the window immediately after
+        // orderOut can race AppKit teardown for the QR panel.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak window] in
             guard let self, let window else { return }
             self.retiredWindows.removeAll { $0 === window }
@@ -329,7 +323,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 }
             } catch {
                 DispatchQueue.main.async {
-                    app.disconnectDevice(deviceId)
+                    if let failure = error as? HTTPFailure,
+                       failure.status == 401 || failure.error == "device_status_mismatch" {
+                        app.disconnectDevice(deviceId)
+                    }
                     self.showTransientIcon(.error, tooltip: "Device status unavailable")
                     self.refreshMenu()
                     self.showNonFatalError("Could not refresh device status: \(error.localizedDescription)")
@@ -339,10 +336,12 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc private func quit() {
-        pairingPoller?.cancel()
-        pairingPoller = nil
         transferObservers.forEach(NotificationCenter.default.removeObserver)
         transferObservers.removeAll()
+        if let deviceObserver {
+            NotificationCenter.default.removeObserver(deviceObserver)
+        }
+        deviceObserver = nil
         NSApp.terminate(nil)
     }
 
@@ -420,14 +419,99 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 let status = notification.userInfo?[LinkitTransferNotification.statusKey] as? String
                 if status == "complete" {
                     self?.showTransientIcon(.success, tooltip: "Transfer complete")
+                    self?.postReceivedNotification(userInfo: notification.userInfo)
                 } else if status == "canceled" {
                     self?.refreshStatusButton()
                 } else {
                     self?.showTransientIcon(.error, tooltip: "Transfer failed")
+                    self?.postReceiveFailedNotification(userInfo: notification.userInfo)
                 }
                 self?.refreshMenu()
             }
         )
+    }
+
+    private func startDeviceObserver() {
+        deviceObserver = NotificationCenter.default.addObserver(
+            forName: .linkitDevicesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.checkForTrustChanges()
+        }
+    }
+
+    private func configureNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let reveal = UNNotificationAction(identifier: "linkit.reveal", title: "Show in Finder", options: [])
+        let open = UNNotificationAction(identifier: "linkit.open", title: "Open", options: [.foreground])
+        let category = UNNotificationCategory(identifier: "linkit.receive", actions: [open, reveal], intentIdentifiers: [], options: [])
+        center.setNotificationCategories([category])
+    }
+
+    private func postReceivedNotification(userInfo: [AnyHashable: Any]?) {
+        guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
+        let senderId = userInfo?[LinkitTransferNotification.senderDeviceIdKey] as? String
+        let savedPath = (userInfo?[LinkitTransferNotification.savedPathKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let size = userInfo?[LinkitTransferNotification.sizeKey] as? Int64
+        let senderName = trustedDeviceName(forId: senderId) ?? "your device"
+
+        let content = UNMutableNotificationContent()
+        content.title = "Received from \(senderName)"
+        var subtitle = filename
+        if let size, size > 0 {
+            subtitle += " · \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))"
+        }
+        content.body = subtitle
+        content.sound = .default
+        content.categoryIdentifier = "linkit.receive"
+        if let savedPath { content.userInfo = ["savedPath": savedPath] }
+
+        let request = UNNotificationRequest(identifier: "linkit.received.\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+    }
+
+    private func postReceiveFailedNotification(userInfo: [AnyHashable: Any]?) {
+        guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
+        let error = (userInfo?[LinkitTransferNotification.errorKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let content = UNMutableNotificationContent()
+        content.title = "Linkit transfer failed"
+        content.body = error.map { "\(filename) — \($0)" } ?? filename
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "linkit.failed.\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+    }
+
+    private func trustedDeviceName(forId deviceId: String?) -> String? {
+        guard let deviceId, !deviceId.isEmpty, let app else { return nil }
+        return app.trustedDevices().first { $0.deviceId == deviceId }?.deviceName
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        let savedPath = response.notification.request.content.userInfo["savedPath"] as? String
+        switch response.actionIdentifier {
+        case "linkit.reveal":
+            if let savedPath {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: savedPath)])
+            } else if let dropFolder = app?.dropFolder {
+                NSWorkspace.shared.open(dropFolder)
+            }
+        case "linkit.open", UNNotificationDefaultActionIdentifier:
+            if let savedPath {
+                NSWorkspace.shared.open(URL(fileURLWithPath: savedPath))
+            } else if let dropFolder = app?.dropFolder {
+                NSWorkspace.shared.open(dropFolder)
+            }
+        default:
+            break
+        }
+        completionHandler()
     }
 
     private func recentTransfersMenuItem(app: LinkitReceiverApp) -> NSMenuItem {
