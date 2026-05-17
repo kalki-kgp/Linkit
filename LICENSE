@@ -1,0 +1,36 @@
+Linkit Source-Available License (Personal Use)
+Copyright (c) 2026 Krishna (@kalkikgp)
+
+This is a custom, non-standard, source-available license. It is not an OSI- or
+FSF-approved open source license and has no SPDX identifier. If you need a
+recognized license, this software is not for you.
+
+1. Grant. The copyright holder grants you a non-exclusive, non-transferable,
+   royalty-free license to view, download, build, install, run, and modify
+   this software, in source or binary form, solely for your own personal,
+   non-commercial use on devices you personally own or operate.
+
+2. No redistribution. You may not distribute, publish, sublicense, sell, host,
+   transmit, mirror, fork-and-publish, or otherwise make this software, or any
+   modified version of it, available to any third party in any form. This
+   applies to source, binaries, patches, and derivative works alike. Linking
+   to the original repository is permitted.
+
+3. Contributions. If you submit a patch, pull request, issue text, or other
+   contribution to this repository, you grant the copyright holder a
+   perpetual, worldwide, royalty-free, irrevocable license to use, modify,
+   relicense, and distribute that contribution as part of the software,
+   under this or any other license the copyright holder chooses.
+
+4. No trademark or endorsement rights are granted. "Linkit" and any
+   associated marks remain the property of the copyright holder.
+
+5. Termination. Your rights under this license terminate automatically if
+   you breach any term. On termination you must delete all copies in your
+   possession.
+
+6. No warranty. The software is provided "as is", without warranty of any
+   kind, express or implied. The copyright holder is not liable for any
+   damages arising from use of the software.
+
+All rights not expressly granted above are reserved.
