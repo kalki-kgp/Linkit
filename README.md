@@ -98,4 +98,4 @@ For local setup, sideloading, scripts, and protocol details, see [`docs/SETUP.md
 
 ## License & contact
 
-Built by Krishna ([@kalkikgp](https://kalkikgp.tech)). Private project — no public distribution yet.
+Built by Krishna ([@kalki-kgp](https://kalkikgp.tech)). Private project — no public distribution yet.
