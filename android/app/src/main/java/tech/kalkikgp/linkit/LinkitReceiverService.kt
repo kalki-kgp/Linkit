@@ -11,9 +11,15 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class LinkitReceiverService : Service() {
     private var receiver: AndroidDropReceiver? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
@@ -21,6 +27,7 @@ class LinkitReceiverService : Service() {
         startForegroundWithNotification(currentStatus("Listening for Mac drops"))
         val identityStore = IdentityStore(applicationContext)
         val active = AndroidDropReceiver(applicationContext, identityStore) { event ->
+            AndroidDropEvents.publish(event)
             updateNotification(event.status)
         }
         active.start()
@@ -29,7 +36,13 @@ class LinkitReceiverService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            serviceScope.launch {
+                val identityStore = IdentityStore(applicationContext)
+                identityStore.trustedMac()?.let { mac ->
+                    runCatching { LinkitClient().disconnect(mac, identityStore) }
+                }
+                stopSelf()
+            }
             return START_NOT_STICKY
         }
         return START_STICKY
@@ -38,6 +51,7 @@ class LinkitReceiverService : Service() {
     override fun onDestroy() {
         receiver?.stop()
         receiver = null
+        serviceScope.cancel()
         super.onDestroy()
     }
 
@@ -46,7 +60,7 @@ class LinkitReceiverService : Service() {
     private fun startForegroundWithNotification(text: String) {
         val notification = buildNotification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

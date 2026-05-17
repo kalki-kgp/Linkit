@@ -51,21 +51,39 @@ The QR payload is JSON:
   "port": 52718,
   "publicKey": "base64-x963-p256-public-key",
   "pairingToken": "short-lived-token",
+  "pairingChallenge": "single-use-random-challenge",
   "pairingTokenExpiresAt": "2026-05-13T18:51:07Z"
 }
 ```
 
-The token TTL is 2 minutes.
+The token/challenge TTL is 2 minutes. Android signs a canonical pairing challenge with its P-256 private key before `POST /v1/pair`; the Mac verifies that signature against the Android public key (and against the Mac's own server-side `expected.challenge`, not whatever the client echoed) before it stores trust.
+
+The pair-request canonical string is:
+
+```txt
+LINKIT_PAIR
+<macDeviceId>
+<androidDeviceId>
+<androidPublicKey>     # base64 x963 representation, byte-identical to the QR payload
+<pairingToken>
+<pairingChallenge>
+```
+
+`POST /v1/pair` body includes `pairingChallenge` and `pairingChallengeSignature` (base64 DER ECDSA over `SHA256(canonical)`) alongside the existing `deviceId`/`deviceName`/`platform`/`publicKey`/`pairingToken` fields.
 
 ## Upload
 
-The file `PUT` is intentionally not body-signed:
+The file `PUT` streams the body unsigned, but the upload slot is signed by the paired device key:
 
 ```txt
 PUT /v1/transfers/:id/files/:index
 X-Linkit-Upload-Token: <single-use token>
 X-Linkit-Client-Device-Id: <paired Android device id>
+X-Linkit-Device-Id: <paired Android device id>
+X-Linkit-Timestamp: <unix-ms>
+X-Linkit-Nonce: <random>
+X-Linkit-Signature: ECDSA_SHA256("UPLOAD\n<deviceId>\n<transferId>\n<fileIndex>\n<uploadToken>\n<contentLength>\n<timestamp>\n<nonce>")
 Content-Length: <expected size>
 ```
 
-The receiver binds the token to `transferId`, `fileIndex`, `expectedSize`, `clientDeviceId`, expiry, and single-use state.
+The receiver binds the token to `transferId`, `fileIndex`, `expectedSize`, `clientDeviceId`, expiry, single-use state, and the upload signature.

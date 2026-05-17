@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -62,13 +63,16 @@ import androidx.lifecycle.viewModelScope
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.time.Instant
+import java.util.UUID
 import kotlin.math.max
 import kotlin.math.roundToLong
 
@@ -81,10 +85,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        linkitViewModel.consumeShareIntent(intent)
+        consumeIncomingShareIntent(intent)
         requestNotificationPermissionIfNeeded()
         if (IdentityStore(applicationContext).trustedMac() != null) {
             LinkitReceiverService.start(applicationContext)
+            linkitViewModel.connectMac()
         }
         setContent {
             LinkitTheme {
@@ -106,7 +111,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        consumeIncomingShareIntent(intent)
+    }
+
+    private fun consumeIncomingShareIntent(intent: Intent?) {
         linkitViewModel.consumeShareIntent(intent)
+        if (intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_SEND_MULTIPLE) {
+            setIntent(Intent(this, MainActivity::class.java))
+        }
     }
 }
 
@@ -116,6 +128,7 @@ data class LinkitUiState(
     val pairingToken: String = "",
     val pickedFiles: List<PickedFile> = emptyList(),
     val trustedMac: TrustedMac? = null,
+    val isConnectedToMac: Boolean = false,
     val isPairing: Boolean = false,
     val isSending: Boolean = false,
     val bytesSent: Long = 0,
@@ -135,12 +148,20 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private val client = LinkitClient()
     private val identityStore = IdentityStore(application)
     private val discovery = BonjourDiscovery(application)
+    private val history = TransferHistoryStore.get(application)
+    val historyEntries: StateFlow<List<TransferHistoryEntry>> = history.entries
+
     private val _uiState = MutableStateFlow(
         LinkitUiState(
             trustedMac = identityStore.trustedMac(),
             macIp = identityStore.trustedMac()?.ip.orEmpty(),
             port = identityStore.trustedMac()?.port?.toString() ?: "52718",
-            status = if (identityStore.trustedMac() == null) "Pair with Mac" else "Ready"
+            status = if (identityStore.trustedMac() == null) "Pair with Mac" else "Paired, offline",
+            androidReceiverStatus = if (identityStore.trustedMac() == null) {
+                "Pair with Mac to receive drops"
+            } else {
+                "Connecting to Mac for drops"
+            }
         )
     )
     val uiState: StateFlow<LinkitUiState> = _uiState
@@ -149,7 +170,9 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private var startedAtMillis: Long = 0
 
     init {
-        identityStore.trustedMac()?.let(::registerAndroidReceiver)
+        viewModelScope.launch {
+            AndroidDropEvents.events.collect { handleDropEvent(it) }
+        }
     }
 
     override fun onCleared() {
@@ -204,30 +227,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun pairManual() {
-        val state = _uiState.value
-        val ip = PrivateLanTarget.validateIp(state.macIp).getOrElse { error ->
-            _uiState.update { it.copy(error = error.message) }
-            return
-        }
-        val port = PrivateLanTarget.validatePort(state.port).getOrElse { error ->
-            _uiState.update { it.copy(error = error.message) }
-            return
-        }
-        val token = state.pairingToken.trim()
-        if (token.isEmpty()) {
-            _uiState.update { it.copy(error = "Pairing token is required", tokenRejected = true) }
-            return
-        }
-        pair(
-            MacPairingPayload(
-                deviceId = "",
-                deviceName = "Linkit Mac",
-                publicKey = "",
-                ip = ip,
-                port = port,
-                pairingToken = token
+        _uiState.update {
+            it.copy(
+                error = "Manual token pairing is disabled. Scan the QR so Android can sign the Mac challenge.",
+                tokenRejected = true
             )
-        )
+        }
     }
 
     fun pairFromQr(raw: String) {
@@ -249,15 +254,57 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun forgetMac() {
-        identityStore.forgetTrustedMac()
-        _uiState.update {
-            it.copy(
-                trustedMac = null,
-                status = "Pair with Mac",
-                savedPath = null,
-                androidReceiverStatus = "Pair with Mac to receive drops"
-            )
+        val mac = identityStore.trustedMac()
+        viewModelScope.launch {
+            mac?.let {
+                runCatching { client.disconnect(it, identityStore) }
+            }
+            LinkitReceiverService.stop(getApplication())
+            identityStore.forgetTrustedMac()
+            _uiState.update {
+                it.copy(
+                    trustedMac = null,
+                    isConnectedToMac = false,
+                    status = "Pair with Mac",
+                    savedPath = null,
+                    androidReceiverStatus = "Pair with Mac to receive drops"
+                )
+            }
         }
+    }
+
+    fun disconnectMac() {
+        val mac = _uiState.value.trustedMac ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(status = "Disconnecting", error = null) }
+            runCatching {
+                client.disconnect(mac, identityStore)
+            }.onSuccess {
+                LinkitReceiverService.stop(getApplication())
+                _uiState.update {
+                    it.copy(
+                        isConnectedToMac = false,
+                        status = "Paired, offline",
+                        androidReceiverStatus = "Disconnected from Mac"
+                    )
+                }
+            }.onFailure { error ->
+                LinkitReceiverService.stop(getApplication())
+                _uiState.update {
+                    it.copy(
+                        isConnectedToMac = false,
+                        status = "Paired, offline",
+                        androidReceiverStatus = "Could not notify Mac: ${error.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun connectMac() {
+        val mac = _uiState.value.trustedMac ?: return
+        _uiState.update { it.copy(status = "Connecting", androidReceiverStatus = "Connecting to Mac for drops", error = null) }
+        registerAndroidReceiver(mac)
     }
 
     fun discoverMac() {
@@ -304,21 +351,24 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 val mac = client.pair(
                     baseUrl = PrivateLanTarget.baseUrl(validatedPayload.ip, validatedPayload.port),
                     payload = validatedPayload,
-                    identity = identityStore.identity()
+                    identityStore = identityStore,
+                    batteryPercent = BatteryStatus.percent(getApplication())
                 )
                 identityStore.saveTrustedMac(mac)
-                registerAndroidReceiver(mac)
                 _uiState.update {
                     it.copy(
                         trustedMac = mac,
                         macIp = mac.ip,
                         port = mac.port.toString(),
+                        isConnectedToMac = true,
                         isPairing = false,
-                        status = "Paired",
+                        status = "Connected",
+                        androidReceiverStatus = "Mac drops enabled",
                         error = null,
                         tokenRejected = false
                     )
                 }
+                registerAndroidReceiver(mac)
             } catch (http: LinkitHttpException) {
                 _uiState.update {
                     it.copy(isPairing = false, status = "Pairing failed", error = http.message, tokenRejected = http.statusCode == 401)
@@ -343,6 +393,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         val trusted = state.trustedMac
         if (trusted == null) {
             _uiState.update { it.copy(error = "Pair with your Mac first") }
+            return
+        }
+        if (!state.isConnectedToMac) {
+            _uiState.update { it.copy(error = "Connect to your Mac first") }
             return
         }
         val ip = PrivateLanTarget.validateIp(state.macIp).getOrElse { error ->
@@ -383,21 +437,30 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                             status = if (files.size > 1) "Sending ${index + 1}/${files.size}" else "Sending"
                         )
                     }
-                    val result = client.sendFile(
-                        contentResolver = getApplication<Application>().contentResolver,
-                        mac = mac,
-                        identityStore = identityStore,
-                        file = file,
-                        onRetry = { message ->
-                            _uiState.update { it.copy(status = message, speedBytesPerSecond = 0.0, etaSeconds = null) }
-                            startedAtMillis = SystemClock.elapsedRealtime()
-                        },
-                        onProgress = { sent, _ ->
-                            updateProgress(completedBytes + sent, files.sumOf { picked -> picked.size }, index + 1, files.size)
-                        }
-                    )
+                    val result = try {
+                        client.sendFile(
+                            contentResolver = getApplication<Application>().contentResolver,
+                            mac = mac,
+                            identityStore = identityStore,
+                            file = file,
+                            onRetry = { message ->
+                                _uiState.update { it.copy(status = message, speedBytesPerSecond = 0.0, etaSeconds = null) }
+                                startedAtMillis = SystemClock.elapsedRealtime()
+                            },
+                            onProgress = { sent, _ ->
+                                updateProgress(completedBytes + sent, files.sumOf { picked -> picked.size }, index + 1, files.size)
+                            }
+                        )
+                    } catch (cancelled: CancellationException) {
+                        recordSentHistory(file, mac, TransferHistoryEntry.STATUS_CANCELED, null, null)
+                        throw cancelled
+                    } catch (sendError: Throwable) {
+                        recordSentHistory(file, mac, TransferHistoryEntry.STATUS_FAILED, null, sendError.message)
+                        throw sendError
+                    }
                     completedBytes += result.bytesSent
                     lastSavedPath = result.savedPath
+                    recordSentHistory(file, mac, TransferHistoryEntry.STATUS_COMPLETE, result.savedPath, null)
                 }
 
                 _uiState.update {
@@ -453,16 +516,51 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         LinkitReceiverService.start(getApplication())
         viewModelScope.launch {
             runCatching {
-                client.registerReceiver(mac, identityStore, AndroidDropReceiver.PORT)
+                client.registerReceiver(
+                    mac = mac,
+                    identityStore = identityStore,
+                    receivePort = AndroidDropReceiver.PORT,
+                    batteryPercent = BatteryStatus.percent(getApplication())
+                )
             }.onSuccess {
                 _uiState.update { state ->
-                    state.copy(androidReceiverStatus = "Mac drops enabled")
+                    state.copy(
+                        isConnectedToMac = true,
+                        status = if (state.isSending || state.isPairing) state.status else "Connected",
+                        androidReceiverStatus = "Mac drops enabled"
+                    )
                 }
             }.onFailure { error ->
                 _uiState.update { state ->
-                    state.copy(androidReceiverStatus = "Open Linkit on Mac to enable drops: ${error.message}")
+                    state.copy(
+                        isConnectedToMac = false,
+                        status = if (state.trustedMac == null) "Pair with Mac" else "Paired, offline",
+                        androidReceiverStatus = "Open Linkit on Mac to connect: ${error.message}"
+                    )
                 }
             }
+        }
+    }
+
+    fun clearHistory() {
+        history.clear()
+    }
+
+    private fun recordSentHistory(file: PickedFile, mac: TrustedMac, status: String, savedPath: String?, error: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            history.append(
+                TransferHistoryEntry(
+                    id = "snd_${UUID.randomUUID()}",
+                    direction = TransferHistoryEntry.DIRECTION_SENT,
+                    filename = file.name,
+                    size = file.size,
+                    peerName = mac.deviceName,
+                    completedAt = System.currentTimeMillis(),
+                    status = status,
+                    savedPath = savedPath,
+                    error = error
+                )
+            )
         }
     }
 
@@ -539,6 +637,7 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .systemBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -604,6 +703,12 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                     )
                     if (state.trustedMac != null) {
                         SecondaryButton(
+                            text = if (state.isConnectedToMac) "Disconnect" else "Connect",
+                            onClick = if (state.isConnectedToMac) viewModel::disconnectMac else viewModel::connectMac,
+                            enabled = !state.isSending && !state.isPairing,
+                            modifier = Modifier.weight(1f)
+                        )
+                        SecondaryButton(
                             text = "Forget",
                             onClick = viewModel::forgetMac,
                             enabled = !state.isSending,
@@ -625,7 +730,7 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                     PrimaryButton(
                         text = "Send",
                         onClick = viewModel::send,
-                        enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.trustedMac != null,
+                        enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.isConnectedToMac,
                         modifier = Modifier.weight(1f)
                     )
                     if (state.isSending) {
@@ -639,6 +744,9 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
             }
 
             TransferStatus(state)
+
+            val history by viewModel.historyEntries.collectAsStateWithLifecycle()
+            HistorySection(history, onClear = viewModel::clearHistory)
         }
     }
 }
@@ -667,9 +775,10 @@ private fun Header(state: LinkitUiState) {
             StatusPill(state)
         }
         state.trustedMac?.let { mac ->
+            val connectionLabel = if (state.isConnectedToMac) "Connected to" else "Paired with"
             Text(
-                text = "Paired with ${mac.deviceName}",
-                color = WorkbenchColors.Signal,
+                text = "$connectionLabel ${mac.deviceName}",
+                color = if (state.isConnectedToMac) WorkbenchColors.Signal else WorkbenchColors.Muted,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -699,7 +808,8 @@ private fun StatusPill(state: LinkitUiState) {
     val color = when {
         state.error != null -> WorkbenchColors.Error
         state.isSending || state.isPairing -> WorkbenchColors.Warning
-        state.trustedMac != null -> WorkbenchColors.Signal
+        state.isConnectedToMac -> WorkbenchColors.Signal
+        state.trustedMac != null -> WorkbenchColors.Muted
         else -> WorkbenchColors.Muted
     }
     Row(
@@ -916,6 +1026,132 @@ private fun TransferStatus(state: LinkitUiState) {
         }
 
         Spacer(modifier = Modifier.height(1.dp))
+    }
+}
+
+@Composable
+private fun HistorySection(entries: List<TransferHistoryEntry>, onClear: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "HISTORY",
+            color = WorkbenchColors.Muted,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(WorkbenchColors.Panel)
+                .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(8.dp))
+                .padding(vertical = 4.dp)
+        ) {
+            if (entries.isEmpty()) {
+                Text(
+                    text = "No transfers yet",
+                    color = WorkbenchColors.Muted,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(12.dp)
+                )
+            } else {
+                entries.take(20).forEachIndexed { index, entry ->
+                    HistoryRow(entry)
+                    if (index < entries.lastIndex && index < 19) {
+                        Spacer(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(WorkbenchColors.Line)
+                        )
+                    }
+                }
+            }
+        }
+        if (entries.isNotEmpty()) {
+            SecondaryButton(
+                text = "Clear history",
+                onClick = onClear,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoryRow(entry: TransferHistoryEntry) {
+    val arrow = if (entry.direction == TransferHistoryEntry.DIRECTION_SENT) "↑" else "↓"
+    val arrowColor = if (entry.direction == TransferHistoryEntry.DIRECTION_SENT) WorkbenchColors.Warning else WorkbenchColors.Signal
+    val statusColor = when (entry.status) {
+        TransferHistoryEntry.STATUS_COMPLETE -> WorkbenchColors.Signal
+        TransferHistoryEntry.STATUS_FAILED -> WorkbenchColors.Error
+        else -> WorkbenchColors.Muted
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = arrow,
+            color = arrowColor,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = entry.filename,
+                color = WorkbenchColors.Paper,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            val meta = buildString {
+                append(formatBytes(entry.size))
+                if (entry.peerName.isNotBlank()) {
+                    append("  •  ")
+                    append(if (entry.direction == TransferHistoryEntry.DIRECTION_SENT) "to ${entry.peerName}" else "from ${entry.peerName}")
+                }
+                append("  •  ")
+                append(formatRelative(entry.completedAt))
+            }
+            Text(meta, color = WorkbenchColors.Muted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            entry.savedPath?.let {
+                Text(
+                    text = it,
+                    color = WorkbenchColors.Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            entry.error?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    text = it,
+                    color = WorkbenchColors.Error,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Text(
+            text = entry.status.replaceFirstChar { it.uppercase() },
+            color = statusColor,
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+private fun formatRelative(epochMillis: Long): String {
+    val deltaSeconds = ((System.currentTimeMillis() - epochMillis) / 1000).coerceAtLeast(0)
+    return when {
+        deltaSeconds < 60 -> "just now"
+        deltaSeconds < 3600 -> "${deltaSeconds / 60}m ago"
+        deltaSeconds < 86_400 -> "${deltaSeconds / 3600}h ago"
+        deltaSeconds < 7 * 86_400 -> "${deltaSeconds / 86_400}d ago"
+        else -> java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(epochMillis))
     }
 }
 

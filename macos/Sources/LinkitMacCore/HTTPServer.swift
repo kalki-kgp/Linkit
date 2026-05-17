@@ -32,6 +32,7 @@ public final class LinkitReceiverApp {
     private let server: HTTPServer
     private let bonjour: BonjourAdvertiser?
     private let trustStore: TrustStore
+    private let connections: DeviceConnectionRegistry
     private let pairingManager: PairingManager
     private let outgoingClient: OutgoingTransferClient
 
@@ -43,7 +44,8 @@ public final class LinkitReceiverApp {
         self.logFile = logger.fileURL
         self.identity = try IdentityStore().loadOrCreate()
         self.trustStore = try TrustStore()
-        self.pairingManager = try PairingManager(identity: identity, trustStore: trustStore, logger: logger)
+        self.connections = DeviceConnectionRegistry()
+        self.pairingManager = try PairingManager(identity: identity, trustStore: trustStore, connections: connections, logger: logger)
         self.history = try TransferHistoryStore()
         self.outgoingClient = OutgoingTransferClient(identity: identity, logger: logger)
         self.store = try TransferStore(destination: configuration.destination, logger: logger, history: history)
@@ -61,6 +63,7 @@ public final class LinkitReceiverApp {
             allowDevBearerTransfers: configuration.allowDevBearerTransfers,
             identity: identity,
             trustStore: trustStore,
+            connections: connections,
             pairingManager: pairingManager,
             store: store,
             history: history,
@@ -91,12 +94,53 @@ public final class LinkitReceiverApp {
         trustStore.allDevices()
     }
 
-    public func sendFilesToFirstAndroid(_ files: [URL]) throws -> [OutgoingTransferResult] {
-        guard let device = trustStore.allDevices().first(where: {
-            $0.platform.lowercased() == "android" && $0.lastKnownHost != nil && $0.receivePort != nil
-        }) else {
-            throw HTTPFailure.badRequest("missing_android_receiver", "Open Linkit on paired Android first, then drop the file again")
+    public func connectedDevices() -> [ConnectedDevice] {
+        connections.allConnected()
+    }
+
+    public func disconnectDevice(_ deviceId: String) {
+        connections.disconnect(deviceId: deviceId)
+    }
+
+    public func refreshConnectedDevice(_ deviceId: String) throws -> ConnectedDevice {
+        guard let connected = connections.connectedDevice(id: deviceId),
+              let trusted = trustStore.trustedDevice(id: deviceId)
+        else {
+            throw HTTPFailure.badRequest("device_not_connected", "Device is not connected")
         }
+        let target = TrustedDevice(
+            deviceId: trusted.deviceId,
+            deviceName: trusted.deviceName,
+            platform: trusted.platform,
+            publicKey: trusted.publicKey,
+            pairedAt: trusted.pairedAt,
+            lastKnownHost: connected.host,
+            receivePort: connected.receivePort
+        )
+        let status = try outgoingClient.status(of: target)
+        return connections.refreshStatus(deviceId: deviceId, batteryPercent: status.batteryPercent) ?? connected
+    }
+
+    public func forgetDevice(_ deviceId: String) throws {
+        _ = try trustStore.remove(deviceId: deviceId)
+        connections.disconnect(deviceId: deviceId)
+    }
+
+    public func sendFilesToFirstAndroid(_ files: [URL]) throws -> [OutgoingTransferResult] {
+        guard let connected = connections.allConnected().first(where: { $0.platform.lowercased() == "android" }),
+              let trusted = trustStore.trustedDevice(id: connected.deviceId)
+        else {
+            throw HTTPFailure.badRequest("missing_android_receiver", "Connect your Android first by opening Linkit or scanning the QR, then drop the file again")
+        }
+        let device = TrustedDevice(
+            deviceId: trusted.deviceId,
+            deviceName: trusted.deviceName,
+            platform: trusted.platform,
+            publicKey: trusted.publicKey,
+            pairedAt: trusted.pairedAt,
+            lastKnownHost: connected.host,
+            receivePort: connected.receivePort
+        )
         return try outgoingClient.send(files: files, to: device)
     }
 
@@ -116,6 +160,7 @@ final class HTTPServer {
     private let allowDevBearerTransfers: Bool
     private let identity: LinkitIdentity
     private let trustStore: TrustStore
+    private let connections: DeviceConnectionRegistry
     private let pairingManager: PairingManager
     private let signedVerifier: SignedRequestVerifier
     private let store: TransferStore
@@ -130,6 +175,7 @@ final class HTTPServer {
         allowDevBearerTransfers: Bool,
         identity: LinkitIdentity,
         trustStore: TrustStore,
+        connections: DeviceConnectionRegistry,
         pairingManager: PairingManager,
         store: TransferStore,
         history: TransferHistoryStore,
@@ -140,6 +186,7 @@ final class HTTPServer {
         self.allowDevBearerTransfers = allowDevBearerTransfers
         self.identity = identity
         self.trustStore = trustStore
+        self.connections = connections
         self.pairingManager = pairingManager
         self.signedVerifier = SignedRequestVerifier(trustStore: trustStore, logger: logger)
         self.store = store
@@ -251,7 +298,38 @@ final class HTTPServer {
                 throw HTTPFailure.unauthorized("missing_device_connection", "Signed device connection is required")
             }
             let update: DeviceUpdateRequest = try decodeJSON(body)
-            return jsonResponse(status: 200, body: try trustStore.updateConnection(deviceId: deviceId, host: remoteHost, receivePort: update.receivePort))
+            guard let device = trustStore.trustedDevice(id: deviceId) else {
+                throw HTTPFailure.unauthorized("unknown_device", "Device is not paired")
+            }
+            let connected = connections.markConnected(
+                device: device,
+                host: remoteHost,
+                receivePort: update.receivePort,
+                batteryPercent: update.batteryPercent
+            )
+            return jsonResponse(status: 200, body: connectionResponse(connected, status: "connected"))
+        }
+
+        if request.method == "DELETE", request.path == "/v1/devices/self" {
+            let deviceId = try authenticateControl(request, body: Data())
+            guard let deviceId, let device = trustStore.trustedDevice(id: deviceId) else {
+                throw HTTPFailure.unauthorized("unknown_device", "Device is not paired")
+            }
+            connections.disconnect(deviceId: deviceId)
+            return jsonResponse(
+                status: 200,
+                body: DeviceConnectionResponse(
+                    deviceId: device.deviceId,
+                    deviceName: device.deviceName,
+                    platform: device.platform,
+                    status: "disconnected",
+                    host: nil,
+                    receivePort: nil,
+                    batteryPercent: nil,
+                    connectedAt: nil,
+                    lastSeenAt: nil
+                )
+            )
         }
 
         if request.method == "GET", request.path == "/v1/history" {
@@ -306,12 +384,18 @@ final class HTTPServer {
     private func handleUpload(request: HTTPRequest, transferId: String, index: Int, fd: Int32) throws -> HTTPResponse {
         let uploadToken = request.headers["x-linkit-upload-token"]
         let clientDeviceId = request.headers["x-linkit-client-device-id"]
+        let authenticatedDeviceId = try authenticateUpload(
+            request,
+            transferId: transferId,
+            index: index,
+            uploadToken: uploadToken
+        )
         let record = try store.beginUpload(
             id: transferId,
             index: index,
             contentLength: request.contentLength,
             uploadToken: uploadToken,
-            clientDeviceId: clientDeviceId
+            clientDeviceId: authenticatedDeviceId ?? clientDeviceId
         )
 
         let fileFD = open(record.tempURL.path, O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR)
@@ -402,6 +486,29 @@ final class HTTPServer {
             throw HTTPFailure.unauthorized("missing_signature", "Pairing and signed control requests are required")
         }
         try requireBearer(request)
+        return nil
+    }
+
+    private func authenticateUpload(_ request: HTTPRequest, transferId: String, index: Int, uploadToken: String?) throws -> String? {
+        if request.headers["x-linkit-signature"] != nil {
+            guard let uploadToken else {
+                throw HTTPFailure.unauthorized("upload_token_rejected", "Upload token was not accepted")
+            }
+            let deviceId = try signedVerifier.verifyUpload(
+                request: request,
+                transferId: transferId,
+                fileIndex: index,
+                uploadToken: uploadToken,
+                contentLength: request.contentLength
+            )
+            if let clientDeviceId = request.headers["x-linkit-client-device-id"], clientDeviceId != deviceId {
+                throw HTTPFailure.unauthorized("client_device_mismatch", "Upload client device id does not match the signature")
+            }
+            return deviceId
+        }
+        guard allowDevBearerTransfers else {
+            throw HTTPFailure.unauthorized("missing_upload_signature", "Signed upload request is required")
+        }
         return nil
     }
 
@@ -543,6 +650,20 @@ final class HTTPServer {
             reason: reasonPhrase(for: status),
             headers: ["Content-Type": "application/json; charset=utf-8"],
             body: data
+        )
+    }
+
+    private func connectionResponse(_ connected: ConnectedDevice, status: String) -> DeviceConnectionResponse {
+        DeviceConnectionResponse(
+            deviceId: connected.deviceId,
+            deviceName: connected.deviceName,
+            platform: connected.platform,
+            status: status,
+            host: connected.host,
+            receivePort: connected.receivePort,
+            batteryPercent: connected.batteryPercent,
+            connectedAt: connected.connectedAt,
+            lastSeenAt: connected.lastSeenAt
         )
     }
 

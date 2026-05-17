@@ -43,7 +43,10 @@ public struct PairRequest: Codable {
     public let platform: String
     public let publicKey: String
     public let pairingToken: String
+    public let pairingChallenge: String?
+    public let pairingChallengeSignature: String?
     public let receivePort: UInt16?
+    public let batteryPercent: Int?
 }
 
 public struct PairResponse: Codable {
@@ -65,6 +68,7 @@ public struct PairingPayload: Codable {
     public let port: UInt16
     public let publicKey: String
     public let pairingToken: String
+    public let pairingChallenge: String
     public let pairingTokenExpiresAt: String
 }
 
@@ -180,6 +184,29 @@ public struct TransferHistoryEntry: Codable, Equatable {
 
 public struct DeviceUpdateRequest: Codable {
     public let receivePort: UInt16
+    public let batteryPercent: Int?
+}
+
+public struct DeviceConnectionResponse: Codable, Equatable {
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let status: String
+    public let host: String?
+    public let receivePort: UInt16?
+    public let batteryPercent: Int?
+    public let connectedAt: String?
+    public let lastSeenAt: String?
+}
+
+public struct AndroidDeviceStatusResponse: Codable, Equatable {
+    public let protocolVersion: Int
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let status: String
+    public let receivePort: UInt16?
+    public let batteryPercent: Int?
 }
 
 struct TransferRecord {
@@ -215,14 +242,14 @@ enum TransferStatus: String {
     case canceled
 }
 
-struct HTTPFailure: Error {
-    let status: Int
-    let error: String
-    let message: String
+public struct HTTPFailure: Error {
+    public let status: Int
+    public let error: String
+    public let message: String
 }
 
 extension HTTPFailure: LocalizedError {
-    var errorDescription: String? { message }
+    public var errorDescription: String? { message }
 }
 
 extension HTTPFailure {

@@ -57,29 +57,32 @@ final class TrustStore {
 
     func add(_ device: TrustedDevice) throws {
         lock.lock()
-        defer { lock.unlock() }
-        devices[device.deviceId] = device
-        try saveLocked()
+        do {
+            devices[device.deviceId] = device
+            try saveLocked()
+            lock.unlock()
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        postDeviceChange()
     }
 
-    func updateConnection(deviceId: String, host: String, receivePort: UInt16) throws -> TrustedDevice {
+    func remove(deviceId: String) throws -> TrustedDevice? {
         lock.lock()
-        defer { lock.unlock() }
-        guard let existing = devices[deviceId] else {
-            throw HTTPFailure.unauthorized("unknown_device", "Device is not paired")
+        let removed: TrustedDevice?
+        do {
+            removed = devices.removeValue(forKey: deviceId)
+            try saveLocked()
+            lock.unlock()
+        } catch {
+            lock.unlock()
+            throw error
         }
-        let updated = TrustedDevice(
-            deviceId: existing.deviceId,
-            deviceName: existing.deviceName,
-            platform: existing.platform,
-            publicKey: existing.publicKey,
-            pairedAt: existing.pairedAt,
-            lastKnownHost: host,
-            receivePort: receivePort
-        )
-        devices[deviceId] = updated
-        try saveLocked()
-        return updated
+        if removed != nil {
+            postDeviceChange()
+        }
+        return removed
     }
 
     func trustedDevice(id: String) -> TrustedDevice? {
@@ -111,6 +114,10 @@ final class TrustStore {
         try data.write(to: fileURL, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
+
+    private func postDeviceChange() {
+        NotificationCenter.default.post(name: .linkitDevicesDidChange, object: nil)
+    }
 }
 
 public enum LinkitPaths {
@@ -123,5 +130,24 @@ public enum LinkitPaths {
 enum LinkitDeviceId {
     static func fromPublicKey(_ data: Data) -> String {
         SHA256.hash(data: data).linkitHex.prefix(32).lowercased()
+    }
+}
+
+enum LinkitPairingChallenge {
+    static func canonicalString(
+        macDeviceId: String,
+        androidDeviceId: String,
+        androidPublicKey: String,
+        pairingToken: String,
+        challenge: String
+    ) -> String {
+        [
+            "LINKIT_PAIR",
+            macDeviceId,
+            androidDeviceId,
+            androidPublicKey,
+            pairingToken,
+            challenge
+        ].joined(separator: "\n")
     }
 }
