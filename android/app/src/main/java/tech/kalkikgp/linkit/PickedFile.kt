@@ -26,8 +26,21 @@ fun ContentResolver.loadPickedFile(uri: Uri): PickedFile {
 
     val displayName = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "upload.bin"
     val byteSize = size?.takeIf { it >= 0 }
-        ?: throw IllegalArgumentException("File size is unavailable for this content URI")
+        ?: streamSize(uri)
     val mime = getType(uri) ?: "application/octet-stream"
 
     return PickedFile(uri = uri, name = displayName, size = byteSize, mimeType = mime)
+}
+
+private fun ContentResolver.streamSize(uri: Uri): Long {
+    var total = 0L
+    val buffer = ByteArray(1024 * 1024)
+    openInputStream(uri)?.use { input ->
+        while (true) {
+            val read = input.read(buffer)
+            if (read == -1) break
+            total += read.toLong()
+        }
+    } ?: throw IllegalArgumentException("Could not open this content URI")
+    return total
 }
