@@ -33,9 +33,15 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var transferPanel: LinkitTransferPanel?
     private var currentTransfer: LinkitTransferPanelState?
     private var transferStartedAtById: [String: Date] = [:]
+    private var activeOutgoingCancellation: LinkitCancellationToken?
+    private var activeIncomingTransferId: String?
     private var resetStatusWorkItem: DispatchWorkItem?
     private var transferObservers: [NSObjectProtocol] = []
     private var deviceObserver: NSObjectProtocol?
+    private var clipboardSyncTimer: Timer?
+    private var clipboardSyncEnabled = false
+    private var lastClipboardText: String?
+    private var lastClipboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastTrustedSignature: String = ""
     private var lastConnectedSignature: String = ""
     private var notificationCenter: UNUserNotificationCenter?
@@ -71,6 +77,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         refreshStatusButton()
         refreshMenu()
         startTransferObservers()
+        startActionObserver()
         startDeviceObserver()
     }
 
@@ -192,6 +199,16 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let androidTargets = connected.filter { $0.platform.lowercased() == "android" }
         menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: connect Android first" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
+        let sendClipboard = NSMenuItem(title: "Send Clipboard Text to Android", action: #selector(sendClipboardTextToAndroid), keyEquivalent: "c")
+        sendClipboard.isEnabled = !androidTargets.isEmpty
+        menu.addItem(sendClipboard)
+        let openClipboardLink = NSMenuItem(title: "Open Clipboard Link on Android", action: #selector(openClipboardLinkOnAndroid), keyEquivalent: "u")
+        openClipboardLink.isEnabled = !androidTargets.isEmpty
+        menu.addItem(openClipboardLink)
+        let clipboardSync = NSMenuItem(title: "Clipboard Text Sync: \(clipboardSyncEnabled ? "On" : "Off")", action: #selector(toggleClipboardSync), keyEquivalent: "")
+        clipboardSync.isEnabled = !androidTargets.isEmpty || clipboardSyncEnabled
+        menu.addItem(clipboardSync)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Transfer Progress", action: #selector(showTransferProgress), keyEquivalent: "t"))
         menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
@@ -273,6 +290,74 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc private func openDropFolder() {
         guard let app else { return }
         NSWorkspace.shared.open(app.dropFolder)
+    }
+
+    @objc private func sendClipboardTextToAndroid() {
+        guard let text = currentClipboardText(), !text.isEmpty else {
+            showNonFatalError("Clipboard does not contain text.")
+            return
+        }
+        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard sent to Android")
+    }
+
+    @objc private func openClipboardLinkOnAndroid() {
+        guard let text = currentClipboardText(), let url = validatedWebURL(text) else {
+            showNonFatalError("Clipboard does not contain an http or https URL.")
+            return
+        }
+        sendActionToAndroid(type: "open_url", text: url.absoluteString, successTooltip: "Opened link on Android")
+    }
+
+    @objc private func toggleClipboardSync() {
+        clipboardSyncEnabled.toggle()
+        if clipboardSyncEnabled {
+            lastClipboardChangeCount = NSPasteboard.general.changeCount
+            lastClipboardText = currentClipboardText()
+            clipboardSyncTimer?.invalidate()
+            clipboardSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.pollClipboardForSync()
+            }
+            showTransientIcon(.success, tooltip: "Clipboard sync on")
+        } else {
+            clipboardSyncTimer?.invalidate()
+            clipboardSyncTimer = nil
+            showTransientIcon(.connected, tooltip: "Clipboard sync off")
+        }
+        refreshMenu()
+    }
+
+    private func pollClipboardForSync() {
+        guard clipboardSyncEnabled else { return }
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.changeCount != lastClipboardChangeCount else { return }
+        lastClipboardChangeCount = pasteboard.changeCount
+        guard let text = pasteboard.string(forType: .string), !text.isEmpty, text != lastClipboardText else { return }
+        guard text.utf8.count <= 128 * 1024 else { return }
+        lastClipboardText = text
+        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard synced")
+    }
+
+    private func sendActionToAndroid(type: String, text: String, successTooltip: String) {
+        guard let app else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try app.sendActionToFirstAndroid(LinkitActionRequest(type: type, text: text))
+                DispatchQueue.main.async {
+                    self.showTransientIcon(.success, tooltip: successTooltip)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    if self.clipboardSyncEnabled {
+                        self.clipboardSyncEnabled = false
+                        self.clipboardSyncTimer?.invalidate()
+                        self.clipboardSyncTimer = nil
+                        self.refreshMenu()
+                    }
+                    self.showTransientIcon(.error, tooltip: "Android action failed")
+                    self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     @objc private func openTransferLog() {
@@ -493,6 +578,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         let totalBytes = fileSizes.reduce(0, +)
         let startedAt = Date()
+        let cancellation = LinkitCancellationToken()
+        activeOutgoingCancellation = cancellation
         showTransferPanel(
             state: LinkitTransferPanelState(
                 title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files",
@@ -510,7 +597,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         statusIcon?.setState(.transferring(direction: .macToAndroid), tooltip: "Sending to Android")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let results = try app.sendFilesToFirstAndroid(urls) { progress in
+                let results = try app.sendFilesToFirstAndroid(urls, cancellation: cancellation) { progress in
                     let completedBeforeFile = fileSizes.prefix(progress.fileIndex).reduce(0, +)
                     let done = min(totalBytes, completedBeforeFile + progress.fileBytesSent)
                     let elapsed = max(0.001, Date().timeIntervalSince(startedAt))
@@ -534,6 +621,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     }
                 }
                 DispatchQueue.main.async {
+                    if self.activeOutgoingCancellation === cancellation {
+                        self.activeOutgoingCancellation = nil
+                    }
                     self.showTransferPanel(
                         state: LinkitTransferPanelState(
                             title: results.count == 1 ? results[0].fileURL.lastPathComponent : "\(results.count) files",
@@ -551,8 +641,33 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     self.showTransientIcon(.success, tooltip: "Sent \(results.count) file\(results.count == 1 ? "" : "s")")
                     self.refreshMenu()
                 }
+            } catch is CancellationError {
+                DispatchQueue.main.async {
+                    if self.activeOutgoingCancellation === cancellation {
+                        self.activeOutgoingCancellation = nil
+                    }
+                    self.showTransferPanel(
+                        state: LinkitTransferPanelState(
+                            title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files",
+                            detail: "Canceled",
+                            progress: 0,
+                            bytesDone: 0,
+                            totalBytes: totalBytes,
+                            speedBytesPerSecond: 0,
+                            etaSeconds: nil,
+                            direction: .macToAndroid,
+                            isActive: false,
+                            didFail: true
+                        )
+                    )
+                    self.refreshStatusButton()
+                    self.refreshMenu()
+                }
             } catch {
                 DispatchQueue.main.async {
+                    if self.activeOutgoingCancellation === cancellation {
+                        self.activeOutgoingCancellation = nil
+                    }
                     self.showTransferPanel(
                         state: LinkitTransferPanelState(
                             title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files",
@@ -596,6 +711,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 let size = notification.userInfo?[LinkitTransferNotification.sizeKey] as? Int64
                 if let transferId = notification.userInfo?[LinkitTransferNotification.transferIdKey] as? String {
                     self?.transferStartedAtById[transferId] = Date()
+                    self?.activeIncomingTransferId = transferId
                 }
                 let suffix = filename.map { ": \($0)" } ?? ""
                 self?.showTransferPanel(
@@ -664,6 +780,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 let speed = Double(size ?? 0) / elapsed
                 if let transferId {
                     self?.transferStartedAtById.removeValue(forKey: transferId)
+                    if self?.activeIncomingTransferId == transferId {
+                        self?.activeIncomingTransferId = nil
+                    }
                 }
                 if status == "complete" {
                     self?.showTransferPanel(
@@ -719,6 +838,38 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 self?.refreshMenu()
             }
         )
+    }
+
+    private func startActionObserver() {
+        transferObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .linkitActionReceived,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard let self,
+                      let type = notification.userInfo?[LinkitActionNotification.typeKey] as? String,
+                      let text = notification.userInfo?[LinkitActionNotification.textKey] as? String
+                else { return }
+                self.handleIncomingAction(type: type, text: text)
+            }
+        )
+    }
+
+    private func handleIncomingAction(type: String, text: String) {
+        switch type {
+        case "clipboard", "text":
+            setClipboardText(text)
+            lastClipboardText = text
+            lastClipboardChangeCount = NSPasteboard.general.changeCount
+            showTransientIcon(.success, tooltip: type == "clipboard" ? "Clipboard received" : "Text received")
+        case "open_url":
+            guard let url = validatedWebURL(text) else { return }
+            NSWorkspace.shared.open(url)
+            showTransientIcon(.success, tooltip: "Opened link")
+        default:
+            break
+        }
     }
 
     private func startDeviceObserver() {
@@ -820,6 +971,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         currentTransfer = state
         let panel = transferPanel ?? LinkitTransferPanel()
         transferPanel = panel
+        panel.onCancel = { [weak self] in self?.cancelCurrentTransfer() }
         panel.update(state: state)
         if let button = statusItem?.button {
             panel.show(relativeTo: button)
@@ -828,6 +980,19 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         if !state.isActive {
             panel.closeAfterDelay(5)
+        }
+    }
+
+    private func cancelCurrentTransfer() {
+        if currentTransfer?.direction == .macToAndroid {
+            activeOutgoingCancellation?.cancel()
+            return
+        }
+        guard let transferId = activeIncomingTransferId else { return }
+        do {
+            try app?.cancelIncomingTransfer(transferId)
+        } catch {
+            showNonFatalError("Could not cancel transfer: \(error.localizedDescription)")
         }
     }
 
@@ -871,6 +1036,24 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func formatBytes(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private func currentClipboardText() -> String? {
+        NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func setClipboardText(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    private func validatedWebURL(_ text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased()) else {
+            return nil
+        }
+        return url
     }
 
     private func label(_ text: String, frame: NSRect, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
@@ -921,6 +1104,10 @@ private final class LinkitTransferPanel {
     private let popover: NSPopover
     private let content: LinkitTransferPanelView
     private var closeWorkItem: DispatchWorkItem?
+    var onCancel: (() -> Void)? {
+        get { content.onCancel }
+        set { content.onCancel = newValue }
+    }
 
     init() {
         content = LinkitTransferPanelView(frame: NSRect(origin: .zero, size: NSSize(width: 340, height: 150)))
@@ -970,6 +1157,8 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
     private let transferStats = NSTextField(labelWithString: "")
     private let percentLabel = NSTextField(labelWithString: "")
     private let progressBar = NSProgressIndicator()
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    var onCancel: (() -> Void)?
 
     var transferState: LinkitTransferPanelState = LinkitTransferPanelState(
         title: "No active transfer",
@@ -1045,8 +1234,14 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         progressBar.controlSize = .small
         progressBar.style = .bar
 
+        cancelButton.bezelStyle = .rounded
+        cancelButton.controlSize = .small
+        cancelButton.font = .systemFont(ofSize: 11, weight: .medium)
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelPressed)
+
         [titleLabel, cardView].forEach(addSubview)
-        [iconView, transferTitle, transferDetail, transferStats, percentLabel, progressBar].forEach(cardView.addSubview)
+        [iconView, transferTitle, transferDetail, transferStats, percentLabel, progressBar, cancelButton].forEach(cardView.addSubview)
         updateContent()
     }
 
@@ -1061,7 +1256,8 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         percentLabel.frame = NSRect(x: cardView.bounds.width - 55, y: cardHeight - 38, width: 38, height: 14)
         transferTitle.frame = NSRect(x: 66, y: cardHeight - 36, width: cardView.bounds.width - 130, height: 17)
         transferDetail.frame = NSRect(x: 66, y: cardHeight - 55, width: cardView.bounds.width - 82, height: 14)
-        transferStats.frame = NSRect(x: 66, y: cardHeight - 73, width: cardView.bounds.width - 82, height: 13)
+        transferStats.frame = NSRect(x: 66, y: cardHeight - 73, width: cardView.bounds.width - 142, height: 13)
+        cancelButton.frame = NSRect(x: cardView.bounds.width - 66, y: 28, width: 50, height: 24)
         progressBar.frame = NSRect(x: 66, y: 13, width: cardView.bounds.width - 82, height: 5)
     }
 
@@ -1073,6 +1269,7 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         transferDetail.stringValue = transferState.detail
         transferStats.stringValue = transferStatsText()
         percentLabel.stringValue = transferState.progress.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
+        cancelButton.isHidden = !transferState.isActive
         if let progress = transferState.progress {
             progressBar.isIndeterminate = false
             progressBar.doubleValue = progress
@@ -1081,6 +1278,10 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
             progressBar.startAnimation(nil)
         }
         needsLayout = true
+    }
+
+    @objc private func cancelPressed() {
+        onCancel?()
     }
 
     private func transferStatsText() -> String {

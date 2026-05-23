@@ -209,6 +209,21 @@ public struct AndroidDeviceStatusResponse: Codable, Equatable {
     public let batteryPercent: Int?
 }
 
+public struct LinkitActionRequest: Codable, Equatable {
+    public let type: String
+    public let text: String
+
+    public init(type: String, text: String) {
+        self.type = type
+        self.text = text
+    }
+}
+
+public struct LinkitActionResponse: Codable, Equatable {
+    public let status: String
+    public let type: String
+}
+
 struct TransferRecord {
     let id: String
     let fileIndex: Int

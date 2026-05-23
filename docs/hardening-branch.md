@@ -13,8 +13,14 @@ This branch keeps the private MVP flow intact and adds daily-use polish:
 - Local `.app` packaging script for the menu-bar receiver
 - Signed smoke test script for pair/create/upload/finalize without a phone
 - Symmetric Mac-to-Android sharing with signed upload slots and QR challenge pairing
+- Cancel button in the macOS transfer popup, wired to local abort and signed remote cancellation where applicable
+- Signed text/link action channel for clipboard text, plain-text handoff, and opening links on the other device
+- Mac menu actions for sending clipboard text, opening clipboard links on Android, and Mac-side clipboard text sync
+- Android app/share-sheet actions for sending clipboard text and opening links on the Mac
 
 Known hardening follow-up: Keychain storage is in place for personal builds. Secure Enclave-backed keys are still a later distribution hardening option.
+
+Android clipboard note: Android 10+ only lets ordinary apps read clipboard contents while focused or acting as the active input method. Mac → Android clipboard sync can run from the menu-bar app. Android → Mac automatic clipboard sync is foreground-only; background Android copies should use the Linkit share sheet or the explicit **Send Clipboard** button.
 
 ## Commands
 

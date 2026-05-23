@@ -17,6 +17,51 @@ public struct OutgoingTransferProgress: Equatable {
     public let fileSize: Int64
 }
 
+public final class LinkitCancellationToken {
+    private let lock = NSLock()
+    private var canceled = false
+    private var handlers: [() -> Void] = []
+
+    public init() {}
+
+    public var isCanceled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return canceled
+    }
+
+    public func cancel() {
+        let callbacks: [() -> Void]
+        lock.lock()
+        if canceled {
+            lock.unlock()
+            return
+        }
+        canceled = true
+        callbacks = handlers
+        handlers.removeAll()
+        lock.unlock()
+        callbacks.forEach { $0() }
+    }
+
+    fileprivate func throwIfCanceled() throws {
+        if isCanceled {
+            throw CancellationError()
+        }
+    }
+
+    fileprivate func onCancel(_ handler: @escaping () -> Void) {
+        lock.lock()
+        if canceled {
+            lock.unlock()
+            handler()
+            return
+        }
+        handlers.append(handler)
+        lock.unlock()
+    }
+}
+
 final class OutgoingTransferClient {
     private let identity: LinkitIdentity
     private let logger: LinkitLogger
@@ -28,7 +73,12 @@ final class OutgoingTransferClient {
         self.logger = logger
     }
 
-    func send(files: [URL], to device: TrustedDevice, onProgress: ((OutgoingTransferProgress) -> Void)? = nil) throws -> [OutgoingTransferResult] {
+    func send(
+        files: [URL],
+        to device: TrustedDevice,
+        cancellation: LinkitCancellationToken? = nil,
+        onProgress: ((OutgoingTransferProgress) -> Void)? = nil
+    ) throws -> [OutgoingTransferResult] {
         guard device.platform.lowercased() == "android" else {
             throw HTTPFailure.badRequest("unsupported_target", "Target device is not Android")
         }
@@ -39,7 +89,8 @@ final class OutgoingTransferClient {
         let baseURL = httpBaseURL(host: host, port: port)
         var results: [OutgoingTransferResult] = []
         for (index, file) in files.enumerated() {
-            results.append(try send(file: file, baseURL: baseURL, fileIndex: index, fileCount: files.count, onProgress: onProgress))
+            try cancellation?.throwIfCanceled()
+            results.append(try send(file: file, baseURL: baseURL, fileIndex: index, fileCount: files.count, cancellation: cancellation, onProgress: onProgress))
         }
         return results
     }
@@ -72,8 +123,10 @@ final class OutgoingTransferClient {
         baseURL: String,
         fileIndex: Int,
         fileCount: Int,
+        cancellation: LinkitCancellationToken?,
         onProgress: ((OutgoingTransferProgress) -> Void)?
     ) throws -> OutgoingTransferResult {
+        try cancellation?.throwIfCanceled()
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .localizedNameKey])
         guard values.isRegularFile == true else {
             throw HTTPFailure.badRequest("not_regular_file", "Only regular files can be sent")
@@ -100,31 +153,39 @@ final class OutgoingTransferClient {
             expectedStatus: 201
         )
 
-        let uploadPath = "/v1/transfers/\(createResponse.transferId)/files/0"
-        var uploadRequest = URLRequest(url: try absoluteURL(baseURL + uploadPath))
-        uploadRequest.httpMethod = "PUT"
-        uploadRequest.setValue(createResponse.uploadToken, forHTTPHeaderField: "X-Linkit-Upload-Token")
-        uploadRequest.setValue(identity.deviceId, forHTTPHeaderField: "X-Linkit-Client-Device-Id")
-        uploadRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        uploadRequest.setValue("\(size)", forHTTPHeaderField: "Content-Length")
-        uploadRequest.timeoutInterval = uploadTimeout(forBytes: size)
-        try signUpload(
-            &uploadRequest,
-            transferId: createResponse.transferId,
-            fileIndex: 0,
-            uploadToken: createResponse.uploadToken,
-            contentLength: size
-        )
-        try executeUpload(uploadRequest, file: file, expectedStatus: 200, expectedBytes: size) { sent in
-            onProgress?(
-                OutgoingTransferProgress(
-                    fileURL: file,
-                    fileIndex: fileIndex,
-                    fileCount: fileCount,
-                    fileBytesSent: sent,
-                    fileSize: size
-                )
+        do {
+            try cancellation?.throwIfCanceled()
+            let uploadPath = "/v1/transfers/\(createResponse.transferId)/files/0"
+            var uploadRequest = URLRequest(url: try absoluteURL(baseURL + uploadPath))
+            uploadRequest.httpMethod = "PUT"
+            uploadRequest.setValue(createResponse.uploadToken, forHTTPHeaderField: "X-Linkit-Upload-Token")
+            uploadRequest.setValue(identity.deviceId, forHTTPHeaderField: "X-Linkit-Client-Device-Id")
+            uploadRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            uploadRequest.setValue("\(size)", forHTTPHeaderField: "Content-Length")
+            uploadRequest.timeoutInterval = uploadTimeout(forBytes: size)
+            try signUpload(
+                &uploadRequest,
+                transferId: createResponse.transferId,
+                fileIndex: 0,
+                uploadToken: createResponse.uploadToken,
+                contentLength: size
             )
+            try executeUpload(uploadRequest, file: file, expectedStatus: 200, expectedBytes: size, cancellation: cancellation) { sent in
+                onProgress?(
+                    OutgoingTransferProgress(
+                        fileURL: file,
+                        fileIndex: fileIndex,
+                        fileCount: fileCount,
+                        fileBytesSent: sent,
+                        fileSize: size
+                    )
+                )
+            }
+
+            try cancellation?.throwIfCanceled()
+        } catch is CancellationError {
+            try? cancelTransfer(baseURL: baseURL, transferId: createResponse.transferId)
+            throw CancellationError()
         }
 
         let finalizeBody = try encoder.encode(FinalizeRequest(bytesSent: size, finalSha256: sha256))
@@ -174,6 +235,30 @@ final class OutgoingTransferClient {
         return request
     }
 
+    func sendAction(_ action: LinkitActionRequest, to device: TrustedDevice) throws -> LinkitActionResponse {
+        guard device.platform.lowercased() == "android" else {
+            throw HTTPFailure.badRequest("unsupported_target", "Target device is not Android")
+        }
+        guard let host = device.lastKnownHost, let port = device.receivePort else {
+            throw HTTPFailure.badRequest("missing_android_receiver", "Open Linkit on Android once so it can register its receiver")
+        }
+        let baseURL = httpBaseURL(host: host, port: port)
+        let body = try encoder.encode(action)
+        let path = "/v1/actions"
+        return try executeJSON(
+            signedRequest(method: "POST", url: baseURL + path, path: path, body: body),
+            expectedStatus: 200
+        )
+    }
+
+    private func cancelTransfer(baseURL: String, transferId: String) throws {
+        let path = "/v1/transfers/\(transferId)"
+        _ = try executeJSON(
+            signedRequest(method: "DELETE", url: baseURL + path, path: path, body: Data()),
+            expectedStatus: 200
+        ) as TransferStatusResponse
+    }
+
     private func signUpload(
         _ request: inout URLRequest,
         transferId: String,
@@ -208,7 +293,14 @@ final class OutgoingTransferClient {
         return try decoder.decode(T.self, from: result.data)
     }
 
-    private func executeUpload(_ request: URLRequest, file: URL, expectedStatus: Int, expectedBytes: Int64, onProgress: ((Int64) -> Void)? = nil) throws {
+    private func executeUpload(
+        _ request: URLRequest,
+        file: URL,
+        expectedStatus: Int,
+        expectedBytes: Int64,
+        cancellation: LinkitCancellationToken?,
+        onProgress: ((Int64) -> Void)? = nil
+    ) throws {
         try ensureOffMainThread()
         let semaphore = DispatchSemaphore(value: 0)
         var taskResult: Result<OutgoingHTTPResult, Error>!
@@ -228,7 +320,9 @@ final class OutgoingTransferClient {
             semaphore.signal()
         }
         task.resume()
+        cancellation?.onCancel { task.cancel() }
         semaphore.wait()
+        try cancellation?.throwIfCanceled()
         let result = try taskResult.get()
         guard result.status == expectedStatus else {
             throw decodeFailure(status: result.status, data: result.data)

@@ -24,7 +24,7 @@ The first magic flow:
 - Transfers should work when both devices are on the same home Wi-Fi.
 - Transfers should work when the Android phone hotspot is on and the Mac is connected to that hotspot.
 - The Mac can run a tiny background menu bar app.
-- The Android app should not run a permanent background service.
+- The Android app should not run a permanent background sender. The Android receiver can run as a user-visible foreground service for Mac → Android drops and signed actions.
 - The first version is built for Krishna's own devices, not the Play Store/App Store public audience.
 
 ## Non-goals For MVP
@@ -48,13 +48,15 @@ The first magic flow:
 - Jetpack Compose UI.
 - Android Share Target integration.
 - Uses Storage Access Framework / content URIs.
-- Runs transfer work only after direct user action.
+- Runs transfer work after direct user action.
+- Can receive signed file/text/link actions through a foreground receiver.
+- Clipboard reads are limited by Android privacy rules: automatic clipboard watching only works while Linkit is focused, unless Linkit becomes an input method.
 
 ### macOS
 
 - Native Swift.
 - SwiftUI for small windows.
-- AppKit for menu bar, launch at login, drag/drop, notifications, and clipboard later.
+- AppKit for menu bar, launch at login, drag/drop, notifications, clipboard text sync, and link handoff.
 - Runs a lightweight local HTTP/WebSocket server while app is open or launched at login.
 
 ## Architecture
@@ -524,10 +526,14 @@ Success:
 
 ### Clipboard
 
-- Text-only first.
-- Explicit toggle.
-- Never sync passwords by default.
-- Pause button.
+- Text-only handoff has landed.
+- Explicit clipboard sync toggle has landed on both apps.
+- Mac → Android clipboard sync can run from the Mac menu-bar app.
+- Android → Mac automatic clipboard sync is foreground-only because Android 10+ blocks ordinary background clipboard reads.
+- Plain-text share-sheet handoff from Android to Mac has landed.
+- URL handoff/open-on-other-device has landed for `http` and `https`.
+- Still later: Quick Settings tile or notification action for explicit Android clipboard send.
+- Still later: password/secret detection before broader automation.
 
 ### Folder Drop
 

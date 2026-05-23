@@ -155,6 +155,22 @@ class LinkitClient(
         executeJson(request)
     }
 
+    suspend fun sendAction(mac: TrustedMac, identityStore: IdentityStore, type: String, text: String) {
+        val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
+        val body = JSONObject()
+            .put("type", type)
+            .put("text", text)
+            .toString()
+        val request = signedRequest(
+            identityStore = identityStore,
+            method = "POST",
+            url = "$baseUrl/v1/actions",
+            path = "/v1/actions",
+            body = body
+        )
+        executeJson(request)
+    }
+
     private fun validatePairingResponse(
         expected: MacPairingPayload,
         identity: AndroidIdentity,

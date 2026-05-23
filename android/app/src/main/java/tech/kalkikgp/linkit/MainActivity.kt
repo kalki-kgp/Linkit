@@ -1,6 +1,7 @@
 package tech.kalkikgp.linkit
 
 import android.app.Application
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -142,7 +143,8 @@ data class LinkitUiState(
     val error: String? = null,
     val savedPath: String? = null,
     val tokenRejected: Boolean = false,
-    val networkHint: String? = null
+    val networkHint: String? = null,
+    val clipboardSyncEnabled: Boolean = false
 )
 
 class LinkitViewModel(application: Application) : AndroidViewModel(application) {
@@ -169,6 +171,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private var sendJob: Job? = null
     private var startedAtMillis: Long = 0
+    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
+    private var lastClipboardText: String? = null
 
     init {
         viewModelScope.launch {
@@ -177,6 +181,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        stopClipboardSync()
         discovery.stop()
         super.onCleared()
     }
@@ -520,6 +525,86 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         sendJob?.cancel()
     }
 
+    fun sendClipboardTextToMac() {
+        val text = currentClipboardText()
+        if (text.isNullOrBlank()) {
+            _uiState.update { it.copy(error = "Clipboard does not contain text") }
+            return
+        }
+        sendActionToMac("clipboard", text, "Clipboard sent")
+    }
+
+    fun openClipboardLinkOnMac() {
+        val text = currentClipboardText()?.trim()
+        val uri = text?.let(Uri::parse)
+        val scheme = uri?.scheme?.lowercase()
+        if (text.isNullOrBlank() || (scheme != "http" && scheme != "https")) {
+            _uiState.update { it.copy(error = "Clipboard does not contain an http or https URL") }
+            return
+        }
+        sendActionToMac("open_url", text, "Opening link on Mac")
+    }
+
+    fun toggleClipboardSync() {
+        if (_uiState.value.clipboardSyncEnabled) {
+            stopClipboardSync()
+            _uiState.update { it.copy(clipboardSyncEnabled = false, status = "Clipboard sync off") }
+            return
+        }
+        val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
+        lastClipboardText = currentClipboardText()
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            val text = currentClipboardText()
+            if (!text.isNullOrBlank() && text != lastClipboardText && text.toByteArray(Charsets.UTF_8).size <= 128 * 1024) {
+                lastClipboardText = text
+                sendActionToMac("clipboard", text, "Clipboard synced")
+            }
+        }
+        clipboard.addPrimaryClipChangedListener(listener)
+        clipboardListener = listener
+        _uiState.update { it.copy(clipboardSyncEnabled = true, status = "Clipboard sync on", error = null) }
+    }
+
+    private fun stopClipboardSync() {
+        val listener = clipboardListener ?: return
+        getApplication<Application>().getSystemService(ClipboardManager::class.java)
+            .removePrimaryClipChangedListener(listener)
+        clipboardListener = null
+    }
+
+    private fun currentClipboardText(): String? {
+        val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
+        val item = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0) ?: return null
+        return item.coerceToText(getApplication())?.toString()?.trim()
+    }
+
+    private fun sendActionToMac(type: String, text: String, successStatus: String) {
+        val mac = _uiState.value.trustedMac
+        if (mac == null || !_uiState.value.isConnectedToMac) {
+            _uiState.update { it.copy(error = "Connect to your Mac first") }
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                client.sendAction(mac, identityStore, type, text)
+            }.onSuccess {
+                _uiState.update { it.copy(status = successStatus, error = null, networkHint = null) }
+            }.onFailure { error ->
+                if (_uiState.value.clipboardSyncEnabled) {
+                    stopClipboardSync()
+                }
+                _uiState.update {
+                    it.copy(
+                        clipboardSyncEnabled = false,
+                        status = "Handoff failed",
+                        error = error.message,
+                        networkHint = hotspotChecklist()
+                    )
+                }
+            }
+        }
+    }
+
     private fun registerAndroidReceiver(mac: TrustedMac) {
         LinkitReceiverService.start(getApplication())
         viewModelScope.launch {
@@ -758,6 +843,29 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                         )
                     }
                 }
+            }
+
+            Section("Handoff") {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    SecondaryButton(
+                        text = "Send Clipboard",
+                        onClick = viewModel::sendClipboardTextToMac,
+                        enabled = state.isConnectedToMac,
+                        modifier = Modifier.weight(1f)
+                    )
+                    SecondaryButton(
+                        text = "Open Link on Mac",
+                        onClick = viewModel::openClipboardLinkOnMac,
+                        enabled = state.isConnectedToMac,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                SecondaryButton(
+                    text = "Clipboard Sync: ${if (state.clipboardSyncEnabled) "On" else "Off"}",
+                    onClick = viewModel::toggleClipboardSync,
+                    enabled = state.isConnectedToMac || state.clipboardSyncEnabled,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
             TransferStatus(state)

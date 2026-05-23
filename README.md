@@ -1,8 +1,8 @@
 # Linkit
 
-**Drop files between your Android phone and your Mac. Locally. Instantly. No cloud.**
+**Drop files, text, and links between your Android phone and your Mac. Locally. Instantly. No cloud.**
 
-Linkit is a small, private file-transfer link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar.
+Linkit is a small, private device link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar. Clipboard text and links move across the same signed local channel.
 
 No accounts. No upload to a server. No 25 MB email limit. No "your file is too large for AirDrop." Just your phone and your Mac talking directly over your local network.
 
@@ -28,12 +28,19 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 - Pick a file (or 50) in the Linkit app and send.
 - Tap **Share** in any Android app — Files, Gallery, WhatsApp, Chrome — and pick Linkit.
 - Files land in `~/Downloads/Linkit Drop` on your Mac, with the original filename and bytes intact.
+- Share plain text to Linkit to copy it onto the Mac clipboard.
+- Share an `http` or `https` URL to Linkit to open it on the Mac.
+- Tap **Send Clipboard** or **Open Link on Mac** in the Android app for explicit handoff.
 
 **Mac → Phone**
 - Drag files onto the Linkit icon in your menu bar.
 - They land in `Downloads/Linkit Drop` on your phone, even if the Linkit app is closed.
+- Use the Mac menu to send clipboard text to Android or open the clipboard URL on Android.
+- Turn on clipboard text sync from the Mac menu to push Mac clipboard changes to Android.
 
-**Same flow, either direction. That's it.**
+**Clipboard caveat:** Android 10+ limits clipboard reads to focused apps and input methods. Automatic Android → Mac clipboard sync only works while Linkit is open/focused; background copies from other Android apps need the Linkit share sheet or the explicit **Send Clipboard** button. Mac → Android clipboard sync can run from the Mac menu-bar app.
+
+**Same local channel, either direction, within the operating-system privacy rules. That's it.**
 
 ---
 
@@ -69,7 +76,7 @@ You can pair on home Wi-Fi, office Wi-Fi, a coffee shop hotspot, or your phone's
 
 **macOS app** — menu bar app. Click for paired devices, pairing QR, recent transfers, drop folder, and diagnostics. The icon changes when you're paired so you always know the state at a glance.
 
-**Android app** — Compose UI. Send tab for picking files, Share-sheet integration so it appears anywhere you tap Share, and a quiet background receiver so the Mac can push files at any time.
+**Android app** — Compose UI. Send tab for picking files, Share-sheet integration so it appears anywhere you tap Share, text/link handoff controls, and a quiet background receiver so the Mac can push files or signed actions at any time.
 
 ---
 
@@ -77,20 +84,21 @@ You can pair on home Wi-Fi, office Wi-Fi, a coffee shop hotspot, or your phone's
 
 Linkit is deliberately one thing done well. These are not in the MVP:
 
-- Clipboard sync
 - Folder sync
 - Resumable / chunked transfers
 - Sending to multiple devices at once
 - Remote transfers over the internet
 - iPhone / Linux / Windows
 
-Some of these may come later. The first version is about making one phone and one Mac feel like the same machine for file transfer.
+Some of these may come later. The first version is about making one phone and one Mac feel like the same machine for local file transfer and text handoff.
 
 ---
 
 ## Status
 
 This is a private MVP for personal use. It is not on the Play Store or in a notarized macOS installer yet.
+
+For the current feature snapshot, see [`docs/current-state.md`](docs/current-state.md).
 
 For local setup, sideloading, scripts, and protocol details, see [`docs/SETUP.md`](docs/SETUP.md).
 

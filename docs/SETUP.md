@@ -42,6 +42,28 @@ The status item icon flips to `link.circle.fill` and the title becomes `Linkit (
 
 **Mac → Phone:** open Linkit on Android so the foreground receiver is running, then drag files onto the `Linkit` menu-bar item. Files land in `Downloads/Linkit Drop` on the phone.
 
+The Mac transfer popup has a **Cancel** button. Canceling a Mac → Android transfer aborts the local upload and sends a signed cancel request to Android. Canceling an Android → Mac transfer marks the receiver session canceled and removes the in-flight temp file.
+
+## Clipboard and link handoff
+
+All text/link handoff uses signed local requests over the paired LAN connection. Nothing goes through a cloud service.
+
+**Mac → Android:**
+
+- Mac menu bar → **Send Clipboard Text to Android** copies the current Mac clipboard text onto Android.
+- Mac menu bar → **Open Clipboard Link on Android** opens the current Mac clipboard URL on Android. Only `http` and `https` links are accepted.
+- Mac menu bar → **Clipboard Text Sync: On** watches the Mac clipboard and pushes text changes to Android.
+
+**Android → Mac:**
+
+- Android app → **Send Clipboard** sends the current Android clipboard text to the Mac clipboard.
+- Android app → **Open Link on Mac** opens the current Android clipboard URL on the Mac.
+- Android share sheet → share plain text to Linkit to copy it to the Mac clipboard.
+- Android share sheet → share an `http` or `https` URL to Linkit to open it on the Mac.
+- Android app → **Clipboard Sync: On** watches clipboard changes only while Linkit is open/focused.
+
+Android 10+ blocks ordinary background apps from reading clipboard contents unless the app is focused or is the active input method. Linkit's Android → Mac automatic sync is therefore foreground-only by design. For background Android copies, use the Android share sheet or open Linkit and tap **Send Clipboard**.
+
 ## Where things live
 
 ```txt
