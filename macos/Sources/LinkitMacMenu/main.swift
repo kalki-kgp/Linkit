@@ -15,6 +15,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var deviceObserver: NSObjectProtocol?
     private var lastTrustedSignature: String = ""
     private var lastConnectedSignature: String = ""
+    private var notificationCenter: UNUserNotificationCenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureNotifications()
@@ -442,7 +443,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func configureNotifications() {
+        guard isRunningFromAppBundle else {
+            fputs("Linkit notifications disabled: run the packaged .app to enable macOS notification banners.\n", stderr)
+            return
+        }
+
         let center = UNUserNotificationCenter.current()
+        notificationCenter = center
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         let reveal = UNNotificationAction(identifier: "linkit.reveal", title: "Show in Finder", options: [])
@@ -451,7 +458,12 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         center.setNotificationCategories([category])
     }
 
+    private var isRunningFromAppBundle: Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
+    }
+
     private func postReceivedNotification(userInfo: [AnyHashable: Any]?) {
+        guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let senderId = userInfo?[LinkitTransferNotification.senderDeviceIdKey] as? String
         let savedPath = (userInfo?[LinkitTransferNotification.savedPathKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -470,10 +482,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if let savedPath { content.userInfo = ["savedPath": savedPath] }
 
         let request = UNNotificationRequest(identifier: "linkit.received.\(UUID().uuidString)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        notificationCenter.add(request, withCompletionHandler: nil)
     }
 
     private func postReceiveFailedNotification(userInfo: [AnyHashable: Any]?) {
+        guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let error = (userInfo?[LinkitTransferNotification.errorKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let content = UNMutableNotificationContent()
@@ -481,7 +494,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         content.body = error.map { "\(filename) — \($0)" } ?? filename
         content.sound = .default
         let request = UNNotificationRequest(identifier: "linkit.failed.\(UUID().uuidString)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        notificationCenter.add(request, withCompletionHandler: nil)
     }
 
     private func trustedDeviceName(forId deviceId: String?) -> String? {

@@ -7,8 +7,16 @@ macos/.swiftpm/
 # Android/Gradle
 android/.gradle/
 android/local.properties
+android/keystore.properties
+android/*.keystore
+android/*.jks
 android/**/build/
 
 # Local smoke-test output
 *.log
 dist/
+
+# Graphify (regenerate with `graphify update .` or `/graphify`)
+graphify-out/
+.graphify_python
+.graphify_*

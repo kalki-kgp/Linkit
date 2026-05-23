@@ -82,6 +82,15 @@ Install the Android debug build:
 ./scripts/install-android-debug.sh
 ```
 
+Build a signed release APK for sideloading:
+
+```sh
+./scripts/build-android-release.sh
+adb install dist/linkit-release.apk
+```
+
+The first run creates a local keystore at `android/linkit-release.keystore` and `android/keystore.properties` (both gitignored). Copy `android/keystore.properties.example` if you want to use your own keystore/passwords instead.
+
 ## Bonjour discovery
 
 The receiver advertises `_linkit._tcp.local.`:
