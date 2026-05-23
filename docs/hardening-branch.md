@@ -6,12 +6,15 @@ This branch keeps the private MVP flow intact and adds daily-use polish:
 
 - macOS transfer history persisted in `~/Library/Application Support/Linkit/transfer-history.json`
 - Recent transfers and diagnostics in the macOS menu-bar menu
+- macOS private identity key stored in Keychain, with one-time migration from the old `mac-identity.p256` file
+- Preferences window with launch-at-login control for packaged `.app` builds
 - Dark compact Android UI tuned for quick pairing/sending
+- Hotspot/flaky-network hints in the Android pairing/connection flow
 - Local `.app` packaging script for the menu-bar receiver
 - Signed smoke test script for pair/create/upload/finalize without a phone
 - Symmetric Mac-to-Android sharing with signed upload slots and QR challenge pairing
 
-Known hardening follow-up: macOS still stores its MVP P-256 private key as a `0600` file under Application Support. Move it to Keychain or Secure Enclave before distributing beyond personal builds.
+Known hardening follow-up: Keychain storage is in place for personal builds. Secure Enclave-backed keys are still a later distribution hardening option.
 
 ## Commands
 

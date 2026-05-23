@@ -9,6 +9,14 @@ public struct OutgoingTransferResult: Equatable {
     public let bytesSent: Int64
 }
 
+public struct OutgoingTransferProgress: Equatable {
+    public let fileURL: URL
+    public let fileIndex: Int
+    public let fileCount: Int
+    public let fileBytesSent: Int64
+    public let fileSize: Int64
+}
+
 final class OutgoingTransferClient {
     private let identity: LinkitIdentity
     private let logger: LinkitLogger
@@ -20,7 +28,7 @@ final class OutgoingTransferClient {
         self.logger = logger
     }
 
-    func send(files: [URL], to device: TrustedDevice) throws -> [OutgoingTransferResult] {
+    func send(files: [URL], to device: TrustedDevice, onProgress: ((OutgoingTransferProgress) -> Void)? = nil) throws -> [OutgoingTransferResult] {
         guard device.platform.lowercased() == "android" else {
             throw HTTPFailure.badRequest("unsupported_target", "Target device is not Android")
         }
@@ -30,8 +38,8 @@ final class OutgoingTransferClient {
 
         let baseURL = httpBaseURL(host: host, port: port)
         var results: [OutgoingTransferResult] = []
-        for file in files {
-            results.append(try send(file: file, baseURL: baseURL))
+        for (index, file) in files.enumerated() {
+            results.append(try send(file: file, baseURL: baseURL, fileIndex: index, fileCount: files.count, onProgress: onProgress))
         }
         return results
     }
@@ -59,7 +67,13 @@ final class OutgoingTransferClient {
         return response
     }
 
-    private func send(file: URL, baseURL: String) throws -> OutgoingTransferResult {
+    private func send(
+        file: URL,
+        baseURL: String,
+        fileIndex: Int,
+        fileCount: Int,
+        onProgress: ((OutgoingTransferProgress) -> Void)?
+    ) throws -> OutgoingTransferResult {
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .localizedNameKey])
         guard values.isRegularFile == true else {
             throw HTTPFailure.badRequest("not_regular_file", "Only regular files can be sent")
@@ -101,7 +115,17 @@ final class OutgoingTransferClient {
             uploadToken: createResponse.uploadToken,
             contentLength: size
         )
-        try executeUpload(uploadRequest, file: file, expectedStatus: 200)
+        try executeUpload(uploadRequest, file: file, expectedStatus: 200, expectedBytes: size) { sent in
+            onProgress?(
+                OutgoingTransferProgress(
+                    fileURL: file,
+                    fileIndex: fileIndex,
+                    fileCount: fileCount,
+                    fileBytesSent: sent,
+                    fileSize: size
+                )
+            )
+        }
 
         let finalizeBody = try encoder.encode(FinalizeRequest(bytesSent: size, finalSha256: sha256))
         let finalizePath = "/v1/transfers/\(createResponse.transferId)/finalize"
@@ -184,11 +208,16 @@ final class OutgoingTransferClient {
         return try decoder.decode(T.self, from: result.data)
     }
 
-    private func executeUpload(_ request: URLRequest, file: URL, expectedStatus: Int) throws {
+    private func executeUpload(_ request: URLRequest, file: URL, expectedStatus: Int, expectedBytes: Int64, onProgress: ((Int64) -> Void)? = nil) throws {
         try ensureOffMainThread()
         let semaphore = DispatchSemaphore(value: 0)
         var taskResult: Result<OutgoingHTTPResult, Error>!
-        URLSession.shared.uploadTask(with: request, fromFile: file) { data, response, error in
+        let progressDelegate = UploadProgressDelegate(expectedBytes: expectedBytes, onProgress: onProgress)
+        let session = URLSession(configuration: .default, delegate: progressDelegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+
+        onProgress?(0)
+        let task = session.uploadTask(with: request, fromFile: file) { data, response, error in
             if let error {
                 taskResult = .failure(error)
             } else if let http = response as? HTTPURLResponse {
@@ -197,12 +226,14 @@ final class OutgoingTransferClient {
                 taskResult = .failure(HTTPFailure.badRequest("missing_http_response", "Android receiver did not return an HTTP response"))
             }
             semaphore.signal()
-        }.resume()
+        }
+        task.resume()
         semaphore.wait()
         let result = try taskResult.get()
         guard result.status == expectedStatus else {
             throw decodeFailure(status: result.status, data: result.data)
         }
+        onProgress?(expectedBytes)
     }
 
     private func execute(_ request: URLRequest) throws -> OutgoingHTTPResult {
@@ -261,6 +292,28 @@ final class OutgoingTransferClient {
         guard !Thread.isMainThread else {
             throw HTTPFailure.badRequest("main_thread_network", "Outgoing Android requests must run off the main thread")
         }
+    }
+}
+
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
+    private let expectedBytes: Int64
+    private let onProgress: ((Int64) -> Void)?
+
+    init(expectedBytes: Int64, onProgress: ((Int64) -> Void)?) {
+        self.expectedBytes = expectedBytes
+        self.onProgress = onProgress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        let expected = expectedBytes > 0 ? expectedBytes : max(0, totalBytesExpectedToSend)
+        let clamped = expected > 0 ? min(expected, totalBytesSent) : max(0, totalBytesSent)
+        onProgress?(clamped)
     }
 }
 

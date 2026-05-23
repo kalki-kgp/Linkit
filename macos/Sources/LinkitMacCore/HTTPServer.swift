@@ -126,7 +126,7 @@ public final class LinkitReceiverApp {
         connections.disconnect(deviceId: deviceId)
     }
 
-    public func sendFilesToFirstAndroid(_ files: [URL]) throws -> [OutgoingTransferResult] {
+    public func sendFilesToFirstAndroid(_ files: [URL], onProgress: ((OutgoingTransferProgress) -> Void)? = nil) throws -> [OutgoingTransferResult] {
         guard let connected = connections.allConnected().first(where: { $0.platform.lowercased() == "android" }),
               let trusted = trustStore.trustedDevice(id: connected.deviceId)
         else {
@@ -141,7 +141,7 @@ public final class LinkitReceiverApp {
             lastKnownHost: connected.host,
             receivePort: connected.receivePort
         )
-        return try outgoingClient.send(files: files, to: device)
+        return try outgoingClient.send(files: files, to: device, onProgress: onProgress)
     }
 
     public func recentTransfers(limit: Int = 10) -> [TransferHistoryEntry] {
@@ -415,6 +415,7 @@ final class HTTPServer {
                 hasher: &hasher,
                 received: &received
             )
+            postUploadProgress(record: record, received: received)
 
             var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
             while received < record.expectedSize {
@@ -436,6 +437,7 @@ final class HTTPServer {
                     hasher: &hasher,
                     received: &received
                 )
+                postUploadProgress(record: record, received: received)
             }
 
             let sha256 = hasher.finalize().linkitHex
@@ -450,6 +452,20 @@ final class HTTPServer {
             store.failUpload(id: transferId, error: "upload_io_failed", message: "\(error)", removeTemp: true)
             throw error
         }
+    }
+
+    private func postUploadProgress(record: TransferRecord, received: Int64) {
+        NotificationCenter.default.post(
+            name: .linkitTransferDidProgress,
+            object: nil,
+            userInfo: [
+                LinkitTransferNotification.transferIdKey: record.id,
+                LinkitTransferNotification.filenameKey: record.originalName,
+                LinkitTransferNotification.senderDeviceIdKey: record.clientDeviceId,
+                LinkitTransferNotification.sizeKey: record.expectedSize,
+                LinkitTransferNotification.bytesReceivedKey: received
+            ]
+        )
     }
 
     private func consumeUploadChunk(

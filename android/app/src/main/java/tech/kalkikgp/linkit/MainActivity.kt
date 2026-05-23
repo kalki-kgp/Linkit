@@ -141,7 +141,8 @@ data class LinkitUiState(
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
-    val tokenRejected: Boolean = false
+    val tokenRejected: Boolean = false,
+    val networkHint: String? = null
 )
 
 class LinkitViewModel(application: Application) : AndroidViewModel(application) {
@@ -181,15 +182,15 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setMacIp(value: String) {
-        _uiState.update { it.copy(macIp = value, error = null, tokenRejected = false) }
+        _uiState.update { it.copy(macIp = value, error = null, tokenRejected = false, networkHint = null) }
     }
 
     fun setPort(value: String) {
-        _uiState.update { it.copy(port = value.filter(Char::isDigit).take(5), error = null) }
+        _uiState.update { it.copy(port = value.filter(Char::isDigit).take(5), error = null, networkHint = null) }
     }
 
     fun setPairingToken(value: String) {
-        _uiState.update { it.copy(pairingToken = value.trim(), error = null, tokenRejected = false) }
+        _uiState.update { it.copy(pairingToken = value.trim(), error = null, tokenRejected = false, networkHint = null) }
     }
 
     fun pick(uri: Uri) {
@@ -205,6 +206,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     pickedFiles = files,
                     status = if (files.size == 1) "Ready to send" else "Ready to send ${files.size} files",
                     error = null,
+                    networkHint = null,
                     savedPath = null,
                     bytesSent = 0,
                     totalBytes = files.sumOf { file -> file.size },
@@ -230,6 +232,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 error = "Manual token pairing is disabled. Scan the QR so Android can sign the Mac challenge.",
+                networkHint = hotspotChecklist(),
                 tokenRejected = true
             )
         }
@@ -243,13 +246,14 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         macIp = payload.ip,
                         port = payload.port.toString(),
                         pairingToken = payload.pairingToken,
-                        error = null
+                        error = null,
+                        networkHint = null
                     )
                 }
                 pair(payload)
             }
             .onFailure { error ->
-                _uiState.update { it.copy(error = error.message ?: "Invalid Linkit QR") }
+                _uiState.update { it.copy(error = error.message ?: "Invalid Linkit QR", networkHint = hotspotChecklist()) }
             }
     }
 
@@ -267,6 +271,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     isConnectedToMac = false,
                     status = "Pair with Mac",
                     savedPath = null,
+                    networkHint = null,
                     androidReceiverStatus = "Pair with Mac to receive drops"
                 )
             }
@@ -303,20 +308,20 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun connectMac() {
         val mac = _uiState.value.trustedMac ?: return
-        _uiState.update { it.copy(status = "Connecting", androidReceiverStatus = "Connecting to Mac for drops", error = null) }
+        _uiState.update { it.copy(status = "Connecting", androidReceiverStatus = "Connecting to Mac for drops", error = null, networkHint = null) }
         registerAndroidReceiver(mac)
     }
 
     fun discoverMac() {
-        _uiState.update { it.copy(status = "Discovering", error = null) }
+        _uiState.update { it.copy(status = "Discovering", error = null, networkHint = null) }
         discovery.start(
             onFound = { mac ->
                 _uiState.update {
-                    it.copy(macIp = mac.ip, port = mac.port.toString(), status = "Found ${mac.name}", error = null)
+                    it.copy(macIp = mac.ip, port = mac.port.toString(), status = "Found ${mac.name}", error = null, networkHint = null)
                 }
             },
             onError = { message ->
-                _uiState.update { it.copy(status = "Discovery failed", error = message) }
+                _uiState.update { it.copy(status = "Discovery failed", error = message, networkHint = hotspotChecklist()) }
             }
         )
     }
@@ -324,29 +329,29 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private fun pair(payload: MacPairingPayload) {
         if (_uiState.value.isPairing) return
         val ip = PrivateLanTarget.validateIp(payload.ip).getOrElse { error ->
-            _uiState.update { it.copy(status = "Pairing failed", error = error.message) }
+            _uiState.update { it.copy(status = "Pairing failed", error = error.message, networkHint = hotspotChecklist()) }
             return
         }
         val port = PrivateLanTarget.validatePort(payload.port.toString()).getOrElse { error ->
-            _uiState.update { it.copy(status = "Pairing failed", error = error.message) }
+            _uiState.update { it.copy(status = "Pairing failed", error = error.message, networkHint = hotspotChecklist()) }
             return
         }
         val expiresAt = payload.pairingTokenExpiresAt?.let { raw ->
             runCatching { Instant.parse(raw) }.getOrElse {
-                _uiState.update { it.copy(status = "Pairing failed", error = "Pairing QR has an invalid expiry") }
+                _uiState.update { it.copy(status = "Pairing failed", error = "Pairing QR has an invalid expiry", networkHint = hotspotChecklist()) }
                 return
             }
         }
         if (expiresAt != null && Instant.now().isAfter(expiresAt)) {
             _uiState.update {
-                it.copy(status = "Pairing expired", error = "Refresh the QR on your Mac and scan again", tokenRejected = true)
+                it.copy(status = "Pairing expired", error = "Refresh the QR on your Mac and scan again", tokenRejected = true, networkHint = hotspotChecklist())
             }
             return
         }
         val validatedPayload = payload.copy(ip = ip, port = port)
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isPairing = true, status = "Pairing", error = null, tokenRejected = false) }
+            _uiState.update { it.copy(isPairing = true, status = "Pairing", error = null, networkHint = null, tokenRejected = false) }
             try {
                 val mac = client.pair(
                     baseUrl = PrivateLanTarget.baseUrl(validatedPayload.ip, validatedPayload.port),
@@ -365,17 +370,18 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         status = "Connected",
                         androidReceiverStatus = "Mac drops enabled",
                         error = null,
+                        networkHint = null,
                         tokenRejected = false
                     )
                 }
                 registerAndroidReceiver(mac)
             } catch (http: LinkitHttpException) {
                 _uiState.update {
-                    it.copy(isPairing = false, status = "Pairing failed", error = http.message, tokenRejected = http.statusCode == 401)
+                    it.copy(isPairing = false, status = "Pairing failed", error = http.message, tokenRejected = http.statusCode == 401, networkHint = hotspotChecklist())
                 }
             } catch (error: Throwable) {
                 _uiState.update {
-                    it.copy(isPairing = false, status = "Pairing failed", error = error.message)
+                    it.copy(isPairing = false, status = "Pairing failed", error = error.message, networkHint = hotspotChecklist())
                 }
             }
         }
@@ -417,6 +423,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     isSending = true,
                     status = "Sending",
                     error = null,
+                    networkHint = null,
                     savedPath = null,
                     tokenRejected = false,
                     bytesSent = 0,
@@ -471,6 +478,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         bytesSent = completedBytes,
                         totalBytes = completedBytes,
                         error = null,
+                        networkHint = null,
                         etaSeconds = 0,
                         currentFileName = null
                     )
@@ -496,7 +504,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 }
             } catch (io: IOException) {
                 _uiState.update {
-                    it.copy(isSending = false, status = "Network failed", error = io.message, etaSeconds = null, currentFileName = null)
+                    it.copy(isSending = false, status = "Network failed", error = io.message, networkHint = hotspotChecklist(), etaSeconds = null, currentFileName = null)
                 }
             } catch (error: Throwable) {
                 _uiState.update {
@@ -527,7 +535,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     state.copy(
                         isConnectedToMac = true,
                         status = if (state.isSending || state.isPairing) state.status else "Connected",
-                        androidReceiverStatus = "Mac drops enabled"
+                        androidReceiverStatus = "Mac drops enabled",
+                        networkHint = null
                     )
                 }
             }.onFailure { error ->
@@ -535,7 +544,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     state.copy(
                         isConnectedToMac = false,
                         status = if (state.trustedMac == null) "Pair with Mac" else "Paired, offline",
-                        androidReceiverStatus = "Open Linkit on Mac to connect: ${error.message}"
+                        androidReceiverStatus = "Open Linkit on Mac to connect: ${error.message}",
+                        networkHint = hotspotChecklist()
                     )
                 }
             }
@@ -587,6 +597,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 status = if (fileCount > 1) "Sending $fileNumber/$fileCount" else "Sending"
             )
         }
+    }
+
+    private fun hotspotChecklist(): String {
+        return "Hotspot mode: turn on the phone hotspot, connect the Mac to it, open Linkit on Mac, then scan a fresh QR. If discovery fails, use the IP shown in Mac diagnostics."
     }
 }
 
@@ -716,6 +730,9 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                         )
                     }
                 }
+                state.networkHint?.let {
+                    HintPanel(it)
+                }
             }
 
             Section("Payload") {
@@ -749,6 +766,21 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
             HistorySection(history, onClear = viewModel::clearHistory)
         }
     }
+}
+
+@Composable
+private fun HintPanel(text: String) {
+    Text(
+        text = text,
+        color = WorkbenchColors.Warning,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(7.dp))
+            .background(WorkbenchColors.PanelLift)
+            .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(7.dp))
+            .padding(10.dp)
+    )
 }
 
 @Composable

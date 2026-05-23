@@ -29,15 +29,26 @@ final class OutgoingTransferClientTests: XCTestCase {
         try Data("hello android\n".utf8).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
 
+        let progressLock = NSLock()
+        var progressSamples: [Int64] = []
         let result = try runOffMain {
             try OutgoingTransferClient(identity: identity, logger: LinkitLogger())
-                .send(files: [file], to: target)
+                .send(files: [file], to: target) { progress in
+                    progressLock.lock()
+                    progressSamples.append(progress.fileBytesSent)
+                    progressLock.unlock()
+                }
         }
+        progressLock.lock()
+        let samples = progressSamples
+        progressLock.unlock()
 
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].bytesSent, 14)
         XCTAssertEqual(result[0].savedPath, "Downloads/Linkit Drop/linkit-outgoing.txt")
         XCTAssertEqual(receiver.uploadedBody, Data("hello android\n".utf8))
+        XCTAssertTrue(samples.contains { $0 > 0 })
+        XCTAssertEqual(samples.last, 14)
     }
 
     func testFetchesAndroidDeviceStatus() throws {
