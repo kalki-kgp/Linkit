@@ -64,6 +64,37 @@ All text/link handoff uses signed local requests over the paired LAN connection.
 
 Android 10+ blocks ordinary background apps from reading clipboard contents unless the app is focused or is the active input method. Linkit's Android → Mac automatic sync is therefore foreground-only by design. For background Android copies, use the Android share sheet or open Linkit and tap **Send Clipboard**.
 
+## Reconnect after network change
+
+If you toggle Wi-Fi, switch SSIDs, or turn the phone hotspot on/off, the paired Mac's IP may change. The Android app handles this without re-pairing:
+
+- On app open or resume, Android runs a 5-second Bonjour query filtered by the paired Mac's name and updates the stored IP/port before re-registering its receiver.
+- The device card on Home shows **Paired, offline** with a **Reconnect** button whenever the Mac stops responding. Tap it to run the same flow on demand.
+
+Both sides converge on the same connection state. The Mac probes Android every ~30 s with a signed `GET /v1/devices/self/status`; Android marks the Mac offline after ~90 s of silence.
+
+## Debug panel (Android)
+
+Tap the **Linkit** wordmark on the Home top bar seven times in quick succession to open the hidden Debug screen. Available in both debug and signed-release builds.
+
+Sections:
+
+- **Process** — uid/pid, process uptime, CPU time since process start and since baseline (with % of wall time).
+- **Network (this UID)** — Rx/Tx bytes from `TrafficStats.getUidRxBytes/Tx` for the Linkit UID only, since process start and since baseline.
+- **Battery** — current system %, baseline %, delta, baseline-taken timestamp, last 8 samples (each tagged with the reason it was captured, e.g. `LinkitReceiverService start`).
+- **Foreground services** — running `LinkitReceiverService` / `LinkitSendService` windows with durations, and the last 8 completed windows.
+- **Events** — last 40 reconnect/discovery/presence/fgs/client events.
+- **Logs** — last 80 of a 500-line ring buffer (`DebugTelemetry.log/i/w/e`).
+
+Buttons:
+
+- **Reset baseline** — resets the CPU/network/battery baseline counters without restarting the process.
+- **Clear logs** — empties the log ring.
+- **Copy full report** — copies a plaintext digest of every section to the clipboard for pasting into an issue.
+- **Copy `adb dumpsys batterystats` command** — copies `adb shell dumpsys batterystats --charged tech.kalkikgp.linkit` for ground-truth per-app mAh on a host machine.
+
+In-app readings are PID/UID-scoped proxies. They isolate Linkit from other heavy apps running on the device, but for actual battery mAh you still need the adb command above.
+
 ## Where things live
 
 ```txt

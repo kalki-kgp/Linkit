@@ -141,6 +141,8 @@ class LinkitClient(
             body = body
         )
         executeJson(request)
+        MacPresence.touch()
+        DebugTelemetry.recordEvent("client", "registerReceiver ok ${mac.ip}:${mac.port}")
     }
 
     suspend fun disconnect(mac: TrustedMac, identityStore: IdentityStore) {
@@ -169,6 +171,8 @@ class LinkitClient(
             body = body
         )
         executeJson(request)
+        MacPresence.touch()
+        DebugTelemetry.recordEvent("client", "sendAction ok type=$type bytes=${body.length}")
     }
 
     private fun validatePairingResponse(
@@ -367,6 +371,7 @@ class LinkitClient(
         )
 
         val json = executeJson(request)
+        MacPresence.touch()
         return json.optString("savedPath").takeIf { it.isNotBlank() }
     }
 

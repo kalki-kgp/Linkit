@@ -23,6 +23,8 @@ class LinkitReceiverService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DebugTelemetry.install(applicationContext)
+        DebugTelemetry.serviceStarted("LinkitReceiverService")
         ensureChannel()
         startForegroundWithNotification(currentStatus("Listening for Mac drops"))
         val identityStore = IdentityStore(applicationContext)
@@ -52,6 +54,7 @@ class LinkitReceiverService : Service() {
         receiver?.stop()
         receiver = null
         serviceScope.cancel()
+        DebugTelemetry.serviceStopped("LinkitReceiverService")
         super.onDestroy()
     }
 

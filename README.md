@@ -40,6 +40,10 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 
 **Clipboard caveat:** Android 10+ limits clipboard reads to focused apps and input methods. Automatic Android → Mac clipboard sync only works while Linkit is open/focused; background copies from other Android apps need the Linkit share sheet or the explicit **Send Clipboard** button. Mac → Android clipboard sync can run from the Mac menu-bar app.
 
+**Reconnect after network changes** — when Wi-Fi or hotspot is toggled, the Android app re-discovers the paired Mac via Bonjour on next open or via an in-app **Reconnect** button. No re-scanning the QR.
+
+**Bidirectional presence** — both sides know when the peer goes away. The Mac probes Android every ~30 s; Android marks the Mac offline if it hasn't heard from it for ~90 s. The UI on each device reflects the same connection state.
+
 **Same local channel, either direction, within the operating-system privacy rules. That's it.**
 
 ---
@@ -76,7 +80,7 @@ You can pair on home Wi-Fi, office Wi-Fi, a coffee shop hotspot, or your phone's
 
 **macOS app** — menu bar app. Click for paired devices, pairing QR, recent transfers, drop folder, and diagnostics. The icon changes when you're paired so you always know the state at a glance.
 
-**Android app** — Compose UI. Send tab for picking files, Share-sheet integration so it appears anywhere you tap Share, text/link handoff controls, and a quiet background receiver so the Mac can push files or signed actions at any time.
+**Android app** — Consumer-grade Compose UI: device hero card, four-tile action grid, recent activity, and a quiet background receiver so the Mac can push files or signed actions at any time. The receiver notification carries **Send Clipboard** and **Open Link** action buttons so you can hand off without opening the app. A hidden debug panel (tap the **Linkit** wordmark seven times) shows process CPU, per-UID network bytes, foreground-service uptime, battery delta, reconnect/discovery events, and a log ring buffer.
 
 ---
 

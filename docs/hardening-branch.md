@@ -17,6 +17,11 @@ This branch keeps the private MVP flow intact and adds daily-use polish:
 - Signed text/link action channel for clipboard text, plain-text handoff, and opening links on the other device
 - Mac menu actions for sending clipboard text, opening clipboard links on Android, and Mac-side clipboard text sync
 - Android app/share-sheet actions for sending clipboard text and opening links on the Mac
+- Android Reconnect via Bonjour name-filtered rediscovery after Wi-Fi/hotspot toggle (no QR rescan)
+- Bidirectional presence detection — Mac probe sweep + Android `MacPresence` heartbeat, with successful Android → Mac signed calls also counting as proof-of-life
+- Android receiver notification gains **Send Clipboard** and **Open Link** action buttons (translucent activity + `onWindowFocusChanged` for Android 10+ clipboard access)
+- Consumer-grade Android Compose home (device card, action grid, recent activity, warm-paper Light/Dark palette)
+- Hidden Android Debug panel (7-tap unlock on the Linkit wordmark): per-PID CPU, per-UID network bytes, foreground-service uptime windows, battery samples, event/log rings, copy-report and `adb dumpsys batterystats` shortcut
 
 Known hardening follow-up: Keychain storage is in place for personal builds. Secure Enclave-backed keys are still a later distribution hardening option.
 

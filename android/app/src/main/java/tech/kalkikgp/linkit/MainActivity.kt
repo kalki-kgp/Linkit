@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DebugTelemetry.install(applicationContext)
         consumeIncomingShareIntent(intent)
         requestNotificationPermissionIfNeeded()
         if (IdentityStore(applicationContext).trustedMac() != null) {
@@ -233,6 +234,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 val lastSeen = MacPresence.lastSeenMillis.value ?: continue
                 val ageMs = System.currentTimeMillis() - lastSeen
                 if (ageMs > 90_000) {
+                    DebugTelemetry.recordEvent("presence", "demoted to offline (last seen ${ageMs / 1000}s ago)")
                     _uiState.update {
                         it.copy(
                             isConnectedToMac = false,
@@ -397,6 +399,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 networkHint = null
             )
         }
+        DebugTelemetry.recordEvent("reconnect", "discover requested for ${mac.deviceName}")
         reconnectJob = viewModelScope.launch {
             val found = withTimeoutOrNull(5_000) {
                 suspendCancellableCoroutine<DiscoveredMac?> { cont ->
@@ -425,9 +428,11 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         status = "Connecting"
                     )
                 }
+                DebugTelemetry.recordEvent("reconnect", "Bonjour resolved ${updated.ip}:${updated.port}")
                 updated
             } else {
                 _uiState.update { it.copy(status = "Trying last known address") }
+                DebugTelemetry.recordEvent("reconnect", "Bonjour timeout, using last known ${mac.ip}:${mac.port}")
                 mac
             }
             registerAndroidReceiver(target)
@@ -742,6 +747,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             }.onFailure { error ->
+                DebugTelemetry.recordEvent("reconnect", "register failed: ${error.message}")
                 _uiState.update { state ->
                     state.copy(
                         isConnectedToMac = false,
@@ -1031,6 +1037,9 @@ private fun HomeScreen(
 @Composable
 private fun TopBar(onRePair: () -> Unit, onForget: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var tapCount by remember { mutableStateOf(0) }
+    var lastTapMillis by remember { mutableStateOf(0L) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1042,7 +1051,16 @@ private fun TopBar(onRePair: () -> Unit, onForget: () -> Unit) {
             "Linkit",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onBackground
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.clickable {
+                val now = SystemClock.elapsedRealtime()
+                tapCount = if (now - lastTapMillis > 1_500) 1 else tapCount + 1
+                lastTapMillis = now
+                if (tapCount >= 7) {
+                    tapCount = 0
+                    context.startActivity(Intent(context, DebugActivity::class.java))
+                }
+            }
         )
         Box {
             IconButton(onClick = { menuOpen = true }) {
