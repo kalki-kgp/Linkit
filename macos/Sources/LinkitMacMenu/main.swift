@@ -40,6 +40,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var deviceObserver: NSObjectProtocol?
     private var clipboardSyncTimer: Timer?
     private var clipboardSyncEnabled = false
+    private var presenceTimer: Timer?
     private var lastClipboardText: String?
     private var lastClipboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastTrustedSignature: String = ""
@@ -79,6 +80,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         startTransferObservers()
         startActionObserver()
         startDeviceObserver()
+        startPresenceMonitor()
     }
 
     private func refreshStatusButton() {
@@ -540,6 +542,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             NotificationCenter.default.removeObserver(deviceObserver)
         }
         deviceObserver = nil
+        presenceTimer?.invalidate()
+        presenceTimer = nil
         NSApp.terminate(nil)
     }
 
@@ -879,6 +883,38 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             queue: .main
         ) { [weak self] _ in
             self?.checkForTrustChanges()
+        }
+    }
+
+    private func startPresenceMonitor() {
+        presenceTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            self?.runPresenceSweep()
+        }
+        timer.tolerance = 3.0
+        presenceTimer = timer
+    }
+
+    private func runPresenceSweep() {
+        guard let app else { return }
+        let connected = app.connectedDevices()
+        if connected.isEmpty { return }
+        let formatter = ISO8601DateFormatter()
+        let now = Date()
+        let stalenessThreshold: TimeInterval = 30
+        for device in connected {
+            guard let lastSeen = formatter.date(from: device.lastSeenAt) else { continue }
+            guard now.timeIntervalSince(lastSeen) >= stalenessThreshold else { continue }
+            let deviceId = device.deviceId
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    _ = try app.refreshConnectedDevice(deviceId)
+                } catch {
+                    DispatchQueue.main.async {
+                        app.disconnectDevice(deviceId)
+                    }
+                }
+            }
         }
     }
 

@@ -56,6 +56,13 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ClipboardActionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/AppTheme.Transparent" />
         <service
             android:name=".LinkitReceiverService"
             android:exported="false"

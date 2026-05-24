@@ -14,39 +14,57 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -54,8 +72,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -66,11 +83,14 @@ import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.time.Instant
 import java.util.UUID
@@ -90,7 +110,7 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionIfNeeded()
         if (IdentityStore(applicationContext).trustedMac() != null) {
             LinkitReceiverService.start(applicationContext)
-            linkitViewModel.connectMac()
+            linkitViewModel.discoverAndReconnect()
         }
         setContent {
             LinkitTheme {
@@ -113,6 +133,15 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeIncomingShareIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (IdentityStore(applicationContext).trustedMac() != null &&
+            !linkitViewModel.uiState.value.isConnectedToMac
+        ) {
+            linkitViewModel.discoverAndReconnect()
+        }
     }
 
     private fun consumeIncomingShareIntent(intent: Intent?) {
@@ -177,6 +206,42 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     init {
         viewModelScope.launch {
             AndroidDropEvents.events.collect { handleDropEvent(it) }
+        }
+        viewModelScope.launch {
+            MacPresence.lastSeenMillis.collect { seenAt ->
+                if (seenAt == null) return@collect
+                if (_uiState.value.trustedMac == null) return@collect
+                _uiState.update { state ->
+                    if (state.isConnectedToMac && state.error == null) state
+                    else state.copy(
+                        isConnectedToMac = true,
+                        status = if (state.isSending || state.isPairing) state.status else "Connected",
+                        androidReceiverStatus = "Mac drops enabled",
+                        error = null,
+                        networkHint = null
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            while (true) {
+                delay(10_000)
+                val state = _uiState.value
+                if (!state.isConnectedToMac) continue
+                if (state.isSending || state.isPairing) continue
+                if (state.trustedMac == null) continue
+                val lastSeen = MacPresence.lastSeenMillis.value ?: continue
+                val ageMs = System.currentTimeMillis() - lastSeen
+                if (ageMs > 90_000) {
+                    _uiState.update {
+                        it.copy(
+                            isConnectedToMac = false,
+                            status = "Paired, offline",
+                            androidReceiverStatus = "Mac stopped responding"
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -270,6 +335,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             }
             LinkitReceiverService.stop(getApplication())
             identityStore.forgetTrustedMac()
+            MacPresence.reset()
             _uiState.update {
                 it.copy(
                     trustedMac = null,
@@ -315,6 +381,57 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         val mac = _uiState.value.trustedMac ?: return
         _uiState.update { it.copy(status = "Connecting", androidReceiverStatus = "Connecting to Mac for drops", error = null, networkHint = null) }
         registerAndroidReceiver(mac)
+    }
+
+    private var reconnectJob: Job? = null
+
+    fun discoverAndReconnect() {
+        val mac = _uiState.value.trustedMac ?: return
+        if (_uiState.value.isConnectedToMac || _uiState.value.isPairing) return
+        if (reconnectJob?.isActive == true) return
+        _uiState.update {
+            it.copy(
+                status = "Looking for ${mac.deviceName}",
+                androidReceiverStatus = "Looking for Mac on this network",
+                error = null,
+                networkHint = null
+            )
+        }
+        reconnectJob = viewModelScope.launch {
+            val found = withTimeoutOrNull(5_000) {
+                suspendCancellableCoroutine<DiscoveredMac?> { cont ->
+                    discovery.start(
+                        onFound = { discovered ->
+                            if (cont.isActive) cont.resume(discovered) { discovery.stop() }
+                        },
+                        onError = {
+                            if (cont.isActive) cont.resume(null) { discovery.stop() }
+                        },
+                        nameFilter = mac.deviceName
+                    )
+                    cont.invokeOnCancellation { discovery.stop() }
+                }
+            }
+            discovery.stop()
+
+            val target = if (found != null) {
+                val updated = mac.copy(ip = found.ip, port = found.port)
+                identityStore.saveTrustedMac(updated)
+                _uiState.update {
+                    it.copy(
+                        trustedMac = updated,
+                        macIp = updated.ip,
+                        port = updated.port.toString(),
+                        status = "Connecting"
+                    )
+                }
+                updated
+            } else {
+                _uiState.update { it.copy(status = "Trying last known address") }
+                mac
+            }
+            registerAndroidReceiver(target)
+        }
     }
 
     fun discoverMac() {
@@ -707,581 +824,832 @@ private fun Intent.streamUris(): List<Uri> {
     }
 }
 
+/* ------------------------------------------------------------------------- *
+ * UI · Linkit · macrostructure: Device-Hero + Action Grid + Activity
+ *   genre: modern-minimal · theme: warm paper light / charcoal dark
+ *   accent: amber #D16A1F (light) / #E89F4D (dark)
+ *   motion: status-pulse, transfer-bar slide-up, button-press scale
+ * ------------------------------------------------------------------------- */
+
 @Composable
 private fun LinkitScreen(viewModel: LinkitViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val history by viewModel.historyEntries.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             runCatching {
                 uris.forEach { uri ->
                     context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
                 }
             }
             viewModel.pick(uris)
+            viewModel.send()
         }
     }
     val qrScanner = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let(viewModel::pairFromQr)
     }
-
-    BackHandler(enabled = state.isSending) {
-        viewModel.cancelActive()
+    val launchQrScanner = {
+        qrScanner.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("Point at the Linkit QR on your Mac")
+                .setBeepEnabled(false)
+                .setCaptureActivity(PortraitCaptureActivity::class.java)
+                .setOrientationLocked(false)
+        )
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = WorkbenchColors.Ink) {
-        Column(
+    BackHandler(enabled = state.isSending) { viewModel.cancelActive() }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .systemBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Header(state)
-
-            Section("Target") {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    LinkitTextField(
-                        value = state.macIp,
-                        onValueChange = viewModel::setMacIp,
-                        label = "Mac IP",
-                        enabled = !state.isSending,
-                        modifier = Modifier.weight(1f)
-                    )
-                    LinkitTextField(
-                        value = state.port,
-                        onValueChange = viewModel::setPort,
-                        label = "Port",
-                        enabled = !state.isSending,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(0.55f)
-                    )
-                }
-                LinkitTextField(
-                    value = state.pairingToken,
-                    onValueChange = viewModel::setPairingToken,
-                    label = "Pairing token",
-                    enabled = !state.isSending && !state.isPairing,
-                    isError = state.tokenRejected,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
+            if (state.trustedMac == null) {
+                WelcomeScreen(
+                    isPairing = state.isPairing,
+                    error = state.error,
+                    onPair = launchQrScanner
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    SecondaryButton(
-                        text = "Scan QR",
-                        onClick = {
-                            qrScanner.launch(
-                                ScanOptions()
-                                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                    .setPrompt("Scan Linkit pairing QR")
-                                    .setBeepEnabled(false)
-                                    .setCaptureActivity(PortraitCaptureActivity::class.java)
-                                    .setOrientationLocked(false)
-                            )
-                        },
-                        enabled = !state.isSending && !state.isPairing,
-                        modifier = Modifier.weight(1f)
-                    )
-                    SecondaryButton(
-                        text = "Discover",
-                        onClick = viewModel::discoverMac,
-                        enabled = !state.isSending && !state.isPairing,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    PrimaryButton(
-                        text = if (state.isPairing) "Pairing" else "Pair",
-                        onClick = viewModel::pairManual,
-                        enabled = !state.isSending && !state.isPairing,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (state.trustedMac != null) {
-                        SecondaryButton(
-                            text = if (state.isConnectedToMac) "Disconnect" else "Connect",
-                            onClick = if (state.isConnectedToMac) viewModel::disconnectMac else viewModel::connectMac,
-                            enabled = !state.isSending && !state.isPairing,
-                            modifier = Modifier.weight(1f)
-                        )
-                        SecondaryButton(
-                            text = "Forget",
-                            onClick = viewModel::forgetMac,
-                            enabled = !state.isSending,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-                state.networkHint?.let {
-                    HintPanel(it)
-                }
-            }
-
-            Section("Payload") {
-                FileCard(state)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    SecondaryButton(
-                        text = "Pick file",
-                        onClick = { picker.launch(arrayOf("*/*")) },
-                        enabled = !state.isSending,
-                        modifier = Modifier.weight(1f)
-                    )
-                    PrimaryButton(
-                        text = "Send",
-                        onClick = viewModel::send,
-                        enabled = !state.isSending && state.pickedFiles.isNotEmpty() && state.isConnectedToMac,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (state.isSending) {
-                        SecondaryButton(
-                            text = "Cancel",
-                            onClick = viewModel::cancelActive,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
-            Section("Handoff") {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    SecondaryButton(
-                        text = "Send Clipboard",
-                        onClick = viewModel::sendClipboardTextToMac,
-                        enabled = state.isConnectedToMac,
-                        modifier = Modifier.weight(1f)
-                    )
-                    SecondaryButton(
-                        text = "Open Link on Mac",
-                        onClick = viewModel::openClipboardLinkOnMac,
-                        enabled = state.isConnectedToMac,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                SecondaryButton(
-                    text = "Clipboard Sync: ${if (state.clipboardSyncEnabled) "On" else "Off"}",
-                    onClick = viewModel::toggleClipboardSync,
-                    enabled = state.isConnectedToMac || state.clipboardSyncEnabled,
-                    modifier = Modifier.fillMaxWidth()
+            } else {
+                HomeScreen(
+                    state = state,
+                    history = history,
+                    onPickFile = { filePicker.launch(arrayOf("*/*")) },
+                    onSendClipboard = viewModel::sendClipboardTextToMac,
+                    onOpenLink = viewModel::openClipboardLinkOnMac,
+                    onToggleClipboardSync = viewModel::toggleClipboardSync,
+                    onReconnect = viewModel::discoverAndReconnect,
+                    onRePair = launchQrScanner,
+                    onForget = viewModel::forgetMac,
+                    onClearHistory = viewModel::clearHistory
                 )
             }
 
-            TransferStatus(state)
-
-            val history by viewModel.historyEntries.collectAsStateWithLifecycle()
-            HistorySection(history, onClear = viewModel::clearHistory)
+            AnimatedVisibility(
+                visible = state.isSending,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            ) {
+                TransferBar(state = state, onCancel = viewModel::cancelActive)
+            }
         }
     }
 }
 
 @Composable
-private fun HintPanel(text: String) {
-    Text(
-        text = text,
-        color = WorkbenchColors.Warning,
-        style = MaterialTheme.typography.bodySmall,
+private fun WelcomeScreen(
+    isPairing: Boolean,
+    error: String?,
+    onPair: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 28.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(88.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(R.mipmap.ic_launcher),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp))
+            )
+        }
+        Spacer(modifier = Modifier.height(28.dp))
+        Text(
+            "Linkit",
+            style = MaterialTheme.typography.displaySmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            "Send files, clipboard, and links between your Mac and Android. Pair once — reconnects when you're on the same network.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 8.dp)
+        )
+        Spacer(modifier = Modifier.height(36.dp))
+        Button(
+            onClick = onPair,
+            enabled = !isPairing,
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+        ) {
+            Text(
+                if (isPairing) "Pairing…" else "Pair with Mac",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            "Open Linkit on your Mac and choose “Show pairing QR”.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+            textAlign = TextAlign.Center
+        )
+        error?.let {
+            Spacer(modifier = Modifier.height(20.dp))
+            ErrorBanner(it)
+        }
+    }
+}
+
+@Composable
+private fun HomeScreen(
+    state: LinkitUiState,
+    history: List<TransferHistoryEntry>,
+    onPickFile: () -> Unit,
+    onSendClipboard: () -> Unit,
+    onOpenLink: () -> Unit,
+    onToggleClipboardSync: () -> Unit,
+    onReconnect: () -> Unit,
+    onRePair: () -> Unit,
+    onForget: () -> Unit,
+    onClearHistory: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = if (state.isSending) 120.dp else 24.dp)
+    ) {
+        TopBar(onRePair = onRePair, onForget = onForget)
+        Spacer(modifier = Modifier.height(4.dp))
+        DeviceCard(state = state, onReconnect = onReconnect)
+        Spacer(modifier = Modifier.height(20.dp))
+        ActionGrid(
+            enabled = state.isConnectedToMac,
+            clipboardSyncOn = state.clipboardSyncEnabled,
+            onPickFile = onPickFile,
+            onSendClipboard = onSendClipboard,
+            onOpenLink = onOpenLink,
+            onToggleClipboardSync = onToggleClipboardSync
+        )
+        state.error?.takeIf { !state.isSending }?.let {
+            Spacer(modifier = Modifier.height(16.dp))
+            ErrorBanner(it)
+        }
+        Spacer(modifier = Modifier.height(28.dp))
+        RecentActivity(entries = history, onClear = onClearHistory)
+    }
+}
+
+@Composable
+private fun TopBar(onRePair: () -> Unit, onForget: () -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(7.dp))
-            .background(WorkbenchColors.PanelLift)
-            .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(7.dp))
-            .padding(10.dp)
+            .padding(vertical = 14.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "Linkit",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Box {
+            IconButton(onClick = { menuOpen = true }) {
+                Text(
+                    "⋮",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Pair with a different Mac") },
+                    onClick = { menuOpen = false; onRePair() }
+                )
+                DropdownMenuItem(
+                    text = { Text("Forget this Mac") },
+                    onClick = { menuOpen = false; onForget() }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceCard(state: LinkitUiState, onReconnect: () -> Unit) {
+    val mac = state.trustedMac ?: return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(
+                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                RoundedCornerShape(22.dp)
+            )
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            DeviceAvatar(name = mac.deviceName, connected = state.isConnectedToMac)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    mac.deviceName,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                StatusLine(state)
+            }
+        }
+        if (!state.isConnectedToMac) {
+            Button(
+                onClick = onReconnect,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+            ) {
+                val isWorking = state.status.startsWith("Looking") ||
+                    state.status.startsWith("Connecting") ||
+                    state.status.startsWith("Trying")
+                Text(
+                    if (isWorking) state.status else "Reconnect",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceAvatar(name: String, connected: Boolean) {
+    Box(modifier = Modifier.size(56.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                name.firstInitial(),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+        if (connected) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.tertiary)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusLine(state: LinkitUiState) {
+    val (label, dotColor, animated) = when {
+        state.isConnectedToMac -> StatusVisual("Connected", MaterialTheme.colorScheme.tertiary, true)
+        state.status.startsWith("Looking") ||
+            state.status.startsWith("Connecting") ||
+            state.status.startsWith("Trying") ||
+            state.status.startsWith("Disconnecting") ||
+            state.status == "Discovering" ->
+                StatusVisual(state.status, MaterialTheme.colorScheme.primary, true)
+        else -> StatusVisual("Offline", MaterialTheme.colorScheme.outline, false)
+    }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        PulseDot(color = dotColor, animated = animated)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private data class StatusVisual(val label: String, val color: Color, val animated: Boolean)
+
+@Composable
+private fun PulseDot(color: Color, animated: Boolean) {
+    val alpha = if (animated) {
+        val transition = rememberInfiniteTransition(label = "status-pulse")
+        val anim = transition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.35f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1400, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "alpha"
+        )
+        anim.value
+    } else 1f
+    Box(
+        modifier = Modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(color.copy(alpha = alpha))
     )
 }
 
 @Composable
-private fun Header(state: LinkitUiState) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(WorkbenchColors.PanelLift)
-            ) {
-                Image(
-                    painter = painterResource(R.mipmap.ic_launcher),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Linkit", color = WorkbenchColors.Paper, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                Text("Local signed drop", color = WorkbenchColors.Muted, style = MaterialTheme.typography.bodyMedium)
-            }
-            StatusPill(state)
-        }
-        state.trustedMac?.let { mac ->
-            val connectionLabel = if (state.isConnectedToMac) "Connected to" else "Paired with"
-            Text(
-                text = "$connectionLabel ${mac.deviceName}",
-                color = if (state.isConnectedToMac) WorkbenchColors.Signal else WorkbenchColors.Muted,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+private fun ActionGrid(
+    enabled: Boolean,
+    clipboardSyncOn: Boolean,
+    onPickFile: () -> Unit,
+    onSendClipboard: () -> Unit,
+    onOpenLink: () -> Unit,
+    onToggleClipboardSync: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            ActionTile(
+                title = "Send file",
+                subtitle = "Pick from this phone",
+                enabled = enabled,
+                onClick = onPickFile,
+                modifier = Modifier.weight(1f)
+            )
+            ActionTile(
+                title = "Send clipboard",
+                subtitle = "Phone → Mac",
+                enabled = enabled,
+                onClick = onSendClipboard,
+                modifier = Modifier.weight(1f)
             )
         }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            ActionTile(
+                title = "Open link",
+                subtitle = "Open URL on Mac",
+                enabled = enabled,
+                onClick = onOpenLink,
+                modifier = Modifier.weight(1f)
+            )
+            ActionTile(
+                title = "Mirror clipboard",
+                subtitle = if (clipboardSyncOn) "On · tap to stop" else "Off · tap to enable",
+                enabled = enabled || clipboardSyncOn,
+                highlight = clipboardSyncOn,
+                onClick = onToggleClipboardSync,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActionTile(
+    title: String,
+    subtitle: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    highlight: Boolean = false
+) {
+    val container: Color
+    val content: Color
+    val borderColor: Color
+    when {
+        highlight -> {
+            container = MaterialTheme.colorScheme.primary
+            content = MaterialTheme.colorScheme.onPrimary
+            borderColor = Color.Transparent
+        }
+        !enabled -> {
+            container = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+            content = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        }
+        else -> {
+            container = MaterialTheme.colorScheme.surface
+            content = MaterialTheme.colorScheme.onSurface
+            borderColor = MaterialTheme.colorScheme.outlineVariant
+        }
+    }
+    val base = modifier
+        .heightIn(min = 112.dp)
+        .clip(RoundedCornerShape(18.dp))
+        .background(container)
+        .border(BorderStroke(1.dp, borderColor), RoundedCornerShape(18.dp))
+    val interactive = if (enabled) base.clickable(onClick = onClick) else base
+    Column(
+        modifier = interactive.padding(16.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
         Text(
-            text = state.androidReceiverStatus,
-            color = WorkbenchColors.Muted,
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = content,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            subtitle,
             style = MaterialTheme.typography.bodySmall,
+            color = content.copy(alpha = if (highlight) 0.85f else 0.7f),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-        state.lastAndroidDropPath?.let {
+    }
+}
+
+@Composable
+private fun RecentActivity(entries: List<TransferHistoryEntry>, onClear: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
-                text = it,
-                color = WorkbenchColors.Signal,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-@Composable
-private fun StatusPill(state: LinkitUiState) {
-    val color = when {
-        state.error != null -> WorkbenchColors.Error
-        state.isSending || state.isPairing -> WorkbenchColors.Warning
-        state.isConnectedToMac -> WorkbenchColors.Signal
-        state.trustedMac != null -> WorkbenchColors.Muted
-        else -> WorkbenchColors.Muted
-    }
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .border(1.dp, color, RoundedCornerShape(999.dp))
-            .padding(horizontal = 10.dp, vertical = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp)
-    ) {
-        Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(999.dp)).background(color))
-        Text(state.status, color = color, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-    }
-}
-
-@Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Text(
-            title.uppercase(),
-            color = WorkbenchColors.Muted,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(WorkbenchColors.Panel)
-                .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(8.dp))
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            content = content
-        )
-    }
-}
-
-@Composable
-private fun LinkitTextField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    label: String,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-    isError: Boolean = false,
-    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
-    keyboardOptions: KeyboardOptions = KeyboardOptions.Default
-) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
-        label = { Text(label) },
-        singleLine = true,
-        enabled = enabled,
-        isError = isError,
-        visualTransformation = visualTransformation,
-        keyboardOptions = keyboardOptions,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = WorkbenchColors.Paper,
-            unfocusedTextColor = WorkbenchColors.Paper,
-            focusedLabelColor = WorkbenchColors.Signal,
-            unfocusedLabelColor = WorkbenchColors.Muted,
-            focusedBorderColor = WorkbenchColors.Signal,
-            unfocusedBorderColor = WorkbenchColors.Line,
-            cursorColor = WorkbenchColors.Signal,
-            disabledTextColor = WorkbenchColors.Muted,
-            disabledLabelColor = WorkbenchColors.Muted
-        ),
-        shape = RoundedCornerShape(7.dp),
-        modifier = modifier
-    )
-}
-
-@Composable
-private fun PrimaryButton(text: String, onClick: () -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        shape = RoundedCornerShape(7.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = WorkbenchColors.Signal,
-            contentColor = WorkbenchColors.Ink,
-            disabledContainerColor = WorkbenchColors.Line,
-            disabledContentColor = WorkbenchColors.Muted
-        ),
-        modifier = modifier
-    ) {
-        Text(text, maxLines = 1)
-    }
-}
-
-@Composable
-private fun SecondaryButton(text: String, onClick: () -> Unit, enabled: Boolean = true, modifier: Modifier = Modifier) {
-    OutlinedButton(
-        onClick = onClick,
-        enabled = enabled,
-        shape = RoundedCornerShape(7.dp),
-        colors = ButtonDefaults.outlinedButtonColors(
-            contentColor = WorkbenchColors.Paper,
-            disabledContentColor = WorkbenchColors.Muted
-        ),
-        modifier = modifier
-    ) {
-        Text(text, maxLines = 1)
-    }
-}
-
-@Composable
-private fun FileCard(state: LinkitUiState) {
-    Card(
-        shape = RoundedCornerShape(7.dp),
-        colors = CardDefaults.cardColors(containerColor = WorkbenchColors.PanelLift),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            val file = state.pickedFiles.firstOrNull()
-            Text(
-                text = when {
-                    state.pickedFiles.isEmpty() -> "No file selected"
-                    state.pickedFiles.size == 1 -> file?.name.orEmpty()
-                    else -> "${state.pickedFiles.size} files selected"
-                },
-                color = WorkbenchColors.Paper,
+                "Recent",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                color = MaterialTheme.colorScheme.onBackground
             )
-            if (file != null) {
-                Text(
-                    text = if (state.pickedFiles.size == 1) {
-                        "${formatBytes(file.size)} - ${file.mimeType}"
-                    } else {
-                        formatBytes(state.pickedFiles.sumOf { it.size })
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = WorkbenchColors.Muted
-                )
-                if (state.pickedFiles.size > 1) {
+            if (entries.isNotEmpty()) {
+                TextButton(onClick = onClear) {
                     Text(
-                        text = state.pickedFiles.take(3).joinToString("  /  ") { it.name },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = WorkbenchColors.Muted,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                        "Clear",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun TransferStatus(state: LinkitUiState) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(WorkbenchColors.Panel)
-            .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(8.dp))
-            .padding(12.dp)
-    ) {
-        Text(state.status, color = WorkbenchColors.Paper, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-
-        if (state.isSending || state.bytesSent > 0) {
-            state.currentFileName?.let {
-                Text(
-                    text = it,
-                    color = WorkbenchColors.Muted,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            val progress = if (state.totalBytes > 0) {
-                (state.bytesSent.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f)
-            } else {
-                0f
-            }
-            LinearProgressIndicator(
-                progress = { progress },
-                color = WorkbenchColors.Signal,
-                trackColor = WorkbenchColors.Line,
+        if (entries.isEmpty()) {
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(8.dp)
-                    .clip(RoundedCornerShape(999.dp))
-            )
-            Text(
-                text = buildString {
-                    append("${formatBytes(state.bytesSent)} / ${formatBytes(state.totalBytes)}")
-                    if (state.speedBytesPerSecond > 0) {
-                        append("  ${formatBytes(state.speedBytesPerSecond.roundToLong())}/s")
-                    }
-                    state.etaSeconds?.let { append("  ${formatEta(it)}") }
-                },
-                color = WorkbenchColors.Muted,
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-
-        state.savedPath?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = WorkbenchColors.Signal,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        state.error?.let {
-            Text(it, color = WorkbenchColors.Error, style = MaterialTheme.typography.bodyMedium)
-        }
-
-        Spacer(modifier = Modifier.height(1.dp))
-    }
-}
-
-@Composable
-private fun HistorySection(entries: List<TransferHistoryEntry>, onClear: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Text(
-            "HISTORY",
-            color = WorkbenchColors.Muted,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(WorkbenchColors.Panel)
-                .border(1.dp, WorkbenchColors.Line, RoundedCornerShape(8.dp))
-                .padding(vertical = 4.dp)
-        ) {
-            if (entries.isEmpty()) {
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+                    .border(
+                        BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                        RoundedCornerShape(18.dp)
+                    )
+                    .padding(vertical = 28.dp),
+                contentAlignment = Alignment.Center
+            ) {
                 Text(
-                    text = "No transfers yet",
-                    color = WorkbenchColors.Muted,
+                    "Files and handoffs will appear here.",
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(12.dp)
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-            } else {
-                entries.take(20).forEachIndexed { index, entry ->
-                    HistoryRow(entry)
-                    if (index < entries.lastIndex && index < 19) {
-                        Spacer(
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(
+                        BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        RoundedCornerShape(18.dp)
+                    )
+            ) {
+                val shown = entries.take(8)
+                shown.forEachIndexed { index, entry ->
+                    ActivityRow(entry)
+                    if (index < shown.lastIndex) {
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(1.dp)
-                                .background(WorkbenchColors.Line)
+                                .background(MaterialTheme.colorScheme.outlineVariant)
                         )
                     }
                 }
             }
         }
-        if (entries.isNotEmpty()) {
-            SecondaryButton(
-                text = "Clear history",
-                onClick = onClear,
-                modifier = Modifier.fillMaxWidth()
+    }
+}
+
+@Composable
+private fun ActivityRow(entry: TransferHistoryEntry) {
+    val isSent = entry.direction == TransferHistoryEntry.DIRECTION_SENT
+    val accent = if (isSent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                if (isSent) "↑" else "↓",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = accent
+            )
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                entry.filename,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                buildString {
+                    append(formatBytes(entry.size))
+                    append("  ·  ")
+                    append(formatRelative(entry.completedAt))
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        when (entry.status) {
+            TransferHistoryEntry.STATUS_FAILED -> Text(
+                "Failed",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error
+            )
+            TransferHistoryEntry.STATUS_COMPLETE -> Unit
+            else -> Text(
+                entry.status.replaceFirstChar { it.uppercase() },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
 }
 
 @Composable
-private fun HistoryRow(entry: TransferHistoryEntry) {
-    val arrow = if (entry.direction == TransferHistoryEntry.DIRECTION_SENT) "↑" else "↓"
-    val arrowColor = if (entry.direction == TransferHistoryEntry.DIRECTION_SENT) WorkbenchColors.Warning else WorkbenchColors.Signal
-    val statusColor = when (entry.status) {
-        TransferHistoryEntry.STATUS_COMPLETE -> WorkbenchColors.Signal
-        TransferHistoryEntry.STATUS_FAILED -> WorkbenchColors.Error
-        else -> WorkbenchColors.Muted
+private fun TransferBar(state: LinkitUiState, onCancel: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(20.dp),
+        tonalElevation = 6.dp,
+        shadowElevation = 8.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        state.currentFileName ?: "Sending",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    val pct = if (state.totalBytes > 0) {
+                        ((state.bytesSent.toDouble() / state.totalBytes) * 100).toInt()
+                    } else 0
+                    Text(
+                        buildString {
+                            append("$pct%  ·  ")
+                            append("${formatBytes(state.bytesSent)} / ${formatBytes(state.totalBytes)}")
+                            state.etaSeconds?.takeIf { it > 0 }?.let {
+                                append("  ·  ${formatEta(it)} left")
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(onClick = onCancel) {
+                    Text(
+                        "Cancel",
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            val progress = if (state.totalBytes > 0) {
+                (state.bytesSent.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            LinearProgressIndicator(
+                progress = { progress },
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(999.dp))
+            )
+        }
     }
+}
+
+@Composable
+private fun ErrorBanner(message: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top
     ) {
-        Text(
-            text = arrow,
-            color = arrowColor,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.error),
+            contentAlignment = Alignment.Center
+        ) {
             Text(
-                text = entry.filename,
-                color = WorkbenchColors.Paper,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                "!",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onError
             )
-            val meta = buildString {
-                append(formatBytes(entry.size))
-                if (entry.peerName.isNotBlank()) {
-                    append("  •  ")
-                    append(if (entry.direction == TransferHistoryEntry.DIRECTION_SENT) "to ${entry.peerName}" else "from ${entry.peerName}")
-                }
-                append("  •  ")
-                append(formatRelative(entry.completedAt))
-            }
-            Text(meta, color = WorkbenchColors.Muted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            entry.savedPath?.let {
-                Text(
-                    text = it,
-                    color = WorkbenchColors.Muted,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            entry.error?.takeIf { it.isNotBlank() }?.let {
-                Text(
-                    text = it,
-                    color = WorkbenchColors.Error,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
         }
         Text(
-            text = entry.status.replaceFirstChar { it.uppercase() },
-            color = statusColor,
-            style = MaterialTheme.typography.labelSmall
+            message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            modifier = Modifier.weight(1f)
         )
     }
+}
+
+@Composable
+private fun LinkitTheme(content: @Composable () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val colors = if (dark) {
+        darkColorScheme(
+            primary = LinkitPalette.AmberLight,
+            onPrimary = LinkitPalette.InkDark,
+            primaryContainer = LinkitPalette.AmberContainerDark,
+            onPrimaryContainer = LinkitPalette.PaperWarm,
+            background = LinkitPalette.InkDark,
+            onBackground = LinkitPalette.PaperWarm,
+            surface = LinkitPalette.SurfaceDark,
+            onSurface = LinkitPalette.PaperWarm,
+            surfaceVariant = LinkitPalette.SurfaceDarkHigh,
+            onSurfaceVariant = LinkitPalette.MutedDark,
+            tertiary = LinkitPalette.SageLight,
+            onTertiary = LinkitPalette.InkDark,
+            outline = LinkitPalette.OutlineDark,
+            outlineVariant = LinkitPalette.OutlineDarkSoft,
+            error = LinkitPalette.DangerLight,
+            onError = LinkitPalette.InkDark,
+            errorContainer = LinkitPalette.DangerContainerDark,
+            onErrorContainer = LinkitPalette.PaperWarm
+        )
+    } else {
+        lightColorScheme(
+            primary = LinkitPalette.AmberDeep,
+            onPrimary = Color.White,
+            primaryContainer = LinkitPalette.AmberSoft,
+            onPrimaryContainer = LinkitPalette.InkDark,
+            background = LinkitPalette.PaperWarm,
+            onBackground = LinkitPalette.InkDark,
+            surface = Color(0xFFFFFFFF),
+            onSurface = LinkitPalette.InkDark,
+            surfaceVariant = LinkitPalette.SurfaceLight,
+            onSurfaceVariant = LinkitPalette.MutedLight,
+            tertiary = LinkitPalette.SageDeep,
+            onTertiary = Color.White,
+            outline = LinkitPalette.OutlineLight,
+            outlineVariant = LinkitPalette.OutlineLightSoft,
+            error = LinkitPalette.DangerDeep,
+            onError = Color.White,
+            errorContainer = LinkitPalette.DangerSoft,
+            onErrorContainer = LinkitPalette.InkDark
+        )
+    }
+    MaterialTheme(
+        colorScheme = colors,
+        content = content
+    )
+}
+
+private object LinkitPalette {
+    // Light
+    val PaperWarm = Color(0xFFFAF7F2)
+    val InkDark = Color(0xFF1A1614)
+    val SurfaceLight = Color(0xFFF1ECE3)
+    val MutedLight = Color(0xFF6B6258)
+    val OutlineLight = Color(0xFFB8AFA4)
+    val OutlineLightSoft = Color(0xFFE4DDD2)
+    val AmberDeep = Color(0xFFD16A1F)
+    val AmberSoft = Color(0xFFFBE7D2)
+    val SageDeep = Color(0xFF5B7A4D)
+    val DangerDeep = Color(0xFFB83A3A)
+    val DangerSoft = Color(0xFFF5DADA)
+
+    // Dark
+    val SurfaceDark = Color(0xFF221D1A)
+    val SurfaceDarkHigh = Color(0xFF2D2724)
+    val MutedDark = Color(0xFFA89E92)
+    val OutlineDark = Color(0xFF4A413B)
+    val OutlineDarkSoft = Color(0xFF3A322D)
+    val AmberLight = Color(0xFFE89F4D)
+    val AmberContainerDark = Color(0xFF6B3A12)
+    val SageLight = Color(0xFF8FB180)
+    val DangerLight = Color(0xFFE57878)
+    val DangerContainerDark = Color(0xFF6B2A2A)
+}
+
+@Composable
+private fun formatBytes(bytes: Long): String {
+    return Formatter.formatFileSize(LocalContext.current, bytes)
+}
+
+private fun formatEta(seconds: Long): String {
+    if (seconds <= 0) return "0s"
+    val minutes = seconds / 60
+    val rest = seconds % 60
+    return if (minutes > 0) "${minutes}m ${rest}s" else "${rest}s"
 }
 
 private fun formatRelative(epochMillis: Long): String {
@@ -1295,41 +1663,7 @@ private fun formatRelative(epochMillis: Long): String {
     }
 }
 
-@Composable
-private fun LinkitTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = WorkbenchColors.Signal,
-            secondary = WorkbenchColors.Warning,
-            background = WorkbenchColors.Ink,
-            surface = WorkbenchColors.Panel,
-            surfaceVariant = WorkbenchColors.PanelLift,
-            error = WorkbenchColors.Error
-        ),
-        content = content
-    )
-}
-
-private object WorkbenchColors {
-    val Ink = Color(0xFF101214)
-    val Panel = Color(0xFF171A1D)
-    val PanelLift = Color(0xFF20252A)
-    val Line = Color(0xFF343A40)
-    val Paper = Color(0xFFEFF3F0)
-    val Muted = Color(0xFF9BA7A1)
-    val Signal = Color(0xFF79F2B0)
-    val Warning = Color(0xFFF2C879)
-    val Error = Color(0xFFFF6B6B)
-}
-
-@Composable
-private fun formatBytes(bytes: Long): String {
-    return Formatter.formatFileSize(LocalContext.current, bytes)
-}
-
-private fun formatEta(seconds: Long): String {
-    if (seconds <= 0) return "0s"
-    val minutes = seconds / 60
-    val rest = seconds % 60
-    return if (minutes > 0) "${minutes}m ${rest}s" else "${rest}s"
+private fun String.firstInitial(): String {
+    val first = trim().firstOrNull { it.isLetterOrDigit() } ?: return "M"
+    return first.uppercase()
 }

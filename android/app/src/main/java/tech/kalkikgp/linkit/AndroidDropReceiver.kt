@@ -433,6 +433,7 @@ class AndroidDropReceiver(
         if (!nonceCache.insert(deviceId, nonce)) {
             throw DropHttpFailure(401, "nonce_replay", "Signed request nonce was already used")
         }
+        MacPresence.touch()
         return deviceId
     }
 
@@ -461,6 +462,7 @@ class AndroidDropReceiver(
         if (!nonceCache.insert(deviceId, nonce)) {
             throw DropHttpFailure(401, "nonce_replay", "Signed request nonce was already used")
         }
+        MacPresence.touch()
         return deviceId
     }
 
