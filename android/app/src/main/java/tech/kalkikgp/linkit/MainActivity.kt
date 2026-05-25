@@ -230,11 +230,19 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 val state = _uiState.value
                 if (!state.isConnectedToMac) continue
                 if (state.isSending || state.isPairing) continue
-                if (state.trustedMac == null) continue
+                val trustedMac = state.trustedMac ?: continue
                 val lastSeen = MacPresence.lastSeenMillis.value ?: continue
                 val ageMs = System.currentTimeMillis() - lastSeen
                 if (ageMs > 90_000) {
-                    DebugTelemetry.recordEvent("presence", "demoted to offline (last seen ${ageMs / 1000}s ago)")
+                    val stillReachable = withTimeoutOrNull(10_000) {
+                        runCatching { client.verifyMacEndpoint(trustedMac) }.isSuccess
+                    } == true
+                    if (stillReachable) {
+                        MacPresence.touch()
+                        DebugTelemetry.recordEvent("presence", "kept online after active Mac proof (last seen ${ageMs / 1000}s ago)")
+                        continue
+                    }
+                    DebugTelemetry.recordEvent("presence", "demoted to offline after failed Mac proof (last seen ${ageMs / 1000}s ago)")
                     _uiState.update {
                         it.copy(
                             isConnectedToMac = false,
@@ -419,17 +427,28 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
             val target = if (found != null) {
                 val updated = mac.copy(ip = found.ip, port = found.port)
-                identityStore.saveTrustedMac(updated)
-                _uiState.update {
-                    it.copy(
-                        trustedMac = updated,
-                        macIp = updated.ip,
-                        port = updated.port.toString(),
-                        status = "Connecting"
-                    )
+                val verified = runCatching {
+                    client.verifyMacEndpoint(updated)
+                }.onFailure { error ->
+                    DebugTelemetry.recordEvent("reconnect", "Bonjour candidate rejected: ${error.message}")
+                }.isSuccess
+                if (verified) {
+                    identityStore.saveTrustedMac(updated)
+                    _uiState.update {
+                        it.copy(
+                            trustedMac = updated,
+                            macIp = updated.ip,
+                            port = updated.port.toString(),
+                            status = "Connecting"
+                        )
+                    }
+                    DebugTelemetry.recordEvent("reconnect", "Bonjour verified ${updated.ip}:${updated.port}")
+                    updated
+                } else {
+                    _uiState.update { it.copy(status = "Trying last known address") }
+                    DebugTelemetry.recordEvent("reconnect", "using last known after untrusted Bonjour candidate")
+                    mac
                 }
-                DebugTelemetry.recordEvent("reconnect", "Bonjour resolved ${updated.ip}:${updated.port}")
-                updated
             } else {
                 _uiState.update { it.copy(status = "Trying last known address") }
                 DebugTelemetry.recordEvent("reconnect", "Bonjour timeout, using last known ${mac.ip}:${mac.port}")
@@ -731,6 +750,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         LinkitReceiverService.start(getApplication())
         viewModelScope.launch {
             runCatching {
+                client.verifyMacEndpoint(mac)
                 client.registerReceiver(
                     mac = mac,
                     identityStore = identityStore,

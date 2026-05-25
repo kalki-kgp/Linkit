@@ -8,7 +8,8 @@ The MVP path is:
 4. macOS stores the Android device as trusted.
 5. Android signs transfer control requests.
 6. File bytes upload with a single-use upload token and are verified by streamed SHA-256 before final save.
-7. Paired devices can also send signed local text/link actions over `/v1/actions`.
+7. Reconnect treats Bonjour as address discovery only; Android verifies the Mac private key with `/v1/identity/proof` before saving a rediscovered endpoint.
+8. Paired devices can also send signed local text/link actions over `/v1/actions`.
 
 ## Signed Control Headers
 
@@ -37,6 +38,47 @@ The receiver verifies:
 - timestamp within `±60s`,
 - nonce unused for `120s`,
 - P-256 signature against the trusted peer public key.
+
+## Mac Identity Proof
+
+Android uses identity proof after Bonjour rediscovery and before stale-presence demotion. The request is intentionally small and does not replace signed control requests:
+
+```txt
+POST /v1/identity/proof
+```
+
+Request:
+
+```json
+{
+  "challenge": "random-client-challenge"
+}
+```
+
+Response:
+
+```json
+{
+  "protocolVersion": 1,
+  "deviceId": "paired-mac-device-id",
+  "deviceName": "Krishna Mac",
+  "platform": "macos",
+  "publicKey": "base64...",
+  "challenge": "random-client-challenge",
+  "signature": "base64 DER ECDSA signature"
+}
+```
+
+The signature is over:
+
+```txt
+LINKIT_IDENTITY_PROOF
+deviceId
+publicKey
+challenge
+```
+
+Android rejects the endpoint unless `deviceId`, `publicKey`, `challenge`, and the signature all match the already paired Mac.
 
 ## Pairing QR
 

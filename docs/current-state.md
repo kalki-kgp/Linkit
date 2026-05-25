@@ -66,15 +66,15 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 ### Reconnect After Network Change
 
 - Android remembers the paired Mac across Wi-Fi/hotspot toggles.
-- On app open/resume, Android filters Bonjour for the paired Mac name and updates the stored IP/port before re-registering. No re-scan of the QR is required.
+- On app open/resume, Android filters Bonjour for the paired Mac name, then verifies the candidate with signed Mac identity proof (`POST /v1/identity/proof`) before updating the stored IP/port and re-registering. No re-scan of the QR is required.
 - A **Reconnect** button on the device card runs the same flow on demand.
 - `MacPresence.touch()` fires on every successful Android → Mac signed request (register, action, finalize), so the UI cannot get stuck in "offline" right after a successful action.
 
 ### Bidirectional Presence Detection
 
 - Mac runs a 15 s presence sweep with 30 s staleness threshold (`Timer.scheduledTimer`, tolerance 3 s). Stale connected devices are probed via signed `GET /v1/devices/self/status`; failures trigger `disconnectDevice`.
-- Android records each signed Mac request in `MacPresence`; a 10 s tick demotes the connection to "Paired, offline" if no Mac touch is seen for > 90 s.
-- Both UIs converge to the same connection state within ~30–45 s of a real disconnect.
+- Android records each signed Mac request in `MacPresence`; after > 90 s of silence, the 10 s tick runs active Mac identity proof and only demotes the connection to "Paired, offline" if that proof fails.
+- The Mac usually converges within ~30-45 s of a real Android disconnect; Android waits for the ~90 s stale window, then demotes only after active Mac proof fails.
 
 ### Notification Action Buttons
 

@@ -296,6 +296,27 @@ Returns public device info.
 }
 ```
 
+### `POST /v1/identity/proof`
+
+Proves that a Bonjour-discovered or last-known endpoint owns the already paired Mac private key.
+
+```json
+{
+  "challenge": "random-client-challenge"
+}
+```
+
+Response includes `deviceId`, `publicKey`, echoed `challenge`, and a base64 DER ECDSA signature over:
+
+```txt
+LINKIT_IDENTITY_PROOF
+deviceId
+publicKey
+challenge
+```
+
+Android verifies the signature against the paired Mac public key before storing a rediscovered IP/port.
+
 ### `POST /v1/pair`
 
 Android requests pairing.

@@ -95,14 +95,19 @@ class AndroidDropReceiver(
 
     private fun handleClient(socket: Socket) {
         socket.use {
+            var requestLabel: String? = null
             try {
                 val request = readRequest(socket.getInputStream())
+                requestLabel = "${request.method} ${request.path}"
                 val response = route(request)
+                DebugTelemetry.recordEvent("inbound", "$requestLabel -> ${response.status}")
                 writeResponse(socket.getOutputStream(), response)
             } catch (failure: DropHttpFailure) {
+                DebugTelemetry.recordEvent("inbound", "${requestLabel ?: "?"} rejected ${failure.status} ${failure.error}")
                 writeResponse(socket.getOutputStream(), jsonResponse(failure.status, failure.error, failure.message))
             } catch (error: Throwable) {
                 Log.e(RECEIVER_TAG, "Android drop request failed", error)
+                DebugTelemetry.recordEvent("inbound", "${requestLabel ?: "?"} error ${error.javaClass.simpleName}: ${error.message}")
                 writeResponse(socket.getOutputStream(), jsonResponse(500, "internal_error", "Android receiver error"))
             }
         }

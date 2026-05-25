@@ -19,8 +19,18 @@ import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.math.BigInteger
+import java.security.AlgorithmParameters
+import java.security.KeyFactory
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import android.util.Base64
+import java.security.Signature
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
+import java.security.spec.ECPoint
+import java.security.spec.ECPublicKeySpec
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -143,6 +153,48 @@ class LinkitClient(
         executeJson(request)
         MacPresence.touch()
         DebugTelemetry.recordEvent("client", "registerReceiver ok ${mac.ip}:${mac.port}")
+    }
+
+    suspend fun verifyMacEndpoint(mac: TrustedMac) {
+        val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
+        val challenge = IdentityStore.nonce()
+        val body = JSONObject()
+            .put("challenge", challenge)
+            .toString()
+        val request = Request.Builder()
+            .url("$baseUrl/v1/identity/proof")
+            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        val json = executeJson(request)
+        val deviceId = json.optString("deviceId")
+        val publicKey = json.optString("publicKey")
+        val platform = json.optString("platform").lowercase()
+        val echoedChallenge = json.optString("challenge")
+        if (json.optInt("protocolVersion") != 1 ||
+            platform != "macos" ||
+            deviceId != mac.deviceId ||
+            publicKey != mac.publicKey ||
+            echoedChallenge != challenge
+        ) {
+            throw PairingTrustException("Discovered Mac did not match the paired identity")
+        }
+        val signatureData = runCatching {
+            Base64.decode(json.optString("signature"), Base64.DEFAULT)
+        }.getOrElse {
+            throw PairingTrustException("Mac identity proof signature is invalid")
+        }
+        val canonical = LinkitIdentityProof.canonicalString(
+            deviceId = deviceId,
+            publicKey = publicKey,
+            challenge = challenge
+        )
+        val verifier = Signature.getInstance("SHA256withECDSA")
+        verifier.initVerify(publicKeyFromX963(publicKey))
+        verifier.update(canonical.toByteArray(Charsets.UTF_8))
+        if (!verifier.verify(signatureData)) {
+            throw PairingTrustException("Mac identity proof signature was rejected")
+        }
+        DebugTelemetry.recordEvent("client", "verified Mac identity ${mac.ip}:${mac.port}")
     }
 
     suspend fun disconnect(mac: TrustedMac, identityStore: IdentityStore) {
@@ -458,6 +510,19 @@ class LinkitClient(
             }
             throw LinkitHttpException(it.code, error, message)
         }
+    }
+
+    private fun publicKeyFromX963(publicKeyBase64: String): ECPublicKey {
+        val bytes = Base64.decode(publicKeyBase64, Base64.DEFAULT)
+        require(bytes.size == 65 && bytes[0].toInt() == 0x04) { "Invalid P-256 public key" }
+        val params = AlgorithmParameters.getInstance("EC")
+        params.init(ECGenParameterSpec("secp256r1"))
+        val ecSpec = params.getParameterSpec(ECParameterSpec::class.java)
+        val point = ECPoint(
+            BigInteger(1, bytes.copyOfRange(1, 33)),
+            BigInteger(1, bytes.copyOfRange(33, 65))
+        )
+        return KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(point, ecSpec)) as ECPublicKey
     }
 }
 

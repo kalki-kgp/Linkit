@@ -227,3 +227,14 @@ enum LinkitPairingChallenge {
         ].joined(separator: "\n")
     }
 }
+
+enum LinkitIdentityProof {
+    static func canonicalString(deviceId: String, publicKey: String, challenge: String) -> String {
+        [
+            "LINKIT_IDENTITY_PROOF",
+            deviceId,
+            publicKey,
+            challenge
+        ].joined(separator: "\n")
+    }
+}

@@ -295,9 +295,15 @@ final class HTTPServer {
                     port: port,
                     publicKey: identity.publicKey,
                     serviceType: "_linkit._tcp.local.",
-                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "text_actions", "clipboard_text", "open_url"]
+                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url"]
                 )
             )
+        }
+
+        if request.method == "POST", request.path == "/v1/identity/proof" {
+            let body = try readJSONBody(request, fd: fd, maxBytes: 16 * 1024)
+            let proofRequest: IdentityProofRequest = try decodeJSON(body)
+            return jsonResponse(status: 200, body: try identityProof(for: proofRequest))
         }
 
         if request.method == "POST", request.path == "/v1/pair" {
@@ -514,6 +520,28 @@ final class HTTPServer {
         )
         logger.info("received action type=\(normalizedType) bytes=\(action.text.utf8.count)")
         return LinkitActionResponse(status: "ok", type: normalizedType)
+    }
+
+    private func identityProof(for request: IdentityProofRequest) throws -> IdentityProofResponse {
+        guard !request.challenge.isEmpty, request.challenge.utf8.count <= 256 else {
+            throw HTTPFailure.badRequest("invalid_challenge", "Identity proof challenge must be 1 byte to 256 bytes")
+        }
+        let canonical = LinkitIdentityProof.canonicalString(
+            deviceId: identity.deviceId,
+            publicKey: identity.publicKey,
+            challenge: request.challenge
+        )
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let signature = try identity.privateKey.signature(for: digest).derRepresentation.base64EncodedString()
+        return IdentityProofResponse(
+            protocolVersion: 1,
+            deviceId: identity.deviceId,
+            deviceName: Host.current().localizedName ?? "Linkit Mac",
+            platform: "macos",
+            publicKey: identity.publicKey,
+            challenge: request.challenge,
+            signature: signature
+        )
     }
 
     private func consumeUploadChunk(

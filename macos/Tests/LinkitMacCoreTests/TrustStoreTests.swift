@@ -3,6 +3,23 @@ import XCTest
 @testable import LinkitMacCore
 
 final class TrustStoreTests: XCTestCase {
+    func testIdentityProofCanonicalStringVerifiesWithMacKey() throws {
+        let privateKey = P256.Signing.PrivateKey()
+        let publicKeyData = privateKey.publicKey.x963Representation
+        let publicKey = publicKeyData.base64EncodedString()
+        let deviceId = LinkitDeviceId.fromPublicKey(publicKeyData)
+        let challenge = "challenge-\(UUID().uuidString)"
+        let canonical = LinkitIdentityProof.canonicalString(
+            deviceId: deviceId,
+            publicKey: publicKey,
+            challenge: challenge
+        )
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let signature = try privateKey.signature(for: digest)
+
+        XCTAssertTrue(privateKey.publicKey.isValidSignature(signature, for: digest))
+    }
+
     func testIdentityStoreKeepsStableIdentityInPrivateStore() throws {
         let keyStore = InMemoryPrivateKeyStore()
         let base = FileManager.default.temporaryDirectory

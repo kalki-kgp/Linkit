@@ -41,6 +41,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var clipboardSyncTimer: Timer?
     private var clipboardSyncEnabled = false
     private var presenceTimer: Timer?
+    private var presenceFailureCounts: [String: Int] = [:]
+    private let presenceFailureThreshold = 3
     private var lastClipboardText: String?
     private var lastClipboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastTrustedSignature: String = ""
@@ -898,7 +900,12 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func runPresenceSweep() {
         guard let app else { return }
         let connected = app.connectedDevices()
-        if connected.isEmpty { return }
+        if connected.isEmpty {
+            presenceFailureCounts.removeAll()
+            return
+        }
+        let connectedIds = Set(connected.map { $0.deviceId })
+        presenceFailureCounts = presenceFailureCounts.filter { connectedIds.contains($0.key) }
         let formatter = ISO8601DateFormatter()
         let now = Date()
         let stalenessThreshold: TimeInterval = 30
@@ -906,12 +913,21 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             guard let lastSeen = formatter.date(from: device.lastSeenAt) else { continue }
             guard now.timeIntervalSince(lastSeen) >= stalenessThreshold else { continue }
             let deviceId = device.deviceId
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
                 do {
                     _ = try app.refreshConnectedDevice(deviceId)
+                    DispatchQueue.main.async {
+                        self?.presenceFailureCounts[deviceId] = 0
+                    }
                 } catch {
                     DispatchQueue.main.async {
-                        app.disconnectDevice(deviceId)
+                        guard let self else { return }
+                        let next = (self.presenceFailureCounts[deviceId] ?? 0) + 1
+                        self.presenceFailureCounts[deviceId] = next
+                        if next >= self.presenceFailureThreshold {
+                            self.presenceFailureCounts[deviceId] = 0
+                            app.disconnectDevice(deviceId)
+                        }
                     }
                 }
             }
