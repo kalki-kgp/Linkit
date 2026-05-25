@@ -126,13 +126,29 @@ public final class LinkitReceiverApp {
         connections.disconnect(deviceId: deviceId)
     }
 
-    public func sendFilesToFirstAndroid(_ files: [URL]) throws -> [OutgoingTransferResult] {
+    public func sendFilesToFirstAndroid(
+        _ files: [URL],
+        cancellation: LinkitCancellationToken? = nil,
+        onProgress: ((OutgoingTransferProgress) -> Void)? = nil
+    ) throws -> [OutgoingTransferResult] {
+        try outgoingClient.send(files: files, to: firstConnectedAndroid(), cancellation: cancellation, onProgress: onProgress)
+    }
+
+    public func sendActionToFirstAndroid(_ action: LinkitActionRequest) throws -> LinkitActionResponse {
+        try outgoingClient.sendAction(action, to: firstConnectedAndroid())
+    }
+
+    public func cancelIncomingTransfer(_ transferId: String) throws {
+        _ = try store.cancel(id: transferId)
+    }
+
+    private func firstConnectedAndroid() throws -> TrustedDevice {
         guard let connected = connections.allConnected().first(where: { $0.platform.lowercased() == "android" }),
               let trusted = trustStore.trustedDevice(id: connected.deviceId)
         else {
             throw HTTPFailure.badRequest("missing_android_receiver", "Connect your Android first by opening Linkit or scanning the QR, then drop the file again")
         }
-        let device = TrustedDevice(
+        return TrustedDevice(
             deviceId: trusted.deviceId,
             deviceName: trusted.deviceName,
             platform: trusted.platform,
@@ -141,7 +157,6 @@ public final class LinkitReceiverApp {
             lastKnownHost: connected.host,
             receivePort: connected.receivePort
         )
-        return try outgoingClient.send(files: files, to: device)
     }
 
     public func recentTransfers(limit: Int = 10) -> [TransferHistoryEntry] {
@@ -280,9 +295,15 @@ final class HTTPServer {
                     port: port,
                     publicKey: identity.publicKey,
                     serviceType: "_linkit._tcp.local.",
-                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour"]
+                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url"]
                 )
             )
+        }
+
+        if request.method == "POST", request.path == "/v1/identity/proof" {
+            let body = try readJSONBody(request, fd: fd, maxBytes: 16 * 1024)
+            let proofRequest: IdentityProofRequest = try decodeJSON(body)
+            return jsonResponse(status: 200, body: try identityProof(for: proofRequest))
         }
 
         if request.method == "POST", request.path == "/v1/pair" {
@@ -335,6 +356,13 @@ final class HTTPServer {
         if request.method == "GET", request.path == "/v1/history" {
             try _ = authenticateControl(request, body: Data())
             return jsonResponse(status: 200, body: history.recent(limit: 50))
+        }
+
+        if request.method == "POST", request.path == "/v1/actions" {
+            let body = try readJSONBody(request, fd: fd, maxBytes: 256 * 1024)
+            let deviceId = try authenticateControl(request, body: body)
+            let action: LinkitActionRequest = try decodeJSON(body)
+            return jsonResponse(status: 200, body: try handleAction(action, senderDeviceId: deviceId))
         }
 
         guard request.path.hasPrefix("/v1/transfers") else {
@@ -415,6 +443,7 @@ final class HTTPServer {
                 hasher: &hasher,
                 received: &received
             )
+            postUploadProgress(record: record, received: received)
 
             var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
             while received < record.expectedSize {
@@ -436,6 +465,7 @@ final class HTTPServer {
                     hasher: &hasher,
                     received: &received
                 )
+                postUploadProgress(record: record, received: received)
             }
 
             let sha256 = hasher.finalize().linkitHex
@@ -450,6 +480,68 @@ final class HTTPServer {
             store.failUpload(id: transferId, error: "upload_io_failed", message: "\(error)", removeTemp: true)
             throw error
         }
+    }
+
+    private func postUploadProgress(record: TransferRecord, received: Int64) {
+        NotificationCenter.default.post(
+            name: .linkitTransferDidProgress,
+            object: nil,
+            userInfo: [
+                LinkitTransferNotification.transferIdKey: record.id,
+                LinkitTransferNotification.filenameKey: record.originalName,
+                LinkitTransferNotification.senderDeviceIdKey: record.clientDeviceId,
+                LinkitTransferNotification.sizeKey: record.expectedSize,
+                LinkitTransferNotification.bytesReceivedKey: received
+            ]
+        )
+    }
+
+    private func handleAction(_ action: LinkitActionRequest, senderDeviceId: String?) throws -> LinkitActionResponse {
+        let normalizedType = action.type.lowercased()
+        guard ["clipboard", "text", "open_url"].contains(normalizedType) else {
+            throw HTTPFailure.badRequest("unsupported_action", "Action type is not supported")
+        }
+        guard !action.text.isEmpty, action.text.utf8.count <= 128 * 1024 else {
+            throw HTTPFailure.badRequest("invalid_action_text", "Action text must be 1 byte to 128 KB")
+        }
+        if normalizedType == "open_url" {
+            guard let url = URL(string: action.text), ["http", "https"].contains(url.scheme?.lowercased()) else {
+                throw HTTPFailure.badRequest("invalid_url", "Only http and https URLs can be opened")
+            }
+        }
+        NotificationCenter.default.post(
+            name: .linkitActionReceived,
+            object: nil,
+            userInfo: [
+                LinkitActionNotification.typeKey: normalizedType,
+                LinkitActionNotification.textKey: action.text,
+                LinkitActionNotification.senderDeviceIdKey: senderDeviceId ?? ""
+            ]
+        )
+        logger.info("received action type=\(normalizedType) bytes=\(action.text.utf8.count)")
+        return LinkitActionResponse(status: "ok", type: normalizedType)
+    }
+
+    private func identityProof(for request: IdentityProofRequest) throws -> IdentityProofResponse {
+        guard !request.challenge.isEmpty, request.challenge.utf8.count <= 256 else {
+            throw HTTPFailure.badRequest("invalid_challenge", "Identity proof challenge must be 1 byte to 256 bytes")
+        }
+        let canonical = LinkitIdentityProof.canonicalString(
+            deviceId: identity.deviceId,
+            publicKey: identity.publicKey,
+            challenge: request.challenge
+        )
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let signature = try identity.privateKey.signature(for: digest).derRepresentation.base64EncodedString()
+        return IdentityProofResponse(
+            protocolVersion: 1,
+            deviceId: identity.deviceId,
+            deviceName: Host.current().localizedName ?? "Linkit Mac",
+            platform: "macos",
+            publicKey: identity.publicKey,
+            challenge: request.challenge,
+            signature: signature
+        )
     }
 
     private func consumeUploadChunk(

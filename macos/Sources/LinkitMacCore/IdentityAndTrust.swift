@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 public struct LinkitIdentity {
     public let deviceId: String
@@ -19,28 +20,103 @@ public struct TrustedDevice: Codable, Equatable {
 
 final class IdentityStore {
     private let fileURL: URL
+    private let keyStore: LinkitPrivateKeyStore
 
-    init(baseFolder: URL = LinkitPaths.applicationSupport) throws {
+    init(baseFolder: URL = LinkitPaths.applicationSupport, keyStore: LinkitPrivateKeyStore = KeychainPrivateKeyStore()) throws {
         try FileManager.default.createDirectory(at: baseFolder, withIntermediateDirectories: true)
         self.fileURL = baseFolder.appendingPathComponent("mac-identity.p256")
+        self.keyStore = keyStore
     }
 
     func loadOrCreate() throws -> LinkitIdentity {
-        let privateKey: P256.Signing.PrivateKey
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            privateKey = try P256.Signing.PrivateKey(rawRepresentation: Data(contentsOf: fileURL))
+        let rawKey: Data
+        if let storedKey = try keyStore.load() {
+            rawKey = storedKey
+        } else if FileManager.default.fileExists(atPath: fileURL.path) {
+            rawKey = try Data(contentsOf: fileURL)
+            _ = try P256.Signing.PrivateKey(rawRepresentation: rawKey)
+            try keyStore.save(rawKey)
+            try FileManager.default.removeItem(at: fileURL)
         } else {
-            privateKey = P256.Signing.PrivateKey()
-            try privateKey.rawRepresentation.write(to: fileURL, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            rawKey = P256.Signing.PrivateKey().rawRepresentation
+            try keyStore.save(rawKey)
         }
 
+        let privateKey = try P256.Signing.PrivateKey(rawRepresentation: rawKey)
         let publicKey = privateKey.publicKey.x963Representation
         return LinkitIdentity(
             deviceId: LinkitDeviceId.fromPublicKey(publicKey),
             publicKey: publicKey.base64EncodedString(),
             privateKey: privateKey
         )
+    }
+}
+
+protocol LinkitPrivateKeyStore {
+    func load() throws -> Data?
+    func save(_ data: Data) throws
+}
+
+enum LinkitKeychainError: Error, LocalizedError {
+    case unexpectedStatus(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .unexpectedStatus(let status):
+            return "Keychain operation failed with status \(status)"
+        }
+    }
+}
+
+final class KeychainPrivateKeyStore: LinkitPrivateKeyStore {
+    private let service = "tech.kalkikgp.Linkit"
+    private let account = "mac-identity.p256"
+
+    func load() throws -> Data? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess else {
+            throw LinkitKeychainError.unexpectedStatus(status)
+        }
+        return result as? Data
+    }
+
+    func save(_ data: Data) throws {
+        var query = baseQuery()
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw LinkitKeychainError.unexpectedStatus(updateStatus)
+        }
+
+        query[kSecValueData as String] = data
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let addStatus = SecItemAdd(query as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw LinkitKeychainError.unexpectedStatus(addStatus)
+        }
+    }
+
+    private func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
     }
 }
 
@@ -147,6 +223,17 @@ enum LinkitPairingChallenge {
             androidDeviceId,
             androidPublicKey,
             pairingToken,
+            challenge
+        ].joined(separator: "\n")
+    }
+}
+
+enum LinkitIdentityProof {
+    static func canonicalString(deviceId: String, publicKey: String, challenge: String) -> String {
+        [
+            "LINKIT_IDENTITY_PROOF",
+            deviceId,
+            publicKey,
             challenge
         ].joined(separator: "\n")
     }

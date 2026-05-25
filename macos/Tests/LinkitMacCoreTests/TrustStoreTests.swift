@@ -3,6 +3,56 @@ import XCTest
 @testable import LinkitMacCore
 
 final class TrustStoreTests: XCTestCase {
+    func testIdentityProofCanonicalStringVerifiesWithMacKey() throws {
+        let privateKey = P256.Signing.PrivateKey()
+        let publicKeyData = privateKey.publicKey.x963Representation
+        let publicKey = publicKeyData.base64EncodedString()
+        let deviceId = LinkitDeviceId.fromPublicKey(publicKeyData)
+        let challenge = "challenge-\(UUID().uuidString)"
+        let canonical = LinkitIdentityProof.canonicalString(
+            deviceId: deviceId,
+            publicKey: publicKey,
+            challenge: challenge
+        )
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let signature = try privateKey.signature(for: digest)
+
+        XCTAssertTrue(privateKey.publicKey.isValidSignature(signature, for: digest))
+    }
+
+    func testIdentityStoreKeepsStableIdentityInPrivateStore() throws {
+        let keyStore = InMemoryPrivateKeyStore()
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("linkit-identity-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let first = try IdentityStore(baseFolder: base, keyStore: keyStore).loadOrCreate()
+        let second = try IdentityStore(baseFolder: base, keyStore: keyStore).loadOrCreate()
+
+        XCTAssertEqual(first.deviceId, second.deviceId)
+        XCTAssertEqual(first.publicKey, second.publicKey)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: base.appendingPathComponent("mac-identity.p256").path))
+    }
+
+    func testIdentityStoreMigratesLegacyFileIntoPrivateStore() throws {
+        let keyStore = InMemoryPrivateKeyStore()
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("linkit-identity-migration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+
+        let legacyKey = P256.Signing.PrivateKey()
+        let legacyFile = base.appendingPathComponent("mac-identity.p256")
+        try legacyKey.rawRepresentation.write(to: legacyFile, options: [.atomic])
+        let expectedDeviceId = LinkitDeviceId.fromPublicKey(legacyKey.publicKey.x963Representation)
+
+        let identity = try IdentityStore(baseFolder: base, keyStore: keyStore).loadOrCreate()
+
+        XCTAssertEqual(identity.deviceId, expectedDeviceId)
+        XCTAssertEqual(try XCTUnwrap(keyStore.data), legacyKey.rawRepresentation)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyFile.path))
+    }
+
     func testPairingStoresAndroidReceiverAddressAndPort() throws {
         let fixture = try TrustFixture()
         defer { fixture.cleanup() }
@@ -246,7 +296,7 @@ private final class TrustFixture {
     init() throws {
         base = FileManager.default.temporaryDirectory
             .appendingPathComponent("linkit-trust-tests-\(UUID().uuidString)", isDirectory: true)
-        identity = try IdentityStore(baseFolder: base).loadOrCreate()
+        identity = try IdentityStore(baseFolder: base, keyStore: InMemoryPrivateKeyStore()).loadOrCreate()
         trust = try TrustStore(baseFolder: base)
         connections = DeviceConnectionRegistry()
         pairing = try PairingManager(identity: identity, trustStore: trust, connections: connections, logger: LinkitLogger())
@@ -254,5 +304,17 @@ private final class TrustFixture {
 
     func cleanup() {
         try? FileManager.default.removeItem(at: base)
+    }
+}
+
+private final class InMemoryPrivateKeyStore: LinkitPrivateKeyStore {
+    var data: Data?
+
+    func load() throws -> Data? {
+        data
+    }
+
+    func save(_ data: Data) throws {
+        self.data = data
     }
 }

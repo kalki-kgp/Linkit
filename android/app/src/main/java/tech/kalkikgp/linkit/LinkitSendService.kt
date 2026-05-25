@@ -37,6 +37,8 @@ class LinkitSendService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DebugTelemetry.install(applicationContext)
+        DebugTelemetry.serviceStarted("LinkitSendService")
         ensureChannel()
         identityStore = IdentityStore(applicationContext)
         historyStore = TransferHistoryStore.get(applicationContext)
@@ -56,6 +58,7 @@ class LinkitSendService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        DebugTelemetry.serviceStopped("LinkitSendService")
         super.onDestroy()
     }
 

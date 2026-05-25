@@ -6,6 +6,18 @@ import java.net.URLEncoder
 
 class PairingPayloadParserTest {
     @Test
+    fun identityProofCanonicalStringMatchesProtocol() {
+        assertEquals(
+            "LINKIT_IDENTITY_PROOF\nmac-device\npublic-key\nchallenge",
+            LinkitIdentityProof.canonicalString(
+                deviceId = "mac-device",
+                publicKey = "public-key",
+                challenge = "challenge"
+            )
+        )
+    }
+
+    @Test
     fun parsesJsonPayloadWithExpiry() {
         val payload = PairingPayloadParser.parse(
             """

@@ -37,6 +37,20 @@ public struct InfoResponse: Codable {
     public let capabilities: [String]
 }
 
+public struct IdentityProofRequest: Codable {
+    public let challenge: String
+}
+
+public struct IdentityProofResponse: Codable, Equatable {
+    public let protocolVersion: Int
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let publicKey: String
+    public let challenge: String
+    public let signature: String
+}
+
 public struct PairRequest: Codable {
     public let deviceId: String
     public let deviceName: String
@@ -207,6 +221,21 @@ public struct AndroidDeviceStatusResponse: Codable, Equatable {
     public let status: String
     public let receivePort: UInt16?
     public let batteryPercent: Int?
+}
+
+public struct LinkitActionRequest: Codable, Equatable {
+    public let type: String
+    public let text: String
+
+    public init(type: String, text: String) {
+        self.type = type
+        self.text = text
+    }
+}
+
+public struct LinkitActionResponse: Codable, Equatable {
+    public let status: String
+    public let type: String
 }
 
 struct TransferRecord {
