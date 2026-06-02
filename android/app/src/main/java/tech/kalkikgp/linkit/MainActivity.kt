@@ -53,6 +53,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -90,6 +91,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.time.Instant
@@ -169,6 +171,12 @@ data class LinkitUiState(
     val currentFileName: String? = null,
     val androidReceiverStatus: String = "Mac drops starting",
     val lastAndroidDropPath: String? = null,
+    val currentAndroidVersion: String = "",
+    val availableAndroidUpdate: AndroidAvailableUpdate? = null,
+    val isCheckingUpdate: Boolean = false,
+    val isInstallingUpdate: Boolean = false,
+    val updateStatus: String = "Updates ready",
+    val updateError: String? = null,
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
@@ -182,6 +190,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private val identityStore = IdentityStore(application)
     private val discovery = BonjourDiscovery(application)
     private val history = TransferHistoryStore.get(application)
+    private val appUpdater = AndroidAppUpdater(application)
     val historyEntries: StateFlow<List<TransferHistoryEntry>> = history.entries
 
     private val _uiState = MutableStateFlow(
@@ -194,7 +203,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 "Pair with Mac to receive drops"
             } else {
                 "Connecting to Mac for drops"
-            }
+            },
+            currentAndroidVersion = appUpdater.currentVersionLabel()
         )
     )
     val uiState: StateFlow<LinkitUiState> = _uiState
@@ -784,6 +794,72 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         history.clear()
     }
 
+    fun checkForAndroidUpdate() {
+        if (_uiState.value.isCheckingUpdate || _uiState.value.isInstallingUpdate) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(isCheckingUpdate = true, updateStatus = "Checking for updates", updateError = null)
+            }
+            runCatching {
+                appUpdater.checkForUpdates()
+            }.onSuccess { result ->
+                _uiState.update { state ->
+                    when (result) {
+                        AndroidUpdateCheckResult.UpToDate -> state.copy(
+                            isCheckingUpdate = false,
+                            availableAndroidUpdate = null,
+                            updateStatus = "Linkit is up to date",
+                            updateError = null
+                        )
+                        is AndroidUpdateCheckResult.Available -> state.copy(
+                            isCheckingUpdate = false,
+                            availableAndroidUpdate = result.update,
+                            updateStatus = "Version ${result.update.versionName} (${result.update.versionCode}) is available",
+                            updateError = null
+                        )
+                    }
+                }
+            }.onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        isCheckingUpdate = false,
+                        updateStatus = "Update check failed",
+                        updateError = error.message ?: "Could not check for updates"
+                    )
+                }
+            }
+        }
+    }
+
+    fun installAndroidUpdate() {
+        if (_uiState.value.isInstallingUpdate) return
+        val update = _uiState.value.availableAndroidUpdate ?: return checkForAndroidUpdate()
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(isInstallingUpdate = true, updateStatus = "Downloading update", updateError = null)
+            }
+            runCatching {
+                val apk = appUpdater.download(update)
+                _uiState.update { it.copy(updateStatus = "Opening installer") }
+                withContext(Dispatchers.Main) {
+                    appUpdater.install(apk)
+                }
+            }.onSuccess {
+                _uiState.update {
+                    it.copy(isInstallingUpdate = false, updateStatus = "Installer opened", updateError = null)
+                }
+            }.onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        isInstallingUpdate = false,
+                        updateStatus = "Update install paused",
+                        updateError = error.message ?: "Could not install update"
+                    )
+                }
+            }
+        }
+    }
+
     private fun recordSentHistory(file: PickedFile, mac: TrustedMac, status: String, savedPath: String?, error: String?) {
         viewModelScope.launch(Dispatchers.IO) {
             history.append(
@@ -918,7 +994,9 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                     onReconnect = viewModel::discoverAndReconnect,
                     onRePair = launchQrScanner,
                     onForget = viewModel::forgetMac,
-                    onClearHistory = viewModel::clearHistory
+                    onClearHistory = viewModel::clearHistory,
+                    onCheckUpdate = viewModel::checkForAndroidUpdate,
+                    onInstallUpdate = viewModel::installAndroidUpdate
                 )
             }
 
@@ -1024,7 +1102,9 @@ private fun HomeScreen(
     onReconnect: () -> Unit,
     onRePair: () -> Unit,
     onForget: () -> Unit,
-    onClearHistory: () -> Unit
+    onClearHistory: () -> Unit,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1049,6 +1129,12 @@ private fun HomeScreen(
             Spacer(modifier = Modifier.height(16.dp))
             ErrorBanner(it)
         }
+        Spacer(modifier = Modifier.height(28.dp))
+        UpdateSection(
+            state = state,
+            onCheck = onCheckUpdate,
+            onInstall = onInstallUpdate
+        )
         Spacer(modifier = Modifier.height(28.dp))
         RecentActivity(entries = history, onClear = onClearHistory)
     }
@@ -1362,6 +1448,97 @@ private fun ActionTile(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+    }
+}
+
+@Composable
+private fun UpdateSection(state: LinkitUiState, onCheck: () -> Unit, onInstall: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            "Updates",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .border(
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    RoundedCornerShape(18.dp)
+                )
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Current ${state.currentAndroidVersion}",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = state.updateStatus,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (state.updateError == null) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            state.availableAndroidUpdate?.manifest?.releaseNotes?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            state.updateError?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            if (state.isCheckingUpdate || state.isInstallingUpdate) {
+                LinearProgressIndicator(
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.outlineVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                OutlinedButton(
+                    onClick = onCheck,
+                    enabled = !state.isCheckingUpdate && !state.isInstallingUpdate,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (state.isCheckingUpdate) "Checking…" else "Check")
+                }
+                Button(
+                    onClick = onInstall,
+                    enabled = state.availableAndroidUpdate != null &&
+                        !state.isCheckingUpdate &&
+                        !state.isInstallingUpdate,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (state.isInstallingUpdate) "Installing…" else "Install")
+                }
+            }
+        }
     }
 }
 

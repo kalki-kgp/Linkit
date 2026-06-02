@@ -129,6 +129,24 @@ Install into `/Applications`:
 open /Applications/Linkit.app
 ```
 
+Package a Mac update for the in-app updater:
+
+```sh
+LINKIT_VERSION=0.4.0 \
+LINKIT_BUILD=4 \
+LINKIT_UPDATE_ASSET_BASE_URL=https://github.com/kalki-kgp/Linkit/releases/download/v0.4.0 \
+./scripts/package-macos-update.sh
+```
+
+Upload both generated files:
+
+```txt
+dist/linkit-macos.zip
+dist/linkit-macos-update.json
+```
+
+The installed app checks `LinkitUpdateManifestURL` from its `Info.plist`. The local build script defaults that to `https://github.com/kalki-kgp/Linkit/releases/latest/download/linkit-macos-update.json`; override it with `LINKIT_UPDATE_MANIFEST_URL=...` when building if you want a different release channel. The updater verifies the zip SHA-256, confirms the downloaded bundle id/version/build, swaps `Linkit.app`, and relaunches.
+
 Install the Android debug build:
 
 ```sh
@@ -143,6 +161,69 @@ adb install dist/linkit-release.apk
 ```
 
 The first run creates a local keystore at `android/linkit-release.keystore` and `android/keystore.properties` (both gitignored). Copy `android/keystore.properties.example` if you want to use your own keystore/passwords instead.
+
+Package an Android update for the in-app updater:
+
+```sh
+LINKIT_VERSION=0.2.0 \
+LINKIT_VERSION_CODE=2 \
+LINKIT_ANDROID_UPDATE_ASSET_BASE_URL=https://github.com/kalki-kgp/Linkit/releases/download/v0.2.0 \
+./scripts/package-android-update.sh
+```
+
+Upload both generated files:
+
+```txt
+dist/linkit-release.apk
+dist/linkit-android-update.json
+```
+
+The Android app checks `BuildConfig.LINKIT_ANDROID_UPDATE_MANIFEST_URL`, which defaults to `https://github.com/kalki-kgp/Linkit/releases/latest/download/linkit-android-update.json`. Override it with `LINKIT_ANDROID_UPDATE_MANIFEST_URL=...` when building if you want a different release channel. Android still requires the user to approve APK installation, and the update APK must be signed with the same release keystore as the installed app.
+
+## Automated GitHub release
+
+The release workflow builds both apps, generates both updater manifests, and uploads the assets to GitHub Releases:
+
+```txt
+.github/workflows/release.yml
+```
+
+Set these GitHub Actions secrets before using it:
+
+```txt
+LINKIT_ANDROID_KEYSTORE_BASE64       # base64 of android/linkit-release.keystore
+LINKIT_ANDROID_KEYSTORE_PASSWORD
+LINKIT_ANDROID_KEY_ALIAS
+LINKIT_ANDROID_KEY_PASSWORD
+```
+
+Create the keystore secret from your local release key:
+
+```sh
+base64 -i android/linkit-release.keystore | pbcopy
+```
+
+For a release tagged `v0.4.0`, the asset base URL for both platforms is:
+
+```txt
+https://github.com/kalki-kgp/Linkit/releases/download/v0.4.0
+```
+
+The concrete update assets become:
+
+```txt
+https://github.com/kalki-kgp/Linkit/releases/download/v0.4.0/linkit-macos.zip
+https://github.com/kalki-kgp/Linkit/releases/download/v0.4.0/linkit-release.apk
+```
+
+The apps themselves check the `latest` manifest URLs:
+
+```txt
+https://github.com/kalki-kgp/Linkit/releases/latest/download/linkit-macos-update.json
+https://github.com/kalki-kgp/Linkit/releases/latest/download/linkit-android-update.json
+```
+
+That split is intentional: manifest URLs can follow the latest release, while each manifest points at immutable tag-specific binaries.
 
 ## Bonjour discovery
 
