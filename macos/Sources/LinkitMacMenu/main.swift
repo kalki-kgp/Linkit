@@ -408,7 +408,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let message = [
             "Version \(update.version) (\(update.build)) is available.",
             notes
-        ].compactMap(\.self).joined(separator: "\n\n")
+        ].compactMap { $0 }.joined(separator: "\n\n")
 
         let alert = NSAlert()
         alert.messageText = "Update Linkit?"
