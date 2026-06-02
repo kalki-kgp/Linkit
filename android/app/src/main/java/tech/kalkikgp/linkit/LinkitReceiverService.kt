@@ -23,6 +23,8 @@ class LinkitReceiverService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DebugTelemetry.install(applicationContext)
+        DebugTelemetry.serviceStarted("LinkitReceiverService")
         ensureChannel()
         startForegroundWithNotification(currentStatus("Listening for Mac drops"))
         val identityStore = IdentityStore(applicationContext)
@@ -52,6 +54,7 @@ class LinkitReceiverService : Service() {
         receiver?.stop()
         receiver = null
         serviceScope.cancel()
+        DebugTelemetry.serviceStopped("LinkitReceiverService")
         super.onDestroy()
     }
 
@@ -86,6 +89,18 @@ class LinkitReceiverService : Service() {
             Intent(this, LinkitReceiverService::class.java).apply { action = ACTION_STOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val sendClipboardIntent = PendingIntent.getActivity(
+            this,
+            2,
+            ClipboardActionActivity.intent(this, ClipboardActionActivity.ACTION_SEND_CLIPBOARD),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val openLinkIntent = PendingIntent.getActivity(
+            this,
+            3,
+            ClipboardActionActivity.intent(this, ClipboardActionActivity.ACTION_OPEN_LINK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setContentTitle("Linkit ready")
@@ -96,6 +111,8 @@ class LinkitReceiverService : Service() {
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(openIntent)
+            .addAction(0, "Send Clipboard", sendClipboardIntent)
+            .addAction(0, "Open Link", openLinkIntent)
             .addAction(0, "Stop", stopIntent)
             .build()
     }

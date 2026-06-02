@@ -224,15 +224,21 @@ final class TransferStore {
     }
 
     func cancel(id: String, requesterDeviceId: String? = nil) throws -> TransferStatusResponse {
-        try mutate(id: id) { record in
+        var canceledRecord: TransferRecord?
+        let response = try mutate(id: id) { record in
             try validateRequester(record, requesterDeviceId)
             record.status = .canceled
             record.error = "canceled"
             removeTempQuietly(record.tempURL)
             appendHistory(record)
             logger.info("canceled transfer id=\(id)")
+            canceledRecord = record
             return statusResponse(record)
         }
+        if let canceledRecord {
+            postTransferNotification(.linkitTransferDidFinish, record: canceledRecord)
+        }
+        return response
     }
 
     func status(id: String, requesterDeviceId: String? = nil) throws -> TransferStatusResponse {

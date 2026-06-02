@@ -108,3 +108,14 @@ Finalize remains idempotent. The response also includes `files[]`:
 ```
 
 Replaying the same finalize payload returns the same saved result or same failure. Replaying with a different payload returns `409 finalize_payload_mismatch`.
+
+## Later Signed Actions
+
+The current private build has moved beyond Phase 1 for paired devices:
+
+- transfer cancel uses signed `DELETE /v1/transfers/:id`;
+- text, clipboard, and URL handoff use signed `POST /v1/actions`;
+- Mac → Android clipboard watching can run from the Mac menu-bar app;
+- Android → Mac clipboard watching is foreground-only because Android 10+ blocks background clipboard reads for ordinary apps.
+
+See [`mvp.md`](mvp.md) for the current signed action shape.

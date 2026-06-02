@@ -68,3 +68,12 @@ object LinkitPairingChallenge {
         challenge
     ).joinToString("\n")
 }
+
+object LinkitIdentityProof {
+    fun canonicalString(deviceId: String, publicKey: String, challenge: String): String = listOf(
+        "LINKIT_IDENTITY_PROOF",
+        deviceId,
+        publicKey,
+        challenge
+    ).joinToString("\n")
+}

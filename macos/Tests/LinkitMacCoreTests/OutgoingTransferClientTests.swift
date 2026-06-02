@@ -29,15 +29,26 @@ final class OutgoingTransferClientTests: XCTestCase {
         try Data("hello android\n".utf8).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
 
+        let progressLock = NSLock()
+        var progressSamples: [Int64] = []
         let result = try runOffMain {
             try OutgoingTransferClient(identity: identity, logger: LinkitLogger())
-                .send(files: [file], to: target)
+                .send(files: [file], to: target) { progress in
+                    progressLock.lock()
+                    progressSamples.append(progress.fileBytesSent)
+                    progressLock.unlock()
+                }
         }
+        progressLock.lock()
+        let samples = progressSamples
+        progressLock.unlock()
 
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].bytesSent, 14)
         XCTAssertEqual(result[0].savedPath, "Downloads/Linkit Drop/linkit-outgoing.txt")
         XCTAssertEqual(receiver.uploadedBody, Data("hello android\n".utf8))
+        XCTAssertTrue(samples.contains { $0 > 0 })
+        XCTAssertEqual(samples.last, 14)
     }
 
     func testFetchesAndroidDeviceStatus() throws {
@@ -69,6 +80,37 @@ final class OutgoingTransferClientTests: XCTestCase {
         XCTAssertEqual(status.status, "connected")
         XCTAssertEqual(status.batteryPercent, 77)
     }
+
+    func testSendsSignedClipboardActionToAndroid() throws {
+        let key = P256.Signing.PrivateKey()
+        let publicKey = key.publicKey.x963Representation
+        let identity = LinkitIdentity(
+            deviceId: LinkitDeviceId.fromPublicKey(publicKey),
+            publicKey: publicKey.base64EncodedString(),
+            privateKey: key
+        )
+        let receiver = try MockAndroidReceiver(macIdentity: identity)
+        defer { receiver.stop() }
+
+        let target = TrustedDevice(
+            deviceId: "android-device",
+            deviceName: "Pixel",
+            platform: "android",
+            publicKey: "unused",
+            pairedAt: Date().iso8601(),
+            lastKnownHost: "127.0.0.1",
+            receivePort: receiver.port
+        )
+
+        let response = try runOffMain {
+            try OutgoingTransferClient(identity: identity, logger: LinkitLogger())
+                .sendAction(LinkitActionRequest(type: "clipboard", text: "hello from mac"), to: target)
+        }
+
+        XCTAssertEqual(response, LinkitActionResponse(status: "ok", type: "clipboard"))
+        XCTAssertEqual(receiver.receivedActionType, "clipboard")
+        XCTAssertEqual(receiver.receivedActionText, "hello from mac")
+    }
 }
 
 private final class MockAndroidReceiver {
@@ -79,6 +121,8 @@ private final class MockAndroidReceiver {
     private let lock = NSLock()
     private let macIdentity: LinkitIdentity
     private(set) var uploadedBody = Data()
+    private(set) var receivedActionType: String?
+    private(set) var receivedActionText: String?
 
     init(macIdentity: LinkitIdentity) throws {
         self.macIdentity = macIdentity
@@ -207,6 +251,14 @@ private final class MockAndroidReceiver {
                   "batteryPercent":77
                 }
                 """)
+            case ("POST", "/v1/actions"):
+                XCTAssertTrue(try verifyControlSignature(request))
+                let json = try JSONSerialization.jsonObject(with: request.body) as? [String: String]
+                lock.lock()
+                receivedActionType = json?["type"]
+                receivedActionText = json?["text"]
+                lock.unlock()
+                try writeJSON(fd, status: 200, json: #"{"status":"ok","type":"clipboard"}"#)
             default:
                 try writeJSON(fd, status: 404, json: #"{"error":"not_found","message":"not found"}"#)
             }

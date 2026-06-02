@@ -1,7 +1,11 @@
 package tech.kalkikgp.linkit
 
 import android.content.ContentValues
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -91,14 +95,19 @@ class AndroidDropReceiver(
 
     private fun handleClient(socket: Socket) {
         socket.use {
+            var requestLabel: String? = null
             try {
                 val request = readRequest(socket.getInputStream())
+                requestLabel = "${request.method} ${request.path}"
                 val response = route(request)
+                DebugTelemetry.recordEvent("inbound", "$requestLabel -> ${response.status}")
                 writeResponse(socket.getOutputStream(), response)
             } catch (failure: DropHttpFailure) {
+                DebugTelemetry.recordEvent("inbound", "${requestLabel ?: "?"} rejected ${failure.status} ${failure.error}")
                 writeResponse(socket.getOutputStream(), jsonResponse(failure.status, failure.error, failure.message))
             } catch (error: Throwable) {
                 Log.e(RECEIVER_TAG, "Android drop request failed", error)
+                DebugTelemetry.recordEvent("inbound", "${requestLabel ?: "?"} error ${error.javaClass.simpleName}: ${error.message}")
                 writeResponse(socket.getOutputStream(), jsonResponse(500, "internal_error", "Android receiver error"))
             }
         }
@@ -117,13 +126,20 @@ class AndroidDropReceiver(
                     .put("platform", "android")
                     .put("port", PORT)
                     .put("publicKey", identity.publicKey)
-                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status"))
+                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url"))
             )
         }
 
         if (request.method == "GET" && request.path == "/v1/devices/self/status") {
             verifySigned(request, ByteArray(0))
             return jsonResponse(200, deviceStatusJson())
+        }
+
+        if (request.method == "POST" && request.path == "/v1/actions") {
+            val body = readBody(request, maxBytes = 256 * 1024)
+            verifySigned(request, body)
+            val json = JSONObject(String(body, Charsets.UTF_8))
+            return jsonResponse(200, handleAction(json))
         }
 
         if (request.method == "POST" && request.path == "/v1/transfers") {
@@ -150,11 +166,41 @@ class AndroidDropReceiver(
             val session = sessions[parts[2]] ?: throw DropHttpFailure(404, "not_found", "Transfer was not found")
             ensureOwner(session, deviceId)
             session.status = "canceled"
+            session.error = "canceled"
             session.tempFile.delete()
+            recordHistory(session)
+            onEvent(AndroidDropEvent("Mac drop canceled"))
             return jsonResponse(200, statusJson(session))
         }
 
         throw DropHttpFailure(404, "not_found", "Endpoint was not found")
+    }
+
+    private fun handleAction(json: JSONObject): JSONObject {
+        val type = json.getString("type").lowercase()
+        val text = json.getString("text")
+        if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 128 * 1024) {
+            throw DropHttpFailure(400, "invalid_action_text", "Action text must be 1 byte to 128 KB")
+        }
+        when (type) {
+            "clipboard", "text" -> {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Linkit", text))
+                onEvent(AndroidDropEvent(if (type == "clipboard") "Clipboard received from Mac" else "Text received from Mac"))
+            }
+            "open_url" -> {
+                val uri = Uri.parse(text)
+                val scheme = uri.scheme?.lowercase()
+                if (scheme != "http" && scheme != "https") {
+                    throw DropHttpFailure(400, "invalid_url", "Only http and https URLs can be opened")
+                }
+                val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                onEvent(AndroidDropEvent("Opened link from Mac"))
+            }
+            else -> throw DropHttpFailure(400, "unsupported_action", "Action type is not supported")
+        }
+        return JSONObject().put("status", "ok").put("type", type)
     }
 
     private fun createTransfer(json: JSONObject, deviceId: String): JSONObject {
@@ -230,6 +276,9 @@ class AndroidDropReceiver(
             FileOutputStream(session.tempFile).use { output ->
                 val buffer = ByteArray(1024 * 1024)
                 while (received < session.expectedSize) {
+                    if (session.status == "canceled") {
+                        throw DropHttpFailure(409, "canceled", "Transfer was canceled")
+                    }
                     val read = request.input.read(buffer, 0, min(buffer.size.toLong(), session.expectedSize - received).toInt())
                     if (read == -1) {
                         throw DropHttpFailure(400, "connection_closed", "Client disconnected before upload completed")
@@ -250,9 +299,11 @@ class AndroidDropReceiver(
                 .put("bytesReceived", session.bytesReceived)
                 .put("serverSha256", session.serverSha256)
         } catch (failure: DropHttpFailure) {
-            session.status = "failed"
-            session.error = failure.error
-            session.tempFile.delete()
+            if (failure.error != "canceled") {
+                session.status = "failed"
+                session.error = failure.error
+                session.tempFile.delete()
+            }
             throw failure
         } catch (error: IOException) {
             session.status = "failed"
@@ -387,6 +438,7 @@ class AndroidDropReceiver(
         if (!nonceCache.insert(deviceId, nonce)) {
             throw DropHttpFailure(401, "nonce_replay", "Signed request nonce was already used")
         }
+        MacPresence.touch()
         return deviceId
     }
 
@@ -415,6 +467,7 @@ class AndroidDropReceiver(
         if (!nonceCache.insert(deviceId, nonce)) {
             throw DropHttpFailure(401, "nonce_replay", "Signed request nonce was already used")
         }
+        MacPresence.touch()
         return deviceId
     }
 
