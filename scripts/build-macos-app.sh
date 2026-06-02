@@ -8,6 +8,21 @@ CONTENTS="$APP_DIR/Contents"
 MACOS_BIN="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 ICON_SOURCE="$MACOS_DIR/Resources/Linkit.icns"
+VERSION="${LINKIT_VERSION:-0.3.0}"
+BUILD_NUMBER="${LINKIT_BUILD:-3}"
+UPDATE_MANIFEST_URL="${LINKIT_UPDATE_MANIFEST_URL:-https://github.com/kalki-kgp/Linkit/releases/latest/download/linkit-macos-update.json}"
+
+xml_escape() {
+  printf '%s' "$1" \
+    | sed \
+      -e 's/&/\&amp;/g' \
+      -e 's/</\&lt;/g' \
+      -e 's/>/\&gt;/g' \
+      -e 's/"/\&quot;/g' \
+      -e "s/'/\&apos;/g"
+}
+
+UPDATE_MANIFEST_URL_XML="$(xml_escape "$UPDATE_MANIFEST_URL")"
 
 cd "$MACOS_DIR"
 swift build -c release --product LinkitMacMenu
@@ -22,7 +37,7 @@ mkdir -p "$MACOS_BIN" "$RESOURCES"
 cp "$MACOS_DIR/.build/release/LinkitMacMenu" "$MACOS_BIN/Linkit"
 cp "$ICON_SOURCE" "$RESOURCES/Linkit.icns"
 
-cat > "$CONTENTS/Info.plist" <<'PLIST'
+cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -40,9 +55,11 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>Linkit</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.0</string>
+  <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>3</string>
+  <string>$BUILD_NUMBER</string>
+  <key>LinkitUpdateManifestURL</key>
+  <string>$UPDATE_MANIFEST_URL_XML</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSLocalNetworkUsageDescription</key>

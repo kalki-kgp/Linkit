@@ -1,0 +1,166 @@
+name: Release
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "App version, for example 0.4.0"
+        required: true
+      version_code:
+        description: "Android versionCode and macOS build number. Must increase."
+        required: true
+      release_notes:
+        description: "Short release notes for the updater manifests"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION_NAME="${{ inputs.version_name }}"
+            VERSION_CODE="${{ inputs.version_code }}"
+            RELEASE_NOTES="${{ inputs.release_notes }}"
+            TAG_NAME="v${VERSION_NAME}"
+          else
+            TAG_NAME="${GITHUB_REF_NAME}"
+            VERSION_NAME="${TAG_NAME#v}"
+            VERSION_CODE="${GITHUB_RUN_NUMBER}"
+            RELEASE_NOTES=""
+          fi
+
+          if [[ ! "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "version_code must be an integer" >&2
+            exit 1
+          fi
+
+          ASSET_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}"
+          MANIFEST_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/linkit-macos-update.json"
+          ANDROID_MANIFEST_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/linkit-android-update.json"
+
+          {
+            echo "TAG_NAME=$TAG_NAME"
+            echo "VERSION_NAME=$VERSION_NAME"
+            echo "VERSION_CODE=$VERSION_CODE"
+            echo "ASSET_BASE_URL=$ASSET_BASE_URL"
+            echo "LINKIT_UPDATE_MANIFEST_URL=$MANIFEST_URL"
+            echo "LINKIT_ANDROID_UPDATE_MANIFEST_URL=$ANDROID_MANIFEST_URL"
+            echo "RELEASE_NOTES<<EOF"
+            echo "$RELEASE_NOTES"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore Android signing key
+        shell: bash
+        env:
+          LINKIT_ANDROID_KEYSTORE_BASE64: ${{ secrets.LINKIT_ANDROID_KEYSTORE_BASE64 }}
+          LINKIT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.LINKIT_ANDROID_KEYSTORE_PASSWORD }}
+          LINKIT_ANDROID_KEY_ALIAS: ${{ secrets.LINKIT_ANDROID_KEY_ALIAS }}
+          LINKIT_ANDROID_KEY_PASSWORD: ${{ secrets.LINKIT_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in \
+            LINKIT_ANDROID_KEYSTORE_BASE64 \
+            LINKIT_ANDROID_KEYSTORE_PASSWORD \
+            LINKIT_ANDROID_KEY_ALIAS \
+            LINKIT_ANDROID_KEY_PASSWORD
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub secret: $name" >&2
+              exit 1
+            fi
+          done
+
+          printf '%s' "$LINKIT_ANDROID_KEYSTORE_BASE64" | base64 --decode > android/linkit-release.keystore
+          {
+            printf 'storeFile=linkit-release.keystore\n'
+            printf 'storePassword=%s\n' "$LINKIT_ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$LINKIT_ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$LINKIT_ANDROID_KEY_PASSWORD"
+          } > android/keystore.properties
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd macos && swift test)
+          (cd android && ./gradlew testDebugUnitTest)
+
+      - name: Build updater assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LINKIT_VERSION="$VERSION_NAME" \
+          LINKIT_BUILD="$VERSION_CODE" \
+          LINKIT_UPDATE_MANIFEST_URL="$LINKIT_UPDATE_MANIFEST_URL" \
+          LINKIT_UPDATE_ASSET_BASE_URL="$ASSET_BASE_URL" \
+          ./scripts/package-macos-update.sh
+
+          LINKIT_VERSION="$VERSION_NAME" \
+          LINKIT_VERSION_CODE="$VERSION_CODE" \
+          LINKIT_ANDROID_UPDATE_MANIFEST_URL="$LINKIT_ANDROID_UPDATE_MANIFEST_URL" \
+          LINKIT_ANDROID_UPDATE_ASSET_BASE_URL="$ASSET_BASE_URL" \
+          ./scripts/package-android-update.sh
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          notes = os.environ.get("RELEASE_NOTES", "")
+          for path in (
+              Path("dist/linkit-macos-update.json"),
+              Path("dist/linkit-android-update.json"),
+          ):
+              data = json.loads(path.read_text())
+              data["releaseNotes"] = notes
+              path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" \
+              dist/linkit-macos.zip \
+              dist/linkit-macos-update.json \
+              dist/linkit-release.apk \
+              dist/linkit-android-update.json \
+              --clobber
+          else
+            gh release create "$TAG_NAME" \
+              dist/linkit-macos.zip \
+              dist/linkit-macos-update.json \
+              dist/linkit-release.apk \
+              dist/linkit-android-update.json \
+              --title "Linkit $VERSION_NAME" \
+              --notes "${RELEASE_NOTES:-Linkit $VERSION_NAME}"
+          fi

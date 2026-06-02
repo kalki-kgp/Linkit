@@ -16,9 +16,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var lastTrustedSignature: String = ""
     private var lastConnectedSignature: String = ""
     private var notificationCenter: UNUserNotificationCenter?
+    private var appUpdater: MacAppUpdater?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureNotifications()
+        appUpdater = try? MacAppUpdater()
         do {
             let receiver = try LinkitReceiverApp()
             self.app = receiver
@@ -173,6 +175,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "Diagnostics", action: #selector(showDiagnostics), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Open Transfer Log", action: #selector(openTransferLog), keyEquivalent: "l"))
+        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "u"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(recentTransfersMenuItem(app: app))
         menu.addItem(NSMenuItem.separator())
@@ -247,6 +250,71 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc private func openTransferLog() {
         guard let app else { return }
         NSWorkspace.shared.open(app.logFile)
+    }
+
+    @objc private func checkForUpdates() {
+        guard let appUpdater else {
+            showNonFatalError("Updater is not configured. Set LinkitUpdateManifestURL in the app bundle or LINKIT_UPDATE_MANIFEST_URL.")
+            return
+        }
+
+        showTransientIcon(.pairing, tooltip: "Checking for updates")
+        Task {
+            do {
+                let result = try await appUpdater.checkForUpdates()
+                await MainActor.run {
+                    switch result {
+                    case .upToDate:
+                        self.showTransientIcon(.success, tooltip: "Linkit is up to date")
+                        self.showUpdateAlert(
+                            title: "Linkit is up to date",
+                            message: "You are running \(appUpdater.currentVersion) (\(appUpdater.currentBuild))."
+                        )
+                    case let .available(update):
+                        self.confirmAndInstall(update, appUpdater: appUpdater)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.showTransientIcon(.error, tooltip: "Update check failed")
+                    self.showNonFatalError("Could not check for updates: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func confirmAndInstall(_ update: LinkitAvailableUpdate, appUpdater: MacAppUpdater) {
+        let notes = update.manifest.releaseNotes.flatMap { $0.isEmpty ? nil : $0 }
+        let message = [
+            "Version \(update.version) (\(update.build)) is available.",
+            notes
+        ].compactMap(\.self).joined(separator: "\n\n")
+
+        let alert = NSAlert()
+        alert.messageText = "Update Linkit?"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Install Update")
+        alert.addButton(withTitle: "Later")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            refreshStatusButton()
+            return
+        }
+
+        showTransientIcon(.transferring(direction: .androidToMac), tooltip: "Installing update")
+        Task {
+            do {
+                try await appUpdater.install(update)
+                await MainActor.run {
+                    NSApp.terminate(nil)
+                }
+            } catch {
+                await MainActor.run {
+                    self.showTransientIcon(.error, tooltip: "Update failed")
+                    self.showNonFatalError("Could not install update: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     @objc private func showDiagnostics() {
@@ -590,6 +658,14 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         alert.messageText = "Linkit"
         alert.informativeText = message
         alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    private func showUpdateAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
         alert.runModal()
     }
 }

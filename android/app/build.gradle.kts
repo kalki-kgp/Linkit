@@ -11,6 +11,18 @@ val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
+val linkitVersionCode = providers.environmentVariable("LINKIT_ANDROID_VERSION_CODE")
+    .orElse(providers.environmentVariable("LINKIT_VERSION_CODE"))
+    .map(String::toInt)
+    .getOrElse(1)
+val linkitVersionName = providers.environmentVariable("LINKIT_ANDROID_VERSION_NAME")
+    .orElse(providers.environmentVariable("LINKIT_VERSION"))
+    .getOrElse("0.1.0")
+val linkitUpdateManifestUrl = providers.environmentVariable("LINKIT_ANDROID_UPDATE_MANIFEST_URL")
+    .getOrElse("https://github.com/kalki-kgp/Linkit/releases/latest/download/linkit-android-update.json")
+val escapedLinkitUpdateManifestUrl = linkitUpdateManifestUrl
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
 
 android {
     namespace = "tech.kalkikgp.linkit"
@@ -20,8 +32,9 @@ android {
         applicationId = "tech.kalkikgp.linkit"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = linkitVersionCode
+        versionName = linkitVersionName
+        buildConfigField("String", "LINKIT_ANDROID_UPDATE_MANIFEST_URL", "\"$escapedLinkitUpdateManifestUrl\"")
     }
 
     signingConfigs {
@@ -61,6 +74,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
