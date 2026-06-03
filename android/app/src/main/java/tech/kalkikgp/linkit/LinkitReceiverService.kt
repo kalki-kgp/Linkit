@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 
 class LinkitReceiverService : Service() {
     private var receiver: AndroidDropReceiver? = null
+    private var phoneCallBridge: PhoneCallBridge? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
@@ -34,6 +35,9 @@ class LinkitReceiverService : Service() {
         }
         active.start()
         receiver = active
+        phoneCallBridge = PhoneCallBridge(applicationContext, identityStore, LinkitClient(), serviceScope).also {
+            it.start()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -51,6 +55,8 @@ class LinkitReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        phoneCallBridge?.stop()
+        phoneCallBridge = null
         receiver?.stop()
         receiver = null
         serviceScope.cancel()

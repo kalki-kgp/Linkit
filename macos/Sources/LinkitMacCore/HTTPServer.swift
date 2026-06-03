@@ -295,7 +295,7 @@ final class HTTPServer {
                     port: port,
                     publicKey: identity.publicKey,
                     serviceType: "_linkit._tcp.local.",
-                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url"]
+                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url", "phone_state"]
                 )
             )
         }
@@ -498,7 +498,7 @@ final class HTTPServer {
 
     private func handleAction(_ action: LinkitActionRequest, senderDeviceId: String?) throws -> LinkitActionResponse {
         let normalizedType = action.type.lowercased()
-        guard ["clipboard", "text", "open_url"].contains(normalizedType) else {
+        guard ["clipboard", "text", "open_url", "phone_state"].contains(normalizedType) else {
             throw HTTPFailure.badRequest("unsupported_action", "Action type is not supported")
         }
         guard !action.text.isEmpty, action.text.utf8.count <= 128 * 1024 else {
@@ -508,6 +508,9 @@ final class HTTPServer {
             guard let url = URL(string: action.text), ["http", "https"].contains(url.scheme?.lowercased()) else {
                 throw HTTPFailure.badRequest("invalid_url", "Only http and https URLs can be opened")
             }
+        }
+        if normalizedType == "phone_state" {
+            try validatePhoneStatePayload(action.text)
         }
         NotificationCenter.default.post(
             name: .linkitActionReceived,
@@ -520,6 +523,19 @@ final class HTTPServer {
         )
         logger.info("received action type=\(normalizedType) bytes=\(action.text.utf8.count)")
         return LinkitActionResponse(status: "ok", type: normalizedType)
+    }
+
+    private func validatePhoneStatePayload(_ text: String) throws {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let state = object["state"] as? String,
+              ["idle", "ringing", "active"].contains(state)
+        else {
+            throw HTTPFailure.badRequest("invalid_phone_state", "Phone state payload is invalid")
+        }
+        if let number = object["number"] as? String, number.utf8.count > 64 {
+            throw HTTPFailure.badRequest("invalid_phone_state", "Phone state number is too long")
+        }
     }
 
     private func identityProof(for request: IdentityProofRequest) throws -> IdentityProofResponse {

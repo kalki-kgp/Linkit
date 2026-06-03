@@ -22,6 +22,18 @@ private struct LinkitTransferPanelState {
     let didFail: Bool
 }
 
+private struct AndroidPhoneState: Codable, Equatable {
+    let state: String
+    let number: String?
+    let timestampMillis: Int64?
+    let canAnswer: Bool?
+    let canEnd: Bool?
+
+    var displayName: String {
+        number?.isEmpty == false ? number! : "Android call"
+    }
+}
+
 final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     private var app: LinkitReceiverApp?
     private var statusItem: NSStatusItem?
@@ -47,6 +59,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var lastClipboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastTrustedSignature: String = ""
     private var lastConnectedSignature: String = ""
+    private var currentPhoneState: AndroidPhoneState?
+    private var incomingCallAlertVisible = false
     private var notificationCenter: UNUserNotificationCenter?
     private var appUpdater: MacAppUpdater?
 
@@ -215,6 +229,23 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         clipboardSync.isEnabled = !androidTargets.isEmpty || clipboardSyncEnabled
         menu.addItem(clipboardSync)
         menu.addItem(NSMenuItem.separator())
+        let phoneHeader = NSMenuItem(title: phoneMenuTitle(), action: nil, keyEquivalent: "")
+        phoneHeader.isEnabled = false
+        menu.addItem(phoneHeader)
+        let callNumber = NSMenuItem(title: "Call Number on Android...", action: #selector(callNumberOnAndroid), keyEquivalent: "")
+        callNumber.isEnabled = !androidTargets.isEmpty
+        menu.addItem(callNumber)
+        let phoneState = currentPhoneState?.state.lowercased()
+        let answerCall = NSMenuItem(title: "Answer Android Call", action: #selector(answerAndroidCall), keyEquivalent: "")
+        answerCall.isEnabled = !androidTargets.isEmpty && phoneState == "ringing"
+        menu.addItem(answerCall)
+        let declineCall = NSMenuItem(title: "Decline Android Call", action: #selector(declineAndroidCall), keyEquivalent: "")
+        declineCall.isEnabled = !androidTargets.isEmpty && phoneState == "ringing"
+        menu.addItem(declineCall)
+        let hangupCall = NSMenuItem(title: "Hang Up Android Call", action: #selector(hangupAndroidCall), keyEquivalent: "")
+        hangupCall.isEnabled = !androidTargets.isEmpty && (phoneState == "ringing" || phoneState == "active")
+        menu.addItem(hangupCall)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Transfer Progress", action: #selector(showTransferProgress), keyEquivalent: "t"))
         menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
@@ -365,6 +396,77 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 }
             }
         }
+    }
+
+    private func phoneMenuTitle() -> String {
+        guard let state = currentPhoneState?.state.lowercased() else {
+            return "Phone: waiting for Android permission"
+        }
+        switch state {
+        case "ringing":
+            return "Phone: incoming \(currentPhoneState?.displayName ?? "Android call")"
+        case "active":
+            return "Phone: active Android call"
+        default:
+            return "Phone: ready"
+        }
+    }
+
+    @objc private func callNumberOnAndroid() {
+        guard let number = promptForPhoneNumber() else { return }
+        guard let normalized = normalizedDialNumber(number) else {
+            showNonFatalError("Enter a normal phone number with digits and an optional leading +.")
+            return
+        }
+        sendActionToAndroid(type: "phone_call", text: normalized, successTooltip: "Android call started")
+    }
+
+    @objc private func answerAndroidCall() {
+        sendActionToAndroid(type: "phone_answer", text: "answer", successTooltip: "Answered Android call")
+    }
+
+    @objc private func declineAndroidCall() {
+        sendActionToAndroid(type: "phone_decline", text: "decline", successTooltip: "Declined Android call")
+    }
+
+    @objc private func hangupAndroidCall() {
+        sendActionToAndroid(type: "phone_hangup", text: "hangup", successTooltip: "Ended Android call")
+    }
+
+    private func promptForPhoneNumber() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Call on Android"
+        alert.informativeText = "The call starts on your phone. Audio stays on Android."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Call")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        input.placeholderString = "+911234567890"
+        alert.accessoryView = input
+        let result = alert.runModal()
+        guard result == .alertFirstButtonReturn else { return nil }
+        return input.stringValue
+    }
+
+    private func normalizedDialNumber(_ input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 32 else { return nil }
+        var output = ""
+        var digits = 0
+        for (index, scalar) in trimmed.unicodeScalars.enumerated() {
+            if CharacterSet.decimalDigits.contains(scalar) {
+                output.unicodeScalars.append(scalar)
+                digits += 1
+            } else if scalar == "+", index == 0 {
+                output.append("+")
+            } else if [" ", ".", "(", ")", "-"].contains(String(scalar)) {
+                continue
+            } else {
+                return nil
+            }
+        }
+        guard digits >= 2, digits <= 15 else { return nil }
+        return output
     }
 
     @objc private func openTransferLog() {
@@ -941,6 +1043,51 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             guard let url = validatedWebURL(text) else { return }
             NSWorkspace.shared.open(url)
             showTransientIcon(.success, tooltip: "Opened link")
+        case "phone_state":
+            handleAndroidPhoneState(text)
+        default:
+            break
+        }
+    }
+
+    private func handleAndroidPhoneState(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let state = try? JSONDecoder().decode(AndroidPhoneState.self, from: data)
+        else { return }
+        let oldState = currentPhoneState?.state.lowercased()
+        currentPhoneState = state
+        refreshMenu()
+
+        switch state.state.lowercased() {
+        case "ringing":
+            showTransientIcon(.pairing, tooltip: "Incoming Android call")
+            if oldState != "ringing" {
+                showIncomingCallPrompt(state)
+            }
+        case "active":
+            showTransientIcon(.connected, tooltip: "Android call active")
+        default:
+            incomingCallAlertVisible = false
+        }
+    }
+
+    private func showIncomingCallPrompt(_ state: AndroidPhoneState) {
+        guard !incomingCallAlertVisible else { return }
+        incomingCallAlertVisible = true
+        let alert = NSAlert()
+        alert.messageText = "Incoming Android call"
+        alert.informativeText = state.displayName
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Answer")
+        alert.addButton(withTitle: "Decline")
+        alert.addButton(withTitle: "Dismiss")
+        let result = alert.runModal()
+        incomingCallAlertVisible = false
+        switch result {
+        case .alertFirstButtonReturn:
+            answerAndroidCall()
+        case .alertSecondButtonReturn:
+            declineAndroidCall()
         default:
             break
         }

@@ -3,6 +3,7 @@ package tech.kalkikgp.linkit
 import android.app.Application
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -106,6 +107,16 @@ class MainActivity : ComponentActivity() {
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
     ) { /* user choice respected; service still runs */ }
 
+    private val phonePermissions = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        linkitViewModel.refreshPhoneControlStatus()
+        if (IdentityStore(applicationContext).trustedMac() != null) {
+            LinkitReceiverService.stop(applicationContext)
+            LinkitReceiverService.start(applicationContext)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DebugTelemetry.install(applicationContext)
@@ -117,7 +128,10 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             LinkitTheme {
-                LinkitScreen(linkitViewModel)
+                LinkitScreen(
+                    viewModel = linkitViewModel,
+                    onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) }
+                )
             }
         }
     }
@@ -125,7 +139,7 @@ class MainActivity : ComponentActivity() {
     private fun requestNotificationPermissionIfNeeded() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED
+                PackageManager.PERMISSION_GRANTED
             if (!granted) {
                 notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             }
@@ -140,6 +154,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        linkitViewModel.refreshPhoneControlStatus()
         if (IdentityStore(applicationContext).trustedMac() != null &&
             !linkitViewModel.uiState.value.isConnectedToMac
         ) {
@@ -177,6 +192,11 @@ data class LinkitUiState(
     val isInstallingUpdate: Boolean = false,
     val updateStatus: String = "Updates ready",
     val updateError: String? = null,
+    val phoneControlStatus: PhoneControlPermissionStatus = PhoneControlPermissionStatus(
+        canWatchCalls = false,
+        canPlaceDirectCalls = false,
+        canControlCalls = false
+    ),
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
@@ -204,7 +224,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 "Connecting to Mac for drops"
             },
-            currentAndroidVersion = appUpdater.currentVersionLabel()
+            currentAndroidVersion = appUpdater.currentVersionLabel(),
+            phoneControlStatus = PhonePermissions.status(application)
         )
     )
     val uiState: StateFlow<LinkitUiState> = _uiState
@@ -269,6 +290,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         stopClipboardSync()
         discovery.stop()
         super.onCleared()
+    }
+
+    fun refreshPhoneControlStatus() {
+        _uiState.update { it.copy(phoneControlStatus = PhonePermissions.status(getApplication())) }
     }
 
     fun setMacIp(value: String) {
@@ -934,7 +959,10 @@ private fun Intent.streamUris(): List<Uri> {
  * ------------------------------------------------------------------------- */
 
 @Composable
-private fun LinkitScreen(viewModel: LinkitViewModel) {
+private fun LinkitScreen(
+    viewModel: LinkitViewModel,
+    onEnablePhoneControls: () -> Unit
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val history by viewModel.historyEntries.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -996,7 +1024,8 @@ private fun LinkitScreen(viewModel: LinkitViewModel) {
                     onForget = viewModel::forgetMac,
                     onClearHistory = viewModel::clearHistory,
                     onCheckUpdate = viewModel::checkForAndroidUpdate,
-                    onInstallUpdate = viewModel::installAndroidUpdate
+                    onInstallUpdate = viewModel::installAndroidUpdate,
+                    onEnablePhoneControls = onEnablePhoneControls
                 )
             }
 
@@ -1104,7 +1133,8 @@ private fun HomeScreen(
     onForget: () -> Unit,
     onClearHistory: () -> Unit,
     onCheckUpdate: () -> Unit,
-    onInstallUpdate: () -> Unit
+    onInstallUpdate: () -> Unit,
+    onEnablePhoneControls: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1124,6 +1154,11 @@ private fun HomeScreen(
             onSendClipboard = onSendClipboard,
             onOpenLink = onOpenLink,
             onToggleClipboardSync = onToggleClipboardSync
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+        PhoneControlsSection(
+            status = state.phoneControlStatus,
+            onEnable = onEnablePhoneControls
         )
         state.error?.takeIf { !state.isSending }?.let {
             Spacer(modifier = Modifier.height(16.dp))
@@ -1448,6 +1483,63 @@ private fun ActionTile(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+    }
+}
+
+@Composable
+private fun PhoneControlsSection(
+    status: PhoneControlPermissionStatus,
+    onEnable: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            "Phone",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .border(
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    RoundedCornerShape(18.dp)
+                )
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                status.summary,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                buildString {
+                    append("Incoming mirror: ")
+                    append(if (status.canWatchCalls) "On" else "Off")
+                    append("  ·  Direct call: ")
+                    append(if (status.canPlaceDirectCalls) "On" else "Dialer")
+                    append("  ·  Controls: ")
+                    append(if (status.canControlCalls) "On" else "Off")
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (!status.canWatchCalls || !status.canPlaceDirectCalls || !status.canControlCalls) {
+                Button(
+                    onClick = onEnable,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                ) {
+                    Text("Enable phone controls")
+                }
+            }
+        }
     }
 }
 

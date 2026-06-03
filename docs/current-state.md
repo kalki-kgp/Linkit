@@ -63,6 +63,18 @@ Linkit is a private Android + macOS local device link for one phone and one Mac.
 
 Android limitation: Android 10+ does not let ordinary background apps read clipboard contents unless the app is focused or is the active input method. Therefore Mac -> Android clipboard sync can run from the Mac menu-bar app, but automatic Android -> Mac clipboard sync is foreground-only. Background Android copies should use the Linkit share sheet or the explicit **Send Clipboard** button.
 
+### Phone Control
+
+- Android exposes signed phone-control actions to the paired Mac:
+  - `phone_call` validates a normal phone number and starts the call on Android. If direct-call permission is not granted, Android opens the dialer with the number filled in.
+  - `phone_answer` answers a ringing Android call when Android grants call-control permission.
+  - `phone_decline` and `phone_hangup` end the current Android call when Android grants call-control permission.
+- Android's foreground receiver service mirrors call state to the Mac with signed `phone_state` actions when `READ_PHONE_STATE` is granted.
+- Mac menu shows a **Phone** section with **Call Number on Android...**, **Answer Android Call**, **Decline Android Call**, and **Hang Up Android Call**.
+- Incoming Android calls can show a Mac prompt with Answer / Decline / Dismiss.
+
+Call audio is not relayed to the Mac. Normal third-party Android apps cannot capture and forward cellular call audio with public permissions, so Linkit currently controls calls while audio remains routed on Android.
+
 ### Reconnect After Network Change
 
 - Android remembers the paired Mac across Wi-Fi/hotspot toggles.
@@ -129,6 +141,7 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 - One trusted phone + one Mac is the intended personal-use path.
 - Each HTTP transfer session is still one file; UI queues multiple files by sending multiple sessions.
 - Android -> Mac automatic clipboard sync cannot run in the background because of Android clipboard privacy rules.
+- Android phone call audio relay is not implemented; current phone support is call control only.
 - Android receive still depends on the foreground receiver service.
 - TLS/mTLS/Noise is not implemented; traffic is local HTTP with signed control/upload requests.
 - Resumable/chunked transfers are not implemented.
