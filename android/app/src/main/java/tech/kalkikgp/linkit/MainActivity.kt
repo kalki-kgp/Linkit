@@ -2,11 +2,16 @@ package tech.kalkikgp.linkit
 
 import android.app.Application
 import android.content.ClipboardManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.Settings
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -114,11 +119,32 @@ class MainActivity : ComponentActivity() {
         if (IdentityStore(applicationContext).trustedMac() != null) {
             LinkitReceiverService.start(applicationContext)
             linkitViewModel.discoverAndReconnect()
+            requestBatteryExemptionIfNeeded()
         }
         setContent {
             LinkitTheme {
                 LinkitScreen(linkitViewModel)
             }
+        }
+    }
+
+    // Asking the OS to exempt Linkit from Doze is what actually keeps the receiver
+    // foreground service + Wi-Fi alive while the screen is off, so the Mac doesn't see
+    // "not connected". Prompted once; the system shows a single allow/deny dialog.
+    private fun requestBatteryExemptionIfNeeded() {
+        val powerManager = getSystemService(PowerManager::class.java) ?: return
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+        val prefs = getSharedPreferences("linkit_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("battery_exemption_prompted", false)) return
+        prefs.edit().putBoolean("battery_exemption_prompted", true).apply()
+        runCatching {
+            @Suppress("BatteryLife")
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
+            )
         }
     }
 
@@ -211,8 +237,11 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private var startedAtMillis: Long = 0
     private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
     private var lastClipboardText: String? = null
+    private var networkRefreshJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     init {
+        startNetworkMonitor()
         viewModelScope.launch {
             AndroidDropEvents.events.collect { handleDropEvent(it) }
         }
@@ -272,8 +301,42 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         stopClipboardSync()
+        stopNetworkMonitor()
         discovery.stop()
         super.onCleared()
+    }
+
+    private fun startNetworkMonitor() {
+        val connectivity = getApplication<Application>().getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = scheduleNetworkRefresh("available")
+
+            override fun onLost(network: Network) = scheduleNetworkRefresh("lost")
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                scheduleNetworkRefresh("capabilities")
+            }
+        }
+        networkCallback = callback
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
+            .onFailure { DebugTelemetry.recordEvent("network", "monitor failed: ${it.message}") }
+    }
+
+    private fun stopNetworkMonitor() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        val connectivity = getApplication<Application>().getSystemService(ConnectivityManager::class.java)
+        runCatching { connectivity.unregisterNetworkCallback(callback) }
+    }
+
+    private fun scheduleNetworkRefresh(reason: String) {
+        if (_uiState.value.trustedMac == null) return
+        DebugTelemetry.recordEvent("network", "change detected: $reason")
+        networkRefreshJob?.cancel()
+        networkRefreshJob = viewModelScope.launch {
+            delay(750)
+            discoverAndReconnect(force = true)
+        }
     }
 
     fun setMacIp(value: String) {

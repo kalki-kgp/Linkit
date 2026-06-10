@@ -8,6 +8,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -22,6 +26,9 @@ import kotlinx.coroutines.launch
 class LinkitReceiverService : Service() {
     private var receiver: AndroidDropReceiver? = null
     private var presenceJob: Job? = null
+    private var networkRefreshJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
@@ -30,6 +37,7 @@ class LinkitReceiverService : Service() {
         DebugTelemetry.serviceStarted("LinkitReceiverService")
         ensureChannel()
         startForegroundWithNotification(currentStatus("Listening for Mac drops"))
+        acquireWifiLock()
         val identityStore = IdentityStore(applicationContext)
         val active = AndroidDropReceiver(applicationContext, identityStore) { event ->
             AndroidDropEvents.publish(event)
@@ -38,6 +46,7 @@ class LinkitReceiverService : Service() {
         active.start()
         receiver = active
         startPresenceRefresh(identityStore)
+        startNetworkMonitor(identityStore)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -57,14 +66,46 @@ class LinkitReceiverService : Service() {
     override fun onDestroy() {
         presenceJob?.cancel()
         presenceJob = null
+        networkRefreshJob?.cancel()
+        networkRefreshJob = null
+        stopNetworkMonitor()
         receiver?.stop()
         receiver = null
+        releaseWifiLock()
         serviceScope.cancel()
         DebugTelemetry.serviceStopped("LinkitReceiverService")
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // Keeps the Wi-Fi radio reachable while the screen is off so the Mac can still
+    // reach the receiver socket. Only matters during idle/screen-off, which is exactly
+    // when the radio would otherwise drop into power-save and the Mac would see "offline".
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        } else {
+            @Suppress("DEPRECATION")
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        val lock = wifi.createWifiLock(mode, "linkit:receiver").apply {
+            setReferenceCounted(false)
+        }
+        runCatching { lock.acquire() }
+            .onSuccess {
+                wifiLock = lock
+                DebugTelemetry.recordEvent("fgs", "wifi lock acquired")
+            }
+            .onFailure { DebugTelemetry.recordEvent("fgs", "wifi lock failed: ${it.message}") }
+    }
+
+    private fun releaseWifiLock() {
+        runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
+        wifiLock = null
+    }
 
     private fun startForegroundWithNotification(text: String) {
         val notification = buildNotification(text)
@@ -85,23 +126,59 @@ class LinkitReceiverService : Service() {
         presenceJob = serviceScope.launch {
             val client = LinkitClient()
             while (true) {
-                identityStore.trustedMac()?.let { mac ->
-                    runCatching {
-                        client.verifyMacEndpoint(mac)
-                        client.registerReceiver(
-                            mac = mac,
-                            identityStore = identityStore,
-                            receivePort = AndroidDropReceiver.PORT,
-                            batteryPercent = BatteryStatus.percent(applicationContext)
-                        )
-                    }.onSuccess {
-                        DebugTelemetry.recordEvent("presence", "receiver registration refreshed")
-                    }.onFailure { error ->
-                        updateNotification("Waiting for Mac")
-                        DebugTelemetry.recordEvent("presence", "receiver registration failed: ${error.message}")
-                    }
-                }
+                refreshMacRegistration(identityStore, client, source = "periodic")
                 delay(20_000)
+            }
+        }
+    }
+
+    private fun startNetworkMonitor(identityStore: IdentityStore) {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = scheduleNetworkRefresh(identityStore, "available")
+
+            override fun onLost(network: Network) = scheduleNetworkRefresh(identityStore, "lost")
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                scheduleNetworkRefresh(identityStore, "capabilities")
+            }
+        }
+        networkCallback = callback
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
+            .onFailure { DebugTelemetry.recordEvent("network", "receiver monitor failed: ${it.message}") }
+    }
+
+    private fun stopNetworkMonitor() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        runCatching { connectivity.unregisterNetworkCallback(callback) }
+    }
+
+    private fun scheduleNetworkRefresh(identityStore: IdentityStore, reason: String) {
+        DebugTelemetry.recordEvent("network", "receiver change detected: $reason")
+        networkRefreshJob?.cancel()
+        networkRefreshJob = serviceScope.launch {
+            delay(750)
+            refreshMacRegistration(identityStore, LinkitClient(), source = "network:$reason")
+        }
+    }
+
+    private suspend fun refreshMacRegistration(identityStore: IdentityStore, client: LinkitClient, source: String) {
+        identityStore.trustedMac()?.let { mac ->
+            runCatching {
+                client.verifyMacEndpoint(mac)
+                client.registerReceiver(
+                    mac = mac,
+                    identityStore = identityStore,
+                    receivePort = AndroidDropReceiver.PORT,
+                    batteryPercent = BatteryStatus.percent(applicationContext)
+                )
+            }.onSuccess {
+                DebugTelemetry.recordEvent("presence", "receiver registration refreshed ($source)")
+            }.onFailure { error ->
+                updateNotification("Waiting for Mac")
+                DebugTelemetry.recordEvent("presence", "receiver registration failed ($source): ${error.message}")
             }
         }
     }

@@ -67,6 +67,8 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 
 - Android remembers the paired Mac across Wi-Fi/hotspot toggles.
 - On app open/resume, Android filters Bonjour for the paired Mac name, then verifies the candidate with signed Mac identity proof (`POST /v1/identity/proof`) before updating the stored IP/port and re-registering. No re-scan of the QR is required.
+- Android `ConnectivityManager` callbacks run the same signed discovery/re-register path after Wi-Fi/hotspot/default-network changes.
+- macOS `NWPathMonitor` callbacks refresh the displayed local IP and force a signed Android status probe after network path changes.
 - A **Reconnect** button on the device card runs the same flow on demand.
 - `MacPresence.touch()` fires on every successful Android → Mac signed request (register, action, finalize), so the UI cannot get stuck in "offline" right after a successful action.
 

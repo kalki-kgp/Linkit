@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
@@ -62,6 +63,7 @@ class AndroidDropReceiver(
     private val sessions = ConcurrentHashMap<String, DropSession>()
     private val nonceCache = AndroidNonceCache()
     private val random = SecureRandom()
+    private val powerManager by lazy { context.getSystemService(Context.POWER_SERVICE) as? PowerManager }
     @Volatile private var serverSocket: ServerSocket? = null
 
     fun start() {
@@ -272,6 +274,13 @@ class AndroidDropReceiver(
         session.status = "uploading"
         val digest = MessageDigest.getInstance("SHA-256")
         var received = 0L
+        // Pin the CPU only for the duration of the actual byte stream so a screen-off
+        // Doze window can't suspend the transfer midway. Released in finally; the timeout
+        // is a safety net if the connection stalls.
+        val wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "linkit:receive-upload")?.apply {
+            setReferenceCounted(false)
+            runCatching { acquire(15 * 60 * 1000L) }
+        }
         try {
             FileOutputStream(session.tempFile).use { output ->
                 val buffer = ByteArray(1024 * 1024)
@@ -310,6 +319,8 @@ class AndroidDropReceiver(
             session.error = "upload_io_failed"
             session.tempFile.delete()
             throw error
+        } finally {
+            runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
         }
     }
 
