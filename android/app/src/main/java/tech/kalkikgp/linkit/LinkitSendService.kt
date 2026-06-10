@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -20,7 +21,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.IOException
-import java.io.File
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.max
@@ -86,7 +86,6 @@ class LinkitSendService : Service() {
     private suspend fun sendOne(mac: TrustedMac, uri: Uri) {
         val file = runCatching { contentResolver.loadPickedFile(uri) }.getOrElse { error ->
             postCompletionNotification("Linkit", "Could not read shared item: ${error.message ?: "unknown"}", success = false)
-            deleteCachedShare(uri)
             return
         }
         val startedAt = SystemClock.elapsedRealtime()
@@ -144,8 +143,6 @@ class LinkitSendService : Service() {
             recordFailure(mac, file, http.message)
         } catch (error: Throwable) {
             recordFailure(mac, file, error.message ?: "Send failed")
-        } finally {
-            deleteCachedShare(uri)
         }
     }
 
@@ -262,25 +259,20 @@ class LinkitSendService : Service() {
         return if (index == 0) "${bytes} B" else "%.1f %s".format(value, units[index])
     }
 
-    private fun deleteCachedShare(uri: Uri) {
-        val path = uri.path ?: return
-        val cacheRoot = File(cacheDir, "linkit-shares").absolutePath
-        val file = File(path)
-        if (file.absolutePath.startsWith(cacheRoot)) {
-            runCatching { file.delete() }
-        }
-    }
-
     companion object {
         private const val CHANNEL_ID = "linkit_sender"
         private const val CHANNEL_RESULT_ID = "linkit_sender_result"
         private const val PROGRESS_NOTIFICATION_ID = 4272
-        private const val EXTRA_CACHE_PATHS = "tech.kalkikgp.linkit.extra.CACHE_PATHS"
+        private const val EXTRA_CONTENT_URIS = "tech.kalkikgp.linkit.extra.CONTENT_URIS"
 
-        fun enqueueCached(context: Context, files: List<File>) {
-            if (files.isEmpty()) return
+        fun enqueue(context: Context, uris: List<Uri>) {
+            if (uris.isEmpty()) return
             val intent = Intent(context, LinkitSendService::class.java).apply {
-                putStringArrayListExtra(EXTRA_CACHE_PATHS, ArrayList(files.map { it.absolutePath }))
+                putParcelableArrayListExtra(EXTRA_CONTENT_URIS, ArrayList(uris))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = ClipData.newUri(context.contentResolver, "linkit_share", uris.first()).apply {
+                    uris.drop(1).forEach { addItem(ClipData.Item(it)) }
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -290,8 +282,12 @@ class LinkitSendService : Service() {
         }
 
         private fun Intent.extractUris(): List<Uri> {
-            val cachePaths = getStringArrayListExtra(EXTRA_CACHE_PATHS).orEmpty()
-            return cachePaths.map { Uri.fromFile(File(it)) }
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                getParcelableArrayListExtra(EXTRA_CONTENT_URIS, Uri::class.java).orEmpty()
+            } else {
+                @Suppress("DEPRECATION")
+                getParcelableArrayListExtra<Uri>(EXTRA_CONTENT_URIS).orEmpty()
+            }
         }
     }
 }
