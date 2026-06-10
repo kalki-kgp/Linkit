@@ -42,7 +42,7 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 
 **Reconnect after network changes** — when Wi-Fi or hotspot is toggled, the Android app re-discovers the paired Mac via Bonjour on next open or via an in-app **Reconnect** button. Bonjour only supplies a candidate address; Android verifies it with a signed Mac identity proof before saving it. No re-scanning the QR.
 
-**Bidirectional presence** — both sides know when the peer goes away. The Mac probes Android every ~30 s; Android actively proves the Mac before marking it offline after ~90 s of silence. The UI on each device reflects the same connection state.
+**Bidirectional presence** — both sides know when the peer goes away. The Mac probes Android every ~30 s; Android refreshes its Mac registration in the background and actively proves the Mac before marking it offline after ~45 s of silence. The UI on each device reflects the same connection state.
 
 **Same local channel, either direction, within the operating-system privacy rules. That's it.**
 

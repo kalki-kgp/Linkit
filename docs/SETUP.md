@@ -71,7 +71,7 @@ If you toggle Wi-Fi, switch SSIDs, or turn the phone hotspot on/off, the paired 
 - On app open or resume, Android runs a 5-second Bonjour query filtered by the paired Mac's name, verifies the candidate with Mac identity proof, then updates the stored IP/port before re-registering its receiver.
 - The device card on Home shows **Paired, offline** with a **Reconnect** button whenever the Mac stops responding. Tap it to run the same flow on demand.
 
-Both sides converge on the same connection state. The Mac probes Android every ~30 s with a signed `GET /v1/devices/self/status`; after ~90 s of silence, Android actively proves the Mac endpoint before marking it offline.
+Both sides converge on the same connection state. The Mac probes Android every ~30 s with a signed `GET /v1/devices/self/status`; Android refreshes its Mac registration in the background and, after ~45 s of silence, actively proves the Mac endpoint before marking it offline.
 
 ## Debug panel (Android)
 

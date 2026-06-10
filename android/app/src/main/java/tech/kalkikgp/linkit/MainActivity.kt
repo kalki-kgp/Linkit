@@ -140,10 +140,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (IdentityStore(applicationContext).trustedMac() != null &&
-            !linkitViewModel.uiState.value.isConnectedToMac
-        ) {
-            linkitViewModel.discoverAndReconnect()
+        if (IdentityStore(applicationContext).trustedMac() != null) {
+            linkitViewModel.discoverAndReconnect(force = true)
         }
     }
 
@@ -243,13 +241,20 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 val trustedMac = state.trustedMac ?: continue
                 val lastSeen = MacPresence.lastSeenMillis.value ?: continue
                 val ageMs = System.currentTimeMillis() - lastSeen
-                if (ageMs > 90_000) {
+                if (ageMs > 45_000) {
                     val stillReachable = withTimeoutOrNull(10_000) {
-                        runCatching { client.verifyMacEndpoint(trustedMac) }.isSuccess
+                        runCatching {
+                            client.verifyMacEndpoint(trustedMac)
+                            client.registerReceiver(
+                                mac = trustedMac,
+                                identityStore = identityStore,
+                                receivePort = AndroidDropReceiver.PORT,
+                                batteryPercent = BatteryStatus.percent(getApplication())
+                            )
+                        }.isSuccess
                     } == true
                     if (stillReachable) {
-                        MacPresence.touch()
-                        DebugTelemetry.recordEvent("presence", "kept online after active Mac proof (last seen ${ageMs / 1000}s ago)")
+                        DebugTelemetry.recordEvent("presence", "renewed Mac registration after active proof (last seen ${ageMs / 1000}s ago)")
                         continue
                     }
                     DebugTelemetry.recordEvent("presence", "demoted to offline after failed Mac proof (last seen ${ageMs / 1000}s ago)")
@@ -405,9 +410,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private var reconnectJob: Job? = null
 
-    fun discoverAndReconnect() {
+    fun discoverAndReconnect(force: Boolean = false) {
         val mac = _uiState.value.trustedMac ?: return
-        if (_uiState.value.isConnectedToMac || _uiState.value.isPairing) return
+        if (_uiState.value.isPairing) return
+        if (!force && _uiState.value.isConnectedToMac) return
         if (reconnectJob?.isActive == true) return
         _uiState.update {
             it.copy(

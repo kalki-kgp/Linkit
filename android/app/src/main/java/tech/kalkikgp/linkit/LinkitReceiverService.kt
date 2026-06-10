@@ -13,12 +13,15 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class LinkitReceiverService : Service() {
     private var receiver: AndroidDropReceiver? = null
+    private var presenceJob: Job? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
@@ -34,6 +37,7 @@ class LinkitReceiverService : Service() {
         }
         active.start()
         receiver = active
+        startPresenceRefresh(identityStore)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -51,6 +55,8 @@ class LinkitReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        presenceJob?.cancel()
+        presenceJob = null
         receiver?.stop()
         receiver = null
         serviceScope.cancel()
@@ -72,6 +78,32 @@ class LinkitReceiverService : Service() {
     private fun updateNotification(text: String) {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    private fun startPresenceRefresh(identityStore: IdentityStore) {
+        presenceJob?.cancel()
+        presenceJob = serviceScope.launch {
+            val client = LinkitClient()
+            while (true) {
+                identityStore.trustedMac()?.let { mac ->
+                    runCatching {
+                        client.verifyMacEndpoint(mac)
+                        client.registerReceiver(
+                            mac = mac,
+                            identityStore = identityStore,
+                            receivePort = AndroidDropReceiver.PORT,
+                            batteryPercent = BatteryStatus.percent(applicationContext)
+                        )
+                    }.onSuccess {
+                        DebugTelemetry.recordEvent("presence", "receiver registration refreshed")
+                    }.onFailure { error ->
+                        updateNotification("Waiting for Mac")
+                        DebugTelemetry.recordEvent("presence", "receiver registration failed: ${error.message}")
+                    }
+                }
+                delay(20_000)
+            }
+        }
     }
 
     private fun buildNotification(text: String): Notification {
