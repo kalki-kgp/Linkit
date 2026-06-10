@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import LinkitMacCore
+import Network
 import ServiceManagement
 import UserNotifications
 
@@ -43,6 +44,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var presenceTimer: Timer?
     private var presenceFailureCounts: [String: Int] = [:]
     private let presenceFailureThreshold = 3
+    private var networkMonitor: NWPathMonitor?
+    private let networkMonitorQueue = DispatchQueue(label: "Linkit.NetworkMonitor")
+    private var networkRefreshWorkItem: DispatchWorkItem?
+    private var lastNetworkPathSignature: String?
     private var lastClipboardText: String?
     private var lastClipboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastTrustedSignature: String = ""
@@ -85,6 +90,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         startActionObserver()
         startDeviceObserver()
         startPresenceMonitor()
+        startNetworkMonitor()
     }
 
     private func refreshStatusButton() {
@@ -614,6 +620,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         deviceObserver = nil
         presenceTimer?.invalidate()
         presenceTimer = nil
+        networkRefreshWorkItem?.cancel()
+        networkRefreshWorkItem = nil
+        networkMonitor?.cancel()
+        networkMonitor = nil
         NSApp.terminate(nil)
     }
 
@@ -965,7 +975,39 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         presenceTimer = timer
     }
 
-    private func runPresenceSweep() {
+    private func startNetworkMonitor() {
+        networkMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        networkMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.handleNetworkChange(path)
+            }
+        }
+        monitor.start(queue: networkMonitorQueue)
+    }
+
+    private func handleNetworkChange(_ path: NWPath) {
+        let signature = [
+            "\(path.status)",
+            path.availableInterfaces.map { "\($0.type)" }.sorted().joined(separator: ",")
+        ].joined(separator: "|")
+        guard signature != lastNetworkPathSignature else { return }
+        lastNetworkPathSignature = signature
+
+        fputs("Linkit network changed: \(signature)\n", stderr)
+        refreshStatusButton()
+        refreshMenu()
+
+        networkRefreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.runPresenceSweep(force: true)
+        }
+        networkRefreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: workItem)
+    }
+
+    private func runPresenceSweep(force: Bool = false) {
         guard let app else { return }
         let connected = app.connectedDevices()
         if connected.isEmpty {
@@ -979,7 +1021,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let stalenessThreshold: TimeInterval = 30
         for device in connected {
             guard let lastSeen = formatter.date(from: device.lastSeenAt) else { continue }
-            guard now.timeIntervalSince(lastSeen) >= stalenessThreshold else { continue }
+            guard force || now.timeIntervalSince(lastSeen) >= stalenessThreshold else { continue }
             let deviceId = device.deviceId
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 do {
@@ -990,6 +1032,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 } catch {
                     DispatchQueue.main.async {
                         guard let self else { return }
+                        if force {
+                            self.presenceFailureCounts[deviceId] = 0
+                            app.disconnectDevice(deviceId)
+                            self.refreshStatusButton()
+                            self.refreshMenu()
+                            return
+                        }
                         let next = (self.presenceFailureCounts[deviceId] ?? 0) + 1
                         self.presenceFailureCounts[deviceId] = next
                         if next >= self.presenceFailureThreshold {

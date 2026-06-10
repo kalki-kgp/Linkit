@@ -143,20 +143,44 @@ public final class LinkitReceiverApp {
     }
 
     private func firstConnectedAndroid() throws -> TrustedDevice {
-        guard let connected = connections.allConnected().first(where: { $0.platform.lowercased() == "android" }),
-              let trusted = trustStore.trustedDevice(id: connected.deviceId)
-        else {
-            throw HTTPFailure.badRequest("missing_android_receiver", "Connect your Android first by opening Linkit or scanning the QR, then drop the file again")
+        if let connected = connections.allConnected().first(where: { $0.platform.lowercased() == "android" }),
+           let trusted = trustStore.trustedDevice(id: connected.deviceId) {
+            return TrustedDevice(
+                deviceId: trusted.deviceId,
+                deviceName: trusted.deviceName,
+                platform: trusted.platform,
+                publicKey: trusted.publicKey,
+                pairedAt: trusted.pairedAt,
+                lastKnownHost: connected.host,
+                receivePort: connected.receivePort
+            )
         }
-        return TrustedDevice(
-            deviceId: trusted.deviceId,
-            deviceName: trusted.deviceName,
-            platform: trusted.platform,
-            publicKey: trusted.publicKey,
-            pairedAt: trusted.pairedAt,
-            lastKnownHost: connected.host,
-            receivePort: connected.receivePort
-        )
+        // The presence sweep may have marked the phone disconnected during a screen-off
+        // Wi-Fi lull even though it can still be reached. Probe its last-known address and,
+        // if it answers, treat it as connected again instead of failing the drop outright.
+        if let revived = reviveTrustedAndroid() {
+            return revived
+        }
+        throw HTTPFailure.badRequest("missing_android_receiver", "Connect your Android first by opening Linkit or scanning the QR, then drop the file again")
+    }
+
+    private func reviveTrustedAndroid() -> TrustedDevice? {
+        let candidates = trustStore.allDevices().filter {
+            $0.platform.lowercased() == "android" && $0.lastKnownHost != nil && $0.receivePort != nil
+        }
+        for candidate in candidates {
+            guard let host = candidate.lastKnownHost, let port = candidate.receivePort else { continue }
+            guard let status = try? outgoingClient.status(of: candidate) else { continue }
+            _ = connections.markConnected(
+                device: candidate,
+                host: host,
+                receivePort: port,
+                batteryPercent: status.batteryPercent
+            )
+            logger.info("revived Android \(candidate.deviceId) at \(host):\(port) for outgoing send")
+            return candidate
+        }
+        return nil
     }
 
     public func recentTransfers(limit: Int = 10) -> [TransferHistoryEntry] {
@@ -328,6 +352,7 @@ final class HTTPServer {
                 receivePort: update.receivePort,
                 batteryPercent: update.batteryPercent
             )
+            trustStore.updateEndpoint(deviceId: deviceId, host: remoteHost, receivePort: update.receivePort)
             return jsonResponse(status: 200, body: connectionResponse(connected, status: "connected"))
         }
 
