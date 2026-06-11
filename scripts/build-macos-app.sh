@@ -62,6 +62,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>$UPDATE_MANIFEST_URL_XML</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Linkit uses Bluetooth to route phone call audio to your Mac speakers and microphone.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Linkit receives files from your paired Android device on your local network.</string>
   <key>NSBonjourServices</key>

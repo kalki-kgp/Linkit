@@ -58,6 +58,8 @@ class AndroidDropReceiver(
     private val onEvent: (AndroidDropEvent) -> Unit
 ) {
     private val history = TransferHistoryStore.get(context)
+    private val phoneController = AndroidPhoneController(context)
+    private val bluetoothPairAssist = BluetoothPairAssist(context)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = ConcurrentHashMap<String, DropSession>()
@@ -128,7 +130,7 @@ class AndroidDropReceiver(
                     .put("platform", "android")
                     .put("port", PORT)
                     .put("publicKey", identity.publicKey)
-                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url"))
+                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url").put("phone_control").put("bt_pair"))
             )
         }
 
@@ -184,6 +186,16 @@ class AndroidDropReceiver(
         if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 128 * 1024) {
             throw DropHttpFailure(400, "invalid_action_text", "Action text must be 1 byte to 128 KB")
         }
+        if (type.startsWith("phone_")) {
+            val result = phoneController.handleAction(type, text)
+            onEvent(AndroidDropEvent(phoneStatusLabel(type, result)))
+            return result
+        }
+        if (type == "bt_pair") {
+            val result = bluetoothPairAssist.handleAction(text)
+            onEvent(AndroidDropEvent(bluetoothStatusLabel(result)))
+            return result
+        }
         when (type) {
             "clipboard", "text" -> {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -203,6 +215,24 @@ class AndroidDropReceiver(
             else -> throw DropHttpFailure(400, "unsupported_action", "Action type is not supported")
         }
         return JSONObject().put("status", "ok").put("type", type)
+    }
+
+    private fun phoneStatusLabel(type: String, result: JSONObject): String {
+        return when (type) {
+            "phone_call" -> if (result.optString("mode") == "direct_call") "Calling from Android" else "Opened Android dialer"
+            "phone_answer" -> "Answered Android call"
+            "phone_decline" -> "Declined Android call"
+            "phone_hangup" -> "Ended Android call"
+            else -> "Phone command handled"
+        }
+    }
+
+    private fun bluetoothStatusLabel(result: JSONObject): String {
+        return when (result.optString("mode")) {
+            "already_paired" -> "Call audio on Mac is ready"
+            "bonding" -> "Confirm Bluetooth pairing on your phone"
+            else -> "Bluetooth pairing started"
+        }
     }
 
     private fun createTransfer(json: JSONObject, deviceId: String): JSONObject {
@@ -720,7 +750,7 @@ private data class DropSession(
     var finalizeResponse: JSONObject? = null
 )
 
-private class DropHttpFailure(val status: Int, val error: String, override val message: String) : Exception(message)
+class DropHttpFailure(val status: Int, val error: String, override val message: String) : Exception(message)
 
 private class AndroidNonceCache(private val ttlMillis: Long = 120_000, private val maxEntries: Int = 4096) {
     private val entries = ConcurrentHashMap<String, Long>()

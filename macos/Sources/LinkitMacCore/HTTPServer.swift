@@ -36,7 +36,10 @@ public final class LinkitReceiverApp {
     private let pairingManager: PairingManager
     private let outgoingClient: OutgoingTransferClient
 
-    public init(configuration: ReceiverConfiguration = ReceiverConfiguration()) throws {
+    public init(
+        configuration: ReceiverConfiguration = ReceiverConfiguration(),
+        bluetoothAddressProvider: @escaping () -> String? = { nil }
+    ) throws {
         self.configuration = configuration
         self.devToken = try LinkitRandom.token()
         self.dropFolder = configuration.destination
@@ -67,7 +70,8 @@ public final class LinkitReceiverApp {
             pairingManager: pairingManager,
             store: store,
             history: history,
-            logger: logger
+            logger: logger,
+            bluetoothAddressProvider: bluetoothAddressProvider
         )
     }
 
@@ -205,6 +209,7 @@ final class HTTPServer {
     private let store: TransferStore
     private let history: TransferHistoryStore
     private let logger: LinkitLogger
+    private let bluetoothAddressProvider: () -> String?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -218,7 +223,8 @@ final class HTTPServer {
         pairingManager: PairingManager,
         store: TransferStore,
         history: TransferHistoryStore,
-        logger: LinkitLogger
+        logger: LinkitLogger,
+        bluetoothAddressProvider: @escaping () -> String? = { nil }
     ) {
         self.port = port
         self.token = token
@@ -231,6 +237,7 @@ final class HTTPServer {
         self.store = store
         self.history = history
         self.logger = logger
+        self.bluetoothAddressProvider = bluetoothAddressProvider
     }
 
     func run() throws {
@@ -319,7 +326,8 @@ final class HTTPServer {
                     port: port,
                     publicKey: identity.publicKey,
                     serviceType: "_linkit._tcp.local.",
-                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url"]
+                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url", "phone_state", "call_audio"],
+                    bluetoothAddress: bluetoothAddressProvider()
                 )
             )
         }
@@ -523,7 +531,7 @@ final class HTTPServer {
 
     private func handleAction(_ action: LinkitActionRequest, senderDeviceId: String?) throws -> LinkitActionResponse {
         let normalizedType = action.type.lowercased()
-        guard ["clipboard", "text", "open_url"].contains(normalizedType) else {
+        guard ["clipboard", "text", "open_url", "phone_state"].contains(normalizedType) else {
             throw HTTPFailure.badRequest("unsupported_action", "Action type is not supported")
         }
         guard !action.text.isEmpty, action.text.utf8.count <= 128 * 1024 else {
@@ -533,6 +541,9 @@ final class HTTPServer {
             guard let url = URL(string: action.text), ["http", "https"].contains(url.scheme?.lowercased()) else {
                 throw HTTPFailure.badRequest("invalid_url", "Only http and https URLs can be opened")
             }
+        }
+        if normalizedType == "phone_state" {
+            try validatePhoneStatePayload(action.text)
         }
         NotificationCenter.default.post(
             name: .linkitActionReceived,
@@ -545,6 +556,22 @@ final class HTTPServer {
         )
         logger.info("received action type=\(normalizedType) bytes=\(action.text.utf8.count)")
         return LinkitActionResponse(status: "ok", type: normalizedType)
+    }
+
+    private func validatePhoneStatePayload(_ text: String) throws {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let state = object["state"] as? String,
+              ["idle", "ringing", "active"].contains(state)
+        else {
+            throw HTTPFailure.badRequest("invalid_phone_state", "Phone state payload is invalid")
+        }
+        if let number = object["number"] as? String, number.utf8.count > 64 {
+            throw HTTPFailure.badRequest("invalid_phone_state", "Phone state number is too long")
+        }
+        if let name = object["name"] as? String, name.utf8.count > 256 {
+            throw HTTPFailure.badRequest("invalid_phone_state", "Phone state name is too long")
+        }
     }
 
     private func identityProof(for request: IdentityProofRequest) throws -> IdentityProofResponse {

@@ -64,6 +64,19 @@ All text/link handoff uses signed local requests over the paired LAN connection.
 
 Android 10+ blocks ordinary background apps from reading clipboard contents unless the app is focused or is the active input method. Linkit's Android → Mac automatic sync is therefore foreground-only by design. For background Android copies, use the Android share sheet or open Linkit and tap **Send Clipboard**.
 
+## Phone control
+
+Open Android Linkit and tap **Enable phone controls** in the Phone section. Grant the requested phone permissions if you want incoming-call mirror and answer/hang-up from the Mac.
+
+Mac menu bar:
+
+- **Call Number on Android...** starts a phone call on Android. If Android direct-call permission is missing, Linkit opens the Android dialer with the number filled in.
+- **Answer Android Call** answers a ringing Android call.
+- **Decline Android Call** declines a ringing Android call.
+- **Hang Up Android Call** ends an active Android call.
+
+Incoming Android calls can show an Answer / Decline / Dismiss prompt on the Mac. This is call control only; cellular call audio remains on Android.
+
 ## Reconnect after network change
 
 If you toggle Wi-Fi, switch SSIDs, or turn the phone hotspot on/off, the paired Mac's IP may change. The Android app handles this without re-pairing:

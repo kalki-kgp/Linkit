@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 
 class LinkitReceiverService : Service() {
     private var receiver: AndroidDropReceiver? = null
+    private var phoneCallBridge: PhoneCallBridge? = null
     private var presenceJob: Job? = null
     private var networkRefreshJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -45,6 +46,9 @@ class LinkitReceiverService : Service() {
         }
         active.start()
         receiver = active
+        phoneCallBridge = PhoneCallBridge(applicationContext, identityStore, LinkitClient(), serviceScope).also {
+            it.start()
+        }
         startPresenceRefresh(identityStore)
         startNetworkMonitor(identityStore)
     }
@@ -64,6 +68,8 @@ class LinkitReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        phoneCallBridge?.stop()
+        phoneCallBridge = null
         presenceJob?.cancel()
         presenceJob = null
         networkRefreshJob?.cancel()
