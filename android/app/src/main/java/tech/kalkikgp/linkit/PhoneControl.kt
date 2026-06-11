@@ -1,11 +1,14 @@
 package tech.kalkikgp.linkit
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
@@ -18,12 +21,22 @@ import org.json.JSONObject
 data class PhoneControlPermissionStatus(
     val canWatchCalls: Boolean,
     val canPlaceDirectCalls: Boolean,
-    val canControlCalls: Boolean
+    val canControlCalls: Boolean,
+    val canSeeNumbers: Boolean,
+    val canResolveContacts: Boolean
 ) {
     val summary: String
         get() = when {
-            canWatchCalls && canPlaceDirectCalls && canControlCalls -> "Phone controls enabled"
-            canWatchCalls -> "Incoming call mirror enabled; call actions need permission"
+            canWatchCalls && canPlaceDirectCalls && canControlCalls && canSeeNumbers && canResolveContacts ->
+                "Phone controls and caller ID enabled"
+            canWatchCalls && canPlaceDirectCalls && canControlCalls ->
+                "Phone controls enabled; grant call log and contacts for caller name"
+            canWatchCalls && canSeeNumbers && canResolveContacts ->
+                "Incoming call mirror with caller ID"
+            canWatchCalls && canSeeNumbers ->
+                "Incoming call mirror with numbers; grant contacts for names"
+            canWatchCalls ->
+                "Incoming call mirror enabled; grant call log for caller number"
             else -> "Phone controls need permission"
         }
 }
@@ -31,6 +44,8 @@ data class PhoneControlPermissionStatus(
 object PhonePermissions {
     val requested = arrayOf(
         Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.READ_CALL_LOG,
+        Manifest.permission.READ_CONTACTS,
         Manifest.permission.CALL_PHONE,
         Manifest.permission.ANSWER_PHONE_CALLS
     )
@@ -42,7 +57,9 @@ object PhonePermissions {
         return PhoneControlPermissionStatus(
             canWatchCalls = granted(Manifest.permission.READ_PHONE_STATE),
             canPlaceDirectCalls = granted(Manifest.permission.CALL_PHONE),
-            canControlCalls = granted(Manifest.permission.ANSWER_PHONE_CALLS)
+            canControlCalls = granted(Manifest.permission.ANSWER_PHONE_CALLS),
+            canSeeNumbers = granted(Manifest.permission.READ_CALL_LOG),
+            canResolveContacts = granted(Manifest.permission.READ_CONTACTS)
         )
     }
 }
@@ -65,6 +82,31 @@ object PhoneNumberPolicy {
         }
         val digitCount = normalized.count(Char::isDigit)
         return normalized.takeIf { digitCount in 2..15 }
+    }
+}
+
+object PhoneContactLookup {
+    fun displayNameForNumber(context: Context, number: String): String? {
+        if (!PhonePermissions.status(context).canResolveContacts) return null
+        val uri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+            Uri.encode(number)
+        )
+        return runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(0)?.takeIf { it.isNotBlank() }
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()
     }
 }
 
@@ -130,7 +172,22 @@ class PhoneCallBridge(
     private val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
     private var callback: TelephonyCallback? = null
     private var legacyListener: PhoneStateListener? = null
+    private var phoneStateReceiver: BroadcastReceiver? = null
     private var lastPayload: String? = null
+    private var currentCallState: Int = TelephonyManager.CALL_STATE_IDLE
+    private var lastIncomingNumber: String? = null
+    private val contactNameCache = mutableMapOf<String, String?>()
+
+    private val incomingNumberReceiver = object : BroadcastReceiver() {
+        override fun onReceive(receiverContext: Context?, intent: Intent?) {
+            if (intent?.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
+            val incoming = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
+                ?.takeIf { it.isNotBlank() }
+                ?: return
+            lastIncomingNumber = incoming
+            publishState(currentCallState, lastIncomingNumber)
+        }
+    }
 
     fun start() {
         if (!PhonePermissions.status(context).canWatchCalls) {
@@ -140,7 +197,7 @@ class PhoneCallBridge(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val next = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
                 override fun onCallStateChanged(state: Int) {
-                    publishState(state, null)
+                    publishState(state, lastIncomingNumber)
                 }
             }
             telephonyManager.registerTelephonyCallback(context.mainExecutor, next)
@@ -150,12 +207,22 @@ class PhoneCallBridge(
             val next = object : PhoneStateListener() {
                 @Deprecated("Deprecated by platform")
                 override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-                    publishState(state, phoneNumber?.takeIf { it.isNotBlank() })
+                    phoneNumber?.takeIf { it.isNotBlank() }?.let { lastIncomingNumber = it }
+                    publishState(state, phoneNumber?.takeIf { it.isNotBlank() } ?: lastIncomingNumber)
                 }
             }
             @Suppress("DEPRECATION")
             telephonyManager.listen(next, PhoneStateListener.LISTEN_CALL_STATE)
             legacyListener = next
+        }
+        if (PhonePermissions.status(context).canSeeNumbers) {
+            val filter = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(incomingNumberReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(incomingNumberReceiver, filter)
+            }
+            phoneStateReceiver = incomingNumberReceiver
         }
         DebugTelemetry.recordEvent("phone", "call bridge started")
     }
@@ -166,20 +233,40 @@ class PhoneCallBridge(
         }
         @Suppress("DEPRECATION")
         legacyListener?.let { telephonyManager.listen(it, PhoneStateListener.LISTEN_NONE) }
+        phoneStateReceiver?.let { receiver ->
+            runCatching { context.unregisterReceiver(receiver) }
+        }
         callback = null
         legacyListener = null
+        phoneStateReceiver = null
+        currentCallState = TelephonyManager.CALL_STATE_IDLE
+        lastIncomingNumber = null
+        contactNameCache.clear()
+        lastPayload = null
     }
 
     private fun publishState(callState: Int, number: String?) {
+        currentCallState = callState
         val state = when (callState) {
             TelephonyManager.CALL_STATE_RINGING -> "ringing"
             TelephonyManager.CALL_STATE_OFFHOOK -> "active"
             else -> "idle"
         }
+        if (state == "idle") {
+            lastIncomingNumber = null
+            contactNameCache.clear()
+        }
+        val effectiveNumber = number?.takeIf { it.isNotBlank() } ?: lastIncomingNumber
+        val contactName = effectiveNumber?.let { resolvedNumber ->
+            contactNameCache.getOrPut(resolvedNumber) {
+                PhoneContactLookup.displayNameForNumber(context, resolvedNumber)
+            }
+        }
         val permissions = PhonePermissions.status(context)
         val payload = JSONObject()
             .put("state", state)
-            .put("number", number ?: JSONObject.NULL)
+            .put("number", effectiveNumber ?: JSONObject.NULL)
+            .put("name", contactName ?: JSONObject.NULL)
             .put("timestampMillis", System.currentTimeMillis())
             .put("canAnswer", permissions.canControlCalls)
             .put("canEnd", permissions.canControlCalls && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)

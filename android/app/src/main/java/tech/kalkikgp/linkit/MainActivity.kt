@@ -219,14 +219,16 @@ data class LinkitUiState(
     val phoneControlStatus: PhoneControlPermissionStatus = PhoneControlPermissionStatus(
         canWatchCalls = false,
         canPlaceDirectCalls = false,
-        canControlCalls = false
+        canControlCalls = false,
+        canSeeNumbers = false,
+        canResolveContacts = false
     ),
     val status: String = "Ready",
     val error: String? = null,
     val savedPath: String? = null,
     val tokenRejected: Boolean = false,
     val networkHint: String? = null,
-    val clipboardSyncEnabled: Boolean = false
+    val clipboardSyncEnabled: Boolean = true
 )
 
 class LinkitViewModel(application: Application) : AndroidViewModel(application) {
@@ -318,6 +320,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+        startClipboardSync()
     }
 
     override fun onCleared() {
@@ -796,6 +799,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update { it.copy(clipboardSyncEnabled = false, status = "Clipboard sync off") }
             return
         }
+        startClipboardSync()
+        _uiState.update { it.copy(status = "Clipboard sync on", error = null) }
+    }
+
+    private fun startClipboardSync() {
+        if (clipboardListener != null) return
         val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
         lastClipboardText = currentClipboardText()
         val listener = ClipboardManager.OnPrimaryClipChangedListener {
@@ -807,7 +816,7 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
         clipboard.addPrimaryClipChangedListener(listener)
         clipboardListener = listener
-        _uiState.update { it.copy(clipboardSyncEnabled = true, status = "Clipboard sync on", error = null) }
+        _uiState.update { it.copy(clipboardSyncEnabled = true, error = null) }
     }
 
     private fun stopClipboardSync() {
@@ -1593,11 +1602,25 @@ private fun PhoneControlsSection(
                     append(if (status.canPlaceDirectCalls) "On" else "Dialer")
                     append("  ·  Controls: ")
                     append(if (status.canControlCalls) "On" else "Off")
+                    append("  ·  Caller ID: ")
+                    append(
+                        when {
+                            status.canSeeNumbers && status.canResolveContacts -> "On"
+                            status.canSeeNumbers -> "Number only"
+                            else -> "Off"
+                        }
+                    )
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (!status.canWatchCalls || !status.canPlaceDirectCalls || !status.canControlCalls) {
+            if (
+                !status.canWatchCalls ||
+                !status.canPlaceDirectCalls ||
+                !status.canControlCalls ||
+                !status.canSeeNumbers ||
+                !status.canResolveContacts
+            ) {
                 Button(
                     onClick = onEnable,
                     shape = RoundedCornerShape(12.dp),

@@ -26,13 +26,43 @@ private struct LinkitTransferPanelState {
 private struct AndroidPhoneState: Codable, Equatable {
     let state: String
     let number: String?
+    let name: String?
     let timestampMillis: Int64?
     let canAnswer: Bool?
     let canEnd: Bool?
 
     var displayName: String {
-        number?.isEmpty == false ? number! : "Android call"
+        let hasName = name?.isEmpty == false
+        let hasNumber = number?.isEmpty == false
+        if hasName && hasNumber {
+            return "\(name!) (\(number!))"
+        }
+        if hasName {
+            return name!
+        }
+        if hasNumber {
+            return number!
+        }
+        return "Android call"
     }
+
+    var callPanelTitle: String {
+        if let name, !name.isEmpty { return name }
+        if let number, !number.isEmpty { return number }
+        return "Android call"
+    }
+
+    var callPanelSubtitle: String {
+        let hasName = name?.isEmpty == false
+        let hasNumber = number?.isEmpty == false
+        if hasName && hasNumber { return number! }
+        return "Android call"
+    }
+}
+
+private enum LinkitCallPanelMode {
+    case ringing
+    case active
 }
 
 final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
@@ -52,7 +82,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var transferObservers: [NSObjectProtocol] = []
     private var deviceObserver: NSObjectProtocol?
     private var clipboardSyncTimer: Timer?
-    private var clipboardSyncEnabled = false
+    private var clipboardSyncEnabled = true
     private var presenceTimer: Timer?
     private var presenceFailureCounts: [String: Int] = [:]
     private let presenceFailureThreshold = 3
@@ -65,7 +95,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var lastTrustedSignature: String = ""
     private var lastConnectedSignature: String = ""
     private var currentPhoneState: AndroidPhoneState?
-    private var incomingCallAlertVisible = false
+    private var callPanel: LinkitCallPanel?
+    private var callDismissedByUser = false
+    private var callAnsweredFromMac = false
     private var notificationCenter: UNUserNotificationCenter?
     private var appUpdater: MacAppUpdater?
 
@@ -105,6 +137,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         startDeviceObserver()
         startPresenceMonitor()
         startNetworkMonitor()
+        if clipboardSyncEnabled {
+            startClipboardSync()
+        }
     }
 
     private func refreshStatusButton() {
@@ -355,19 +390,27 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc private func toggleClipboardSync() {
         clipboardSyncEnabled.toggle()
         if clipboardSyncEnabled {
-            lastClipboardChangeCount = NSPasteboard.general.changeCount
-            lastClipboardText = currentClipboardText()
-            clipboardSyncTimer?.invalidate()
-            clipboardSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                self?.pollClipboardForSync()
-            }
+            startClipboardSync()
             showTransientIcon(.success, tooltip: "Clipboard sync on")
         } else {
-            clipboardSyncTimer?.invalidate()
-            clipboardSyncTimer = nil
+            stopClipboardSync()
             showTransientIcon(.connected, tooltip: "Clipboard sync off")
         }
         refreshMenu()
+    }
+
+    private func startClipboardSync() {
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        lastClipboardText = currentClipboardText()
+        clipboardSyncTimer?.invalidate()
+        clipboardSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.pollClipboardForSync()
+        }
+    }
+
+    private func stopClipboardSync() {
+        clipboardSyncTimer?.invalidate()
+        clipboardSyncTimer = nil
     }
 
     private func pollClipboardForSync() {
@@ -393,8 +436,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 DispatchQueue.main.async {
                     if self.clipboardSyncEnabled {
                         self.clipboardSyncEnabled = false
-                        self.clipboardSyncTimer?.invalidate()
-                        self.clipboardSyncTimer = nil
+                        self.stopClipboardSync()
                         self.refreshMenu()
                     }
                     self.showTransientIcon(.error, tooltip: "Android action failed")
@@ -1064,43 +1106,51 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard let data = text.data(using: .utf8),
               let state = try? JSONDecoder().decode(AndroidPhoneState.self, from: data)
         else { return }
-        let oldState = currentPhoneState?.state.lowercased()
         currentPhoneState = state
         refreshMenu()
+
+        let panel = ensureCallPanel()
 
         switch state.state.lowercased() {
         case "ringing":
             showTransientIcon(.pairing, tooltip: "Incoming Android call")
-            if oldState != "ringing" {
-                showIncomingCallPrompt(state)
+            if !callDismissedByUser {
+                panel.present(state: state, mode: .ringing)
             }
         case "active":
             showTransientIcon(.connected, tooltip: "Android call active")
+            if panel.isShown || callAnsweredFromMac {
+                panel.present(state: state, mode: .active)
+            }
         default:
-            incomingCallAlertVisible = false
+            callDismissedByUser = false
+            callAnsweredFromMac = false
+            panel.close()
         }
     }
 
-    private func showIncomingCallPrompt(_ state: AndroidPhoneState) {
-        guard !incomingCallAlertVisible else { return }
-        incomingCallAlertVisible = true
-        let alert = NSAlert()
-        alert.messageText = "Incoming Android call"
-        alert.informativeText = state.displayName
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Answer")
-        alert.addButton(withTitle: "Decline")
-        alert.addButton(withTitle: "Dismiss")
-        let result = alert.runModal()
-        incomingCallAlertVisible = false
-        switch result {
-        case .alertFirstButtonReturn:
-            answerAndroidCall()
-        case .alertSecondButtonReturn:
-            declineAndroidCall()
-        default:
-            break
+    private func ensureCallPanel() -> LinkitCallPanel {
+        if let callPanel { return callPanel }
+        let panel = LinkitCallPanel()
+        panel.onAnswer = { [weak self] in
+            guard let self else { return }
+            self.callAnsweredFromMac = true
+            self.answerAndroidCall()
+            if let state = self.currentPhoneState {
+                self.callPanel?.present(state: state, mode: .active)
+            }
         }
+        panel.onDecline = { [weak self] in
+            self?.declineAndroidCall()
+        }
+        panel.onHangup = { [weak self] in
+            self?.hangupAndroidCall()
+        }
+        panel.onDismiss = { [weak self] in
+            self?.callDismissedByUser = true
+        }
+        callPanel = panel
+        return panel
     }
 
     private func startDeviceObserver() {
@@ -1422,6 +1472,283 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         alert.alertStyle = .informational
         alert.runModal()
     }
+}
+
+private final class LinkitCallPanel {
+    private let panel: NSPanel
+    private let contentView: LinkitCallPanelView
+    private var durationTimer: Timer?
+    private var callStartedAt: Date?
+    private(set) var isShown = false
+
+    var onAnswer: (() -> Void)?
+    var onDecline: (() -> Void)?
+    var onHangup: (() -> Void)?
+    var onDismiss: (() -> Void)?
+
+    init() {
+        contentView = LinkitCallPanelView(frame: NSRect(origin: .zero, size: NSSize(width: 340, height: 120)))
+        panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 340, height: 120)),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isMovableByWindowBackground = true
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.contentView = contentView
+
+        contentView.onAnswer = { [weak self] in self?.onAnswer?() }
+        contentView.onDecline = { [weak self] in
+            self?.onDecline?()
+            self?.close()
+        }
+        contentView.onHangup = { [weak self] in self?.onHangup?() }
+        contentView.onDismiss = { [weak self] in
+            self?.onDismiss?()
+            self?.close()
+        }
+    }
+
+    func present(state: AndroidPhoneState, mode: LinkitCallPanelMode) {
+        if mode == .active {
+            if callStartedAt == nil {
+                callStartedAt = Date()
+                startDurationTimer()
+            }
+        } else {
+            stopDurationTimer()
+            callStartedAt = nil
+        }
+        contentView.update(state: state, mode: mode, duration: activeDuration)
+        showIfNeeded()
+    }
+
+    func close() {
+        stopDurationTimer()
+        callStartedAt = nil
+        guard isShown else { return }
+        animateOut { [weak self] in
+            guard let self else { return }
+            self.panel.orderOut(nil)
+            self.isShown = false
+            self.panel.alphaValue = 1
+        }
+    }
+
+    private var activeDuration: TimeInterval {
+        guard let callStartedAt else { return 0 }
+        return Date().timeIntervalSince(callStartedAt)
+    }
+
+    private func showIfNeeded() {
+        guard let screen = NSScreen.main else { return }
+        let margin: CGFloat = 16
+        let size = NSSize(width: 340, height: 120)
+        let targetFrame = NSRect(
+            x: screen.visibleFrame.maxX - size.width - margin,
+            y: screen.visibleFrame.maxY - size.height - margin,
+            width: size.width,
+            height: size.height
+        )
+
+        if isShown {
+            panel.setFrame(targetFrame, display: true)
+            return
+        }
+
+        var startFrame = targetFrame
+        startFrame.origin.x += 40
+        panel.alphaValue = 0
+        panel.setFrame(startFrame, display: false)
+        panel.orderFrontRegardless()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.28
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.panel.animator().setFrame(targetFrame, display: true)
+            self.panel.animator().alphaValue = 1
+        }
+        isShown = true
+    }
+
+    private func animateOut(completion: @escaping () -> Void) {
+        var endFrame = panel.frame
+        endFrame.origin.x += 24
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.panel.animator().alphaValue = 0
+            self.panel.animator().setFrame(endFrame, display: true)
+        }, completionHandler: completion)
+    }
+
+    private func startDurationTimer() {
+        durationTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self, self.isShown else { return }
+            self.contentView.updateDuration(self.activeDuration)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        durationTimer = timer
+    }
+
+    private func stopDurationTimer() {
+        durationTimer?.invalidate()
+        durationTimer = nil
+    }
+}
+
+private final class LinkitCallPanelView: NSVisualEffectView {
+    private let cardView = NSView()
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let dismissButton = NSButton()
+    private let declineButton = NSButton()
+    private let answerButton = NSButton()
+    private let hangupButton = NSButton()
+
+    var onAnswer: (() -> Void)?
+    var onDecline: (() -> Void)?
+    var onHangup: (() -> Void)?
+    var onDismiss: (() -> Void)?
+
+    private var currentMode: LinkitCallPanelMode = .ringing
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    func update(state: AndroidPhoneState, mode: LinkitCallPanelMode, duration: TimeInterval) {
+        currentMode = mode
+        titleLabel.stringValue = state.callPanelTitle
+        subtitleLabel.stringValue = state.callPanelSubtitle
+        statusLabel.stringValue = mode == .ringing ? "Incoming call..." : formatCallDuration(duration)
+
+        let accent: NSColor = mode == .ringing ? .systemGreen : .systemBlue
+        cardView.layer?.borderColor = accent.withAlphaComponent(0.55).cgColor
+        iconView.layer?.backgroundColor = accent.cgColor
+        iconView.image = NSImage(
+            systemSymbolName: mode == .ringing ? "phone.arrow.down.left.fill" : "phone.fill",
+            accessibilityDescription: nil
+        )
+
+        dismissButton.isHidden = mode != .ringing
+        declineButton.isHidden = mode != .ringing
+        answerButton.isHidden = mode != .ringing
+        hangupButton.isHidden = mode != .active
+
+        declineButton.isEnabled = state.canEnd != false
+        answerButton.isEnabled = state.canAnswer != false
+        hangupButton.isEnabled = state.canEnd != false
+
+        needsLayout = true
+    }
+
+    func updateDuration(_ duration: TimeInterval) {
+        guard currentMode == .active else { return }
+        statusLabel.stringValue = formatCallDuration(duration)
+    }
+
+    private func setup() {
+        material = .hudWindow
+        blendingMode = .behindWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 18
+        layer?.masksToBounds = true
+
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 14
+        cardView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.36).cgColor
+        cardView.layer?.borderWidth = 1
+
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 19, weight: .semibold)
+        iconView.contentTintColor = .white
+        iconView.wantsLayer = true
+        iconView.layer?.cornerRadius = 20
+        iconView.layer?.masksToBounds = true
+
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.maximumNumberOfLines = 1
+
+        subtitleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingMiddle
+        subtitleLabel.maximumNumberOfLines = 1
+
+        statusLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        statusLabel.textColor = .secondaryLabelColor
+
+        configureIconButton(dismissButton, symbol: "xmark", color: .secondaryLabelColor.withAlphaComponent(0.35), size: 22, action: #selector(dismissPressed))
+        configureIconButton(declineButton, symbol: "phone.down.fill", color: .systemRed, size: 36, action: #selector(declinePressed))
+        configureIconButton(answerButton, symbol: "phone.fill", color: .systemGreen, size: 36, action: #selector(answerPressed))
+        configureIconButton(hangupButton, symbol: "phone.down.fill", color: .systemRed, size: 36, action: #selector(hangupPressed))
+
+        addSubview(cardView)
+        [iconView, titleLabel, subtitleLabel, statusLabel, dismissButton, declineButton, answerButton, hangupButton]
+            .forEach(cardView.addSubview)
+    }
+
+    private func configureIconButton(_ button: NSButton, symbol: String, color: NSColor, size: CGFloat, action: Selector) {
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = size / 2
+        button.layer?.backgroundColor = color.cgColor
+        let pointSize: CGFloat = symbol == "xmark" ? 10 : 15
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        button.imagePosition = .imageOnly
+        button.contentTintColor = symbol == "xmark" ? .secondaryLabelColor : .white
+        button.target = self
+        button.action = action
+    }
+
+    override func layout() {
+        super.layout()
+        let padding: CGFloat = 10
+        cardView.frame = NSRect(x: padding, y: padding, width: bounds.width - padding * 2, height: bounds.height - padding * 2)
+        let card = cardView.bounds
+        let cardHeight = card.height
+
+        iconView.frame = NSRect(x: 14, y: cardHeight - 54, width: 40, height: 40)
+        dismissButton.frame = NSRect(x: card.width - 30, y: cardHeight - 30, width: 22, height: 22)
+
+        let textX: CGFloat = 66
+        let textWidth = card.width - textX - 36
+        titleLabel.frame = NSRect(x: textX, y: cardHeight - 34, width: textWidth, height: 18)
+        subtitleLabel.frame = NSRect(x: textX, y: cardHeight - 52, width: textWidth, height: 15)
+        statusLabel.frame = NSRect(x: textX, y: cardHeight - 68, width: textWidth, height: 14)
+
+        declineButton.frame = NSRect(x: card.width - 96, y: 14, width: 36, height: 36)
+        answerButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
+        hangupButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
+    }
+
+    @objc private func answerPressed() { onAnswer?() }
+    @objc private func declinePressed() { onDecline?() }
+    @objc private func hangupPressed() { onHangup?() }
+    @objc private func dismissPressed() { onDismiss?() }
+}
+
+private func formatCallDuration(_ seconds: TimeInterval) -> String {
+    let total = Int(max(0, seconds.rounded()))
+    return String(format: "%02d:%02d", total / 60, total % 60)
 }
 
 private final class LinkitTransferPanel {

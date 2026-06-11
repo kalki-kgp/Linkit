@@ -561,6 +561,9 @@ final class HTTPServer {
         if let number = object["number"] as? String, number.utf8.count > 64 {
             throw HTTPFailure.badRequest("invalid_phone_state", "Phone state number is too long")
         }
+        if let name = object["name"] as? String, name.utf8.count > 256 {
+            throw HTTPFailure.badRequest("invalid_phone_state", "Phone state name is too long")
+        }
     }
 
     private func identityProof(for request: IdentityProofRequest) throws -> IdentityProofResponse {
