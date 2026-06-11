@@ -98,6 +98,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var callPanel: LinkitCallPanel?
     private var callDismissedByUser = false
     private var callAnsweredFromMac = false
+    private var callAudioSetupTimer: Timer?
+    private let handsFreeBridge = HandsFreeBridge.shared
     private var notificationCenter: UNUserNotificationCenter?
     private var appUpdater: MacAppUpdater?
 
@@ -105,8 +107,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         configureNotifications()
         appUpdater = try? MacAppUpdater()
         do {
-            let receiver = try LinkitReceiverApp()
+            let receiver = try LinkitReceiverApp(
+                bluetoothAddressProvider: { BluetoothInfo.macAddress() }
+            )
             self.app = receiver
+            setupHandsFreeBridge()
             setupMenu()
             fputs("Linkit menu started. Look for 'Linkit' in the menu bar.\n", stderr)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -121,6 +126,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         } catch {
             showError("Could not start Linkit: \(error)")
         }
+    }
+
+    private func setupHandsFreeBridge() {
+        handsFreeBridge.onStateChange = { [weak self] in
+            self?.refreshMenu()
+        }
+        handsFreeBridge.connectIfNeeded()
     }
 
     private func setupMenu() {
@@ -286,6 +298,18 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let hangupCall = NSMenuItem(title: "Hang Up Android Call", action: #selector(hangupAndroidCall), keyEquivalent: "")
         hangupCall.isEnabled = !androidTargets.isEmpty && (phoneState == "ringing" || phoneState == "active")
         menu.addItem(hangupCall)
+        let callAudioStatus = NSMenuItem(title: "    \(handsFreeBridge.statusLabel)", action: nil, keyEquivalent: "")
+        callAudioStatus.isEnabled = false
+        menu.addItem(callAudioStatus)
+        let setupCallAudio = NSMenuItem(title: "Set Up Call Audio...", action: #selector(setupCallAudio), keyEquivalent: "")
+        setupCallAudio.isEnabled = !androidTargets.isEmpty
+        menu.addItem(setupCallAudio)
+        if handsFreeBridge.isConnected {
+            let moveAudioTitle = handsFreeBridge.audioLocation == .mac ? "Move Call Audio to Phone" : "Move Call Audio to Mac"
+            let moveAudio = NSMenuItem(title: moveAudioTitle, action: #selector(toggleCallAudioRoute), keyEquivalent: "")
+            moveAudio.isEnabled = phoneState == "active"
+            menu.addItem(moveAudio)
+        }
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Transfer Progress", action: #selector(showTransferProgress), keyEquivalent: "t"))
@@ -466,19 +490,196 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             showNonFatalError("Enter a normal phone number with digits and an optional leading +.")
             return
         }
+        if handsFreeBridge.dial(normalized) {
+            showTransientIcon(.success, tooltip: "Calling from Mac audio")
+            return
+        }
         sendActionToAndroid(type: "phone_call", text: normalized, successTooltip: "Android call started")
     }
 
     @objc private func answerAndroidCall() {
-        sendActionToAndroid(type: "phone_answer", text: "answer", successTooltip: "Answered Android call")
+        answerCallOnPhone()
     }
 
     @objc private func declineAndroidCall() {
+        if handsFreeBridge.isConnected {
+            handsFreeBridge.hangUp()
+        }
         sendActionToAndroid(type: "phone_decline", text: "decline", successTooltip: "Declined Android call")
     }
 
     @objc private func hangupAndroidCall() {
+        hangUpCurrentCall()
+    }
+
+    @objc private func setupCallAudio() {
+        guard let macAddress = BluetoothInfo.macAddress() else {
+            showNonFatalError("Bluetooth is not available on this Mac.")
+            return
+        }
+        guard let app else { return }
+        let knownBefore = Set(BluetoothInfo.pairedDeviceAddresses())
+        let payload = "{\"address\":\"\(macAddress)\"}"
+        showTransientIcon(.pairing, tooltip: "Setting up call audio")
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let response = try app.sendActionToFirstAndroid(LinkitActionRequest(type: "bt_pair", text: payload))
+                DispatchQueue.main.async {
+                    self.handleCallAudioSetupResponse(response, knownBefore: knownBefore)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showTransientIcon(.error, tooltip: "Call audio setup failed")
+                    self.showRetryableError(
+                        "Could not reach Android for call audio setup: \(error.localizedDescription)",
+                        retry: { self.setupCallAudio() }
+                    )
+                }
+            }
+        }
+    }
+
+    private func showRetryableError(_ message: String, retry: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Linkit"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            retry()
+        }
+    }
+
+    private func handleCallAudioSetupResponse(_ response: LinkitActionResponse, knownBefore: Set<String>) {
+        let phoneName = response.bluetoothName?.lowercased()
+        // The Android side told us its Bluetooth name; find that exact device.
+        if let phoneName, !phoneName.isEmpty,
+           let address = BluetoothInfo.pairedDeviceAddress(named: [phoneName]) {
+            adoptPhoneForCallAudio(address)
+            return
+        }
+        if response.mode == "already_paired", let address = detectPairedPhoneAddress() {
+            adoptPhoneForCallAudio(address)
+            return
+        }
+        showTransientIcon(.pairing, tooltip: "Confirm pairing on your phone")
+        startCallAudioSetupPolling(knownBefore: knownBefore, phoneName: phoneName)
+    }
+
+    private func adoptPhoneForCallAudio(_ address: String) {
+        handsFreeBridge.setPhoneAddress(address)
+        showTransientIcon(.success, tooltip: "Call audio ready on Mac")
+        refreshMenu()
+    }
+
+    private func detectPairedPhoneAddress() -> String? {
+        // Prefer a paired device whose name matches a Linkit-trusted Android device.
+        let androidNames = Set(
+            (app?.trustedDevices() ?? [])
+                .filter { $0.platform.lowercased() == "android" }
+                .map { $0.deviceName.lowercased() }
+        )
+        if let named = BluetoothInfo.pairedDeviceAddress(named: androidNames) {
+            return named
+        }
+        // Fall back to Bluetooth device class: paired phones.
+        let phones = BluetoothInfo.pairedPhoneAddresses()
+        return phones.count == 1 ? phones.first : nil
+    }
+
+    @objc private func toggleCallAudioRoute() {
+        if handsFreeBridge.audioLocation == .mac {
+            handsFreeBridge.moveAudioToPhone()
+            showTransientIcon(.success, tooltip: "Call audio moved to phone")
+        } else {
+            handsFreeBridge.moveAudioToMac()
+            showTransientIcon(.success, tooltip: "Call audio moved to Mac")
+        }
+        refreshMenu()
+        if let state = currentPhoneState, callPanel?.isShown == true {
+            callPanel?.present(
+                state: state,
+                mode: state.state.lowercased() == "ringing" ? .ringing : .active,
+                hfpConnected: handsFreeBridge.isConnected,
+                audioOnMac: handsFreeBridge.audioLocation == .mac
+            )
+        }
+    }
+
+    private func answerCallOnMac() {
+        callAnsweredFromMac = true
+        if handsFreeBridge.isConnected {
+            handsFreeBridge.answerOnMac()
+        } else {
+            sendActionToAndroid(type: "phone_answer", text: "answer", successTooltip: "Answered Android call")
+        }
+        if let state = currentPhoneState {
+            callPanel?.present(
+                state: state,
+                mode: .active,
+                hfpConnected: handsFreeBridge.isConnected,
+                audioOnMac: true
+            )
+        }
+    }
+
+    private func answerCallOnPhone() {
+        if handsFreeBridge.isConnected {
+            handsFreeBridge.answerOnPhone()
+        } else {
+            sendActionToAndroid(type: "phone_answer", text: "answer", successTooltip: "Answered on phone")
+        }
+        callAnsweredFromMac = true
+        if let state = currentPhoneState {
+            callPanel?.present(
+                state: state,
+                mode: .active,
+                hfpConnected: handsFreeBridge.isConnected,
+                audioOnMac: false
+            )
+        }
+    }
+
+    private func hangUpCurrentCall() {
+        if handsFreeBridge.isConnected {
+            handsFreeBridge.hangUp()
+        }
         sendActionToAndroid(type: "phone_hangup", text: "hangup", successTooltip: "Ended Android call")
+    }
+
+    private func startCallAudioSetupPolling(knownBefore: Set<String>, phoneName: String?) {
+        callAudioSetupTimer?.invalidate()
+        var attempts = 0
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            attempts += 1
+            let namedMatch = phoneName.flatMap { name in
+                BluetoothInfo.pairedDeviceAddress(named: [name])
+            }
+            let current = Set(BluetoothInfo.pairedDeviceAddresses())
+            let newDevices = current.subtracting(knownBefore)
+            if let phoneAddress = namedMatch ?? newDevices.first ?? self.detectPairedPhoneAddress() {
+                timer.invalidate()
+                self.callAudioSetupTimer = nil
+                self.adoptPhoneForCallAudio(phoneAddress)
+                return
+            }
+            if attempts >= 60 {
+                timer.invalidate()
+                self.callAudioSetupTimer = nil
+                self.showTransientIcon(.error, tooltip: "Call audio setup timed out")
+                self.showRetryableError(
+                    "Could not find your phone among paired Bluetooth devices. Confirm the pairing prompt on your phone and try again.",
+                    retry: { self.setupCallAudio() }
+                )
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        callAudioSetupTimer = timer
     }
 
     private func promptForPhoneNumber() -> String? {
@@ -1107,20 +1308,23 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
               let state = try? JSONDecoder().decode(AndroidPhoneState.self, from: data)
         else { return }
         currentPhoneState = state
+        handsFreeBridge.connectIfNeeded()
         refreshMenu()
 
         let panel = ensureCallPanel()
+        let hfpConnected = handsFreeBridge.isConnected
+        let audioOnMac = handsFreeBridge.audioLocation == .mac
 
         switch state.state.lowercased() {
         case "ringing":
             showTransientIcon(.pairing, tooltip: "Incoming Android call")
             if !callDismissedByUser {
-                panel.present(state: state, mode: .ringing)
+                panel.present(state: state, mode: .ringing, hfpConnected: hfpConnected, audioOnMac: audioOnMac)
             }
         case "active":
             showTransientIcon(.connected, tooltip: "Android call active")
             if panel.isShown || callAnsweredFromMac {
-                panel.present(state: state, mode: .active)
+                panel.present(state: state, mode: .active, hfpConnected: hfpConnected, audioOnMac: audioOnMac)
             }
         default:
             callDismissedByUser = false
@@ -1132,19 +1336,23 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func ensureCallPanel() -> LinkitCallPanel {
         if let callPanel { return callPanel }
         let panel = LinkitCallPanel()
+        panel.onAnswerOnMac = { [weak self] in
+            self?.answerCallOnMac()
+        }
+        panel.onAnswerOnPhone = { [weak self] in
+            self?.answerCallOnPhone()
+        }
         panel.onAnswer = { [weak self] in
-            guard let self else { return }
-            self.callAnsweredFromMac = true
-            self.answerAndroidCall()
-            if let state = self.currentPhoneState {
-                self.callPanel?.present(state: state, mode: .active)
-            }
+            self?.answerCallOnPhone()
         }
         panel.onDecline = { [weak self] in
             self?.declineAndroidCall()
         }
         panel.onHangup = { [weak self] in
-            self?.hangupAndroidCall()
+            self?.hangUpCurrentCall()
+        }
+        panel.onMoveAudio = { [weak self] in
+            self?.toggleCallAudioRoute()
         }
         panel.onDismiss = { [weak self] in
             self?.callDismissedByUser = true
@@ -1210,6 +1418,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if connected.isEmpty {
             presenceFailureCounts.removeAll()
             return
+        }
+        if connected.contains(where: { $0.platform.lowercased() == "android" }) {
+            handsFreeBridge.connectIfNeeded()
         }
         let connectedIds = Set(connected.map { $0.deviceId })
         presenceFailureCounts = presenceFailureCounts.filter { connectedIds.contains($0.key) }
@@ -1482,14 +1693,19 @@ private final class LinkitCallPanel {
     private(set) var isShown = false
 
     var onAnswer: (() -> Void)?
+    var onAnswerOnMac: (() -> Void)?
+    var onAnswerOnPhone: (() -> Void)?
     var onDecline: (() -> Void)?
     var onHangup: (() -> Void)?
+    var onMoveAudio: (() -> Void)?
     var onDismiss: (() -> Void)?
 
+    private let panelSize = NSSize(width: 340, height: 140)
+
     init() {
-        contentView = LinkitCallPanelView(frame: NSRect(origin: .zero, size: NSSize(width: 340, height: 120)))
+        contentView = LinkitCallPanelView(frame: NSRect(origin: .zero, size: panelSize))
         panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: NSSize(width: 340, height: 120)),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -1504,18 +1720,26 @@ private final class LinkitCallPanel {
         panel.contentView = contentView
 
         contentView.onAnswer = { [weak self] in self?.onAnswer?() }
+        contentView.onAnswerOnMac = { [weak self] in self?.onAnswerOnMac?() }
+        contentView.onAnswerOnPhone = { [weak self] in self?.onAnswerOnPhone?() }
         contentView.onDecline = { [weak self] in
             self?.onDecline?()
             self?.close()
         }
         contentView.onHangup = { [weak self] in self?.onHangup?() }
+        contentView.onMoveAudio = { [weak self] in self?.onMoveAudio?() }
         contentView.onDismiss = { [weak self] in
             self?.onDismiss?()
             self?.close()
         }
     }
 
-    func present(state: AndroidPhoneState, mode: LinkitCallPanelMode) {
+    func present(
+        state: AndroidPhoneState,
+        mode: LinkitCallPanelMode,
+        hfpConnected: Bool,
+        audioOnMac: Bool
+    ) {
         if mode == .active {
             if callStartedAt == nil {
                 callStartedAt = Date()
@@ -1525,7 +1749,13 @@ private final class LinkitCallPanel {
             stopDurationTimer()
             callStartedAt = nil
         }
-        contentView.update(state: state, mode: mode, duration: activeDuration)
+        contentView.update(
+            state: state,
+            mode: mode,
+            duration: activeDuration,
+            hfpConnected: hfpConnected,
+            audioOnMac: audioOnMac
+        )
         showIfNeeded()
     }
 
@@ -1549,7 +1779,7 @@ private final class LinkitCallPanel {
     private func showIfNeeded() {
         guard let screen = NSScreen.main else { return }
         let margin: CGFloat = 16
-        let size = NSSize(width: 340, height: 120)
+        let size = panelSize
         let targetFrame = NSRect(
             x: screen.visibleFrame.maxX - size.width - margin,
             y: screen.visibleFrame.maxY - size.height - margin,
@@ -1613,14 +1843,22 @@ private final class LinkitCallPanelView: NSVisualEffectView {
     private let dismissButton = NSButton()
     private let declineButton = NSButton()
     private let answerButton = NSButton()
+    private let answerOnMacButton = NSButton()
+    private let answerOnPhoneButton = NSButton()
     private let hangupButton = NSButton()
+    private let moveAudioButton = NSButton()
 
     var onAnswer: (() -> Void)?
+    var onAnswerOnMac: (() -> Void)?
+    var onAnswerOnPhone: (() -> Void)?
     var onDecline: (() -> Void)?
     var onHangup: (() -> Void)?
+    var onMoveAudio: (() -> Void)?
     var onDismiss: (() -> Void)?
 
     private var currentMode: LinkitCallPanelMode = .ringing
+    private var hfpConnected = false
+    private var audioOnMac = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1632,11 +1870,19 @@ private final class LinkitCallPanelView: NSVisualEffectView {
         setup()
     }
 
-    func update(state: AndroidPhoneState, mode: LinkitCallPanelMode, duration: TimeInterval) {
+    func update(
+        state: AndroidPhoneState,
+        mode: LinkitCallPanelMode,
+        duration: TimeInterval,
+        hfpConnected: Bool,
+        audioOnMac: Bool
+    ) {
         currentMode = mode
+        self.hfpConnected = hfpConnected
+        self.audioOnMac = audioOnMac
         titleLabel.stringValue = state.callPanelTitle
         subtitleLabel.stringValue = state.callPanelSubtitle
-        statusLabel.stringValue = mode == .ringing ? "Incoming call..." : formatCallDuration(duration)
+        updateStatusLine(duration: duration)
 
         let accent: NSColor = mode == .ringing ? .systemGreen : .systemBlue
         cardView.layer?.borderColor = accent.withAlphaComponent(0.55).cgColor
@@ -1648,19 +1894,39 @@ private final class LinkitCallPanelView: NSVisualEffectView {
 
         dismissButton.isHidden = mode != .ringing
         declineButton.isHidden = mode != .ringing
-        answerButton.isHidden = mode != .ringing
+        answerButton.isHidden = mode != .ringing || hfpConnected
+        answerOnMacButton.isHidden = mode != .ringing || !hfpConnected
+        answerOnPhoneButton.isHidden = mode != .ringing || !hfpConnected
         hangupButton.isHidden = mode != .active
+        moveAudioButton.isHidden = mode != .active || !hfpConnected
 
         declineButton.isEnabled = state.canEnd != false
         answerButton.isEnabled = state.canAnswer != false
+        answerOnMacButton.isEnabled = state.canAnswer != false
+        answerOnPhoneButton.isEnabled = state.canAnswer != false
         hangupButton.isEnabled = state.canEnd != false
+        moveAudioButton.title = audioOnMac ? "Move to Phone" : "Move to Mac"
 
         needsLayout = true
     }
 
     func updateDuration(_ duration: TimeInterval) {
         guard currentMode == .active else { return }
-        statusLabel.stringValue = formatCallDuration(duration)
+        updateStatusLine(duration: duration)
+    }
+
+    private func updateStatusLine(duration: TimeInterval) {
+        switch currentMode {
+        case .ringing:
+            statusLabel.stringValue = "Incoming call..."
+        case .active:
+            if hfpConnected {
+                let route = audioOnMac ? "On Mac speakers" : "On phone"
+                statusLabel.stringValue = "\(route)  \(formatCallDuration(duration))"
+            } else {
+                statusLabel.stringValue = formatCallDuration(duration)
+            }
+        }
     }
 
     private func setup() {
@@ -1697,10 +1963,18 @@ private final class LinkitCallPanelView: NSVisualEffectView {
         configureIconButton(dismissButton, symbol: "xmark", color: .secondaryLabelColor.withAlphaComponent(0.35), size: 22, action: #selector(dismissPressed))
         configureIconButton(declineButton, symbol: "phone.down.fill", color: .systemRed, size: 36, action: #selector(declinePressed))
         configureIconButton(answerButton, symbol: "phone.fill", color: .systemGreen, size: 36, action: #selector(answerPressed))
+        configureIconButton(answerOnMacButton, symbol: "laptopcomputer", color: .systemGreen, size: 36, action: #selector(answerOnMacPressed))
+        configureIconButton(answerOnPhoneButton, symbol: "iphone", color: .systemGreen, size: 36, action: #selector(answerOnPhonePressed))
         configureIconButton(hangupButton, symbol: "phone.down.fill", color: .systemRed, size: 36, action: #selector(hangupPressed))
 
+        moveAudioButton.bezelStyle = .rounded
+        moveAudioButton.controlSize = .small
+        moveAudioButton.font = .systemFont(ofSize: 10, weight: .medium)
+        moveAudioButton.target = self
+        moveAudioButton.action = #selector(moveAudioPressed)
+
         addSubview(cardView)
-        [iconView, titleLabel, subtitleLabel, statusLabel, dismissButton, declineButton, answerButton, hangupButton]
+        [iconView, titleLabel, subtitleLabel, statusLabel, dismissButton, declineButton, answerButton, answerOnMacButton, answerOnPhoneButton, hangupButton, moveAudioButton]
             .forEach(cardView.addSubview)
     }
 
@@ -1735,14 +2009,20 @@ private final class LinkitCallPanelView: NSVisualEffectView {
         subtitleLabel.frame = NSRect(x: textX, y: cardHeight - 52, width: textWidth, height: 15)
         statusLabel.frame = NSRect(x: textX, y: cardHeight - 68, width: textWidth, height: 14)
 
-        declineButton.frame = NSRect(x: card.width - 96, y: 14, width: 36, height: 36)
+        declineButton.frame = NSRect(x: card.width - 140, y: 14, width: 36, height: 36)
+        answerOnMacButton.frame = NSRect(x: card.width - 96, y: 14, width: 36, height: 36)
+        answerOnPhoneButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
         answerButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
         hangupButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
+        moveAudioButton.frame = NSRect(x: 66, y: 16, width: 96, height: 22)
     }
 
     @objc private func answerPressed() { onAnswer?() }
+    @objc private func answerOnMacPressed() { onAnswerOnMac?() }
+    @objc private func answerOnPhonePressed() { onAnswerOnPhone?() }
     @objc private func declinePressed() { onDecline?() }
     @objc private func hangupPressed() { onHangup?() }
+    @objc private func moveAudioPressed() { onMoveAudio?() }
     @objc private func dismissPressed() { onDismiss?() }
 }
 

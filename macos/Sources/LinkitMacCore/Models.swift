@@ -35,6 +35,7 @@ public struct InfoResponse: Codable {
     public let publicKey: String
     public let serviceType: String
     public let capabilities: [String]
+    public let bluetoothAddress: String?
 }
 
 public struct IdentityProofRequest: Codable {
@@ -236,6 +237,15 @@ public struct LinkitActionRequest: Codable, Equatable {
 public struct LinkitActionResponse: Codable, Equatable {
     public let status: String
     public let type: String
+    public let mode: String?
+    public let bluetoothName: String?
+
+    public init(status: String, type: String, mode: String? = nil, bluetoothName: String? = nil) {
+        self.status = status
+        self.type = type
+        self.mode = mode
+        self.bluetoothName = bluetoothName
+    }
 }
 
 struct TransferRecord {

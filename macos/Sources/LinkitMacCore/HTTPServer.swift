@@ -36,7 +36,10 @@ public final class LinkitReceiverApp {
     private let pairingManager: PairingManager
     private let outgoingClient: OutgoingTransferClient
 
-    public init(configuration: ReceiverConfiguration = ReceiverConfiguration()) throws {
+    public init(
+        configuration: ReceiverConfiguration = ReceiverConfiguration(),
+        bluetoothAddressProvider: @escaping () -> String? = { nil }
+    ) throws {
         self.configuration = configuration
         self.devToken = try LinkitRandom.token()
         self.dropFolder = configuration.destination
@@ -67,7 +70,8 @@ public final class LinkitReceiverApp {
             pairingManager: pairingManager,
             store: store,
             history: history,
-            logger: logger
+            logger: logger,
+            bluetoothAddressProvider: bluetoothAddressProvider
         )
     }
 
@@ -205,6 +209,7 @@ final class HTTPServer {
     private let store: TransferStore
     private let history: TransferHistoryStore
     private let logger: LinkitLogger
+    private let bluetoothAddressProvider: () -> String?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -218,7 +223,8 @@ final class HTTPServer {
         pairingManager: PairingManager,
         store: TransferStore,
         history: TransferHistoryStore,
-        logger: LinkitLogger
+        logger: LinkitLogger,
+        bluetoothAddressProvider: @escaping () -> String? = { nil }
     ) {
         self.port = port
         self.token = token
@@ -231,6 +237,7 @@ final class HTTPServer {
         self.store = store
         self.history = history
         self.logger = logger
+        self.bluetoothAddressProvider = bluetoothAddressProvider
     }
 
     func run() throws {
@@ -319,7 +326,8 @@ final class HTTPServer {
                     port: port,
                     publicKey: identity.publicKey,
                     serviceType: "_linkit._tcp.local.",
-                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url", "phone_state"]
+                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url", "phone_state", "call_audio"],
+                    bluetoothAddress: bluetoothAddressProvider()
                 )
             )
         }

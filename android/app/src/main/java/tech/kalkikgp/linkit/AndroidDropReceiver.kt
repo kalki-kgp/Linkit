@@ -59,6 +59,7 @@ class AndroidDropReceiver(
 ) {
     private val history = TransferHistoryStore.get(context)
     private val phoneController = AndroidPhoneController(context)
+    private val bluetoothPairAssist = BluetoothPairAssist(context)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = ConcurrentHashMap<String, DropSession>()
@@ -129,7 +130,7 @@ class AndroidDropReceiver(
                     .put("platform", "android")
                     .put("port", PORT)
                     .put("publicKey", identity.publicKey)
-                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url").put("phone_control"))
+                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url").put("phone_control").put("bt_pair"))
             )
         }
 
@@ -190,6 +191,11 @@ class AndroidDropReceiver(
             onEvent(AndroidDropEvent(phoneStatusLabel(type, result)))
             return result
         }
+        if (type == "bt_pair") {
+            val result = bluetoothPairAssist.handleAction(text)
+            onEvent(AndroidDropEvent(bluetoothStatusLabel(result)))
+            return result
+        }
         when (type) {
             "clipboard", "text" -> {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -218,6 +224,14 @@ class AndroidDropReceiver(
             "phone_decline" -> "Declined Android call"
             "phone_hangup" -> "Ended Android call"
             else -> "Phone command handled"
+        }
+    }
+
+    private fun bluetoothStatusLabel(result: JSONObject): String {
+        return when (result.optString("mode")) {
+            "already_paired" -> "Call audio on Mac is ready"
+            "bonding" -> "Confirm Bluetooth pairing on your phone"
+            else -> "Bluetooth pairing started"
         }
     }
 

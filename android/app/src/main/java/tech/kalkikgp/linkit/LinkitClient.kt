@@ -155,6 +155,15 @@ class LinkitClient(
         DebugTelemetry.recordEvent("client", "registerReceiver ok ${mac.ip}:${mac.port}")
     }
 
+    suspend fun fetchMacInfo(mac: TrustedMac): JSONObject {
+        val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
+        val request = Request.Builder()
+            .url("$baseUrl/v1/info")
+            .get()
+            .build()
+        return executeJson(request)
+    }
+
     suspend fun verifyMacEndpoint(mac: TrustedMac) {
         val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
         val challenge = IdentityStore.nonce()
