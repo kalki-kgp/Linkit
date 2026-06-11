@@ -167,6 +167,26 @@ final class TrustStore {
         return devices[id]
     }
 
+    /// Persists the most recent reachable address for a paired device so the Mac can
+    /// still find it after the in-memory connection registry forgets it (e.g. the
+    /// device's Wi-Fi went quiet while its screen was off).
+    func updateEndpoint(deviceId: String, host: String, receivePort: UInt16) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let existing = devices[deviceId] else { return }
+        if existing.lastKnownHost == host && existing.receivePort == receivePort { return }
+        devices[deviceId] = TrustedDevice(
+            deviceId: existing.deviceId,
+            deviceName: existing.deviceName,
+            platform: existing.platform,
+            publicKey: existing.publicKey,
+            pairedAt: existing.pairedAt,
+            lastKnownHost: host,
+            receivePort: receivePort
+        )
+        try? saveLocked()
+    }
+
     func allDevices() -> [TrustedDevice] {
         lock.lock()
         defer { lock.unlock() }

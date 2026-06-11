@@ -79,14 +79,16 @@ Call audio is not relayed to the Mac. Normal third-party Android apps cannot cap
 
 - Android remembers the paired Mac across Wi-Fi/hotspot toggles.
 - On app open/resume, Android filters Bonjour for the paired Mac name, then verifies the candidate with signed Mac identity proof (`POST /v1/identity/proof`) before updating the stored IP/port and re-registering. No re-scan of the QR is required.
+- Android `ConnectivityManager` callbacks run the same signed discovery/re-register path after Wi-Fi/hotspot/default-network changes.
+- macOS `NWPathMonitor` callbacks refresh the displayed local IP and force a signed Android status probe after network path changes.
 - A **Reconnect** button on the device card runs the same flow on demand.
 - `MacPresence.touch()` fires on every successful Android → Mac signed request (register, action, finalize), so the UI cannot get stuck in "offline" right after a successful action.
 
 ### Bidirectional Presence Detection
 
 - Mac runs a 15 s presence sweep with 30 s staleness threshold (`Timer.scheduledTimer`, tolerance 3 s). Stale connected devices are probed via signed `GET /v1/devices/self/status`; failures trigger `disconnectDevice`.
-- Android records each signed Mac request in `MacPresence`; after > 90 s of silence, the 10 s tick runs active Mac identity proof and only demotes the connection to "Paired, offline" if that proof fails.
-- The Mac usually converges within ~30-45 s of a real Android disconnect; Android waits for the ~90 s stale window, then demotes only after active Mac proof fails.
+- Android records each signed Mac request in `MacPresence`; the foreground receiver refreshes Mac registration every ~20 s, and after > 45 s of silence the 10 s tick runs active Mac identity proof. If proof succeeds, Android renews its receiver registration on the Mac; if proof fails, Android demotes the connection to "Paired, offline".
+- Both sides usually converge within ~30-60 s of a real disconnect, while a restored hotspot can recover as soon as Android refreshes or the app resumes.
 
 ### Notification Action Buttons
 

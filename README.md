@@ -40,9 +40,9 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 
 **Clipboard caveat:** Android 10+ limits clipboard reads to focused apps and input methods. Automatic Android → Mac clipboard sync only works while Linkit is open/focused; background copies from other Android apps need the Linkit share sheet or the explicit **Send Clipboard** button. Mac → Android clipboard sync can run from the Mac menu-bar app.
 
-**Reconnect after network changes** — when Wi-Fi or hotspot is toggled, the Android app re-discovers the paired Mac via Bonjour on next open or via an in-app **Reconnect** button. Bonjour only supplies a candidate address; Android verifies it with a signed Mac identity proof before saving it. No re-scanning the QR.
+**Reconnect after network changes** — when Wi-Fi or hotspot is toggled, both apps refresh presence immediately. Android re-discovers the paired Mac via Bonjour, verifies it with signed Mac identity proof, and re-registers its receiver; macOS probes connected Android devices as soon as its network path changes. No re-scanning the QR.
 
-**Bidirectional presence** — both sides know when the peer goes away. The Mac probes Android every ~30 s; Android actively proves the Mac before marking it offline after ~90 s of silence. The UI on each device reflects the same connection state.
+**Bidirectional presence** — both sides know when the peer goes away. The Mac probes Android every ~30 s; Android refreshes its Mac registration in the background and actively proves the Mac before marking it offline after ~45 s of silence. The UI on each device reflects the same connection state.
 
 **Same local channel, either direction, within the operating-system privacy rules. That's it.**
 

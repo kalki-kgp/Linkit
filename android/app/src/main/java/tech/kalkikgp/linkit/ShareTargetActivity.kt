@@ -5,11 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.widget.Toast
 import kotlinx.coroutines.runBlocking
-import java.io.File
-import java.io.FileOutputStream
 
 class ShareTargetActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,19 +32,12 @@ class ShareTargetActivity : Activity() {
             return
         }
 
-        Toast.makeText(this, "Preparing Linkit send", Toast.LENGTH_SHORT).show()
-        Thread {
-            val cached = runCatching { cacheSharedUris(uris) }
-            runOnUiThread {
-                cached.onSuccess { files ->
-                    LinkitSendService.enqueueCached(this, files)
-                    Toast.makeText(this, "Sending via Linkit", Toast.LENGTH_SHORT).show()
-                }.onFailure { error ->
-                    Toast.makeText(this, "Could not read shared item: ${error.message}", Toast.LENGTH_LONG).show()
-                }
-                finish()
+        runCatching { LinkitSendService.enqueue(this, uris) }
+            .onSuccess { Toast.makeText(this, "Sending via Linkit", Toast.LENGTH_SHORT).show() }
+            .onFailure { error ->
+                Toast.makeText(this, "Could not start Linkit send: ${error.message}", Toast.LENGTH_LONG).show()
             }
-        }.start()
+        finish()
     }
 
     private fun sendTextHandoff(text: String) {
@@ -106,49 +96,5 @@ class ShareTargetActivity : Activity() {
     private fun isWebUrl(text: String): Boolean {
         val trimmed = text.trim()
         return trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)
-    }
-
-    private fun cacheSharedUris(uris: List<Uri>): List<File> {
-        val dir = File(cacheDir, "linkit-shares").apply { mkdirs() }
-        return uris.mapIndexed { index, uri ->
-            val name = sanitizeCacheName(displayName(uri) ?: uri.lastPathSegment ?: "shared-$index.bin")
-            val file = uniqueFile(dir, "${System.currentTimeMillis()}-$index-$name")
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(file).use { output ->
-                    input.copyTo(output, 1024 * 1024)
-                }
-            } ?: throw IllegalArgumentException("Could not open $name")
-            file
-        }
-    }
-
-    private fun displayName(uri: Uri): String? {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0 && !cursor.isNull(index)) return cursor.getString(index)
-            }
-        }
-        return null
-    }
-
-    private fun sanitizeCacheName(raw: String): String {
-        return raw
-            .replace("/", "_")
-            .replace("\\", "_")
-            .trim()
-            .trimStart('.')
-            .ifBlank { "shared.bin" }
-            .take(160)
-    }
-
-    private fun uniqueFile(dir: File, name: String): File {
-        val base = name.substringBeforeLast('.', name)
-        val ext = name.substringAfterLast('.', "").takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
-        for (attempt in 0..9999) {
-            val candidate = if (attempt == 0) File(dir, name) else File(dir, "$base-$attempt$ext")
-            if (!candidate.exists()) return candidate
-        }
-        throw IllegalStateException("Could not allocate cache file")
     }
 }

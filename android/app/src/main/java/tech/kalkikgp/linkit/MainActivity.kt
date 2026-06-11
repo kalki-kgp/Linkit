@@ -2,12 +2,17 @@ package tech.kalkikgp.linkit
 
 import android.app.Application
 import android.content.ClipboardManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.Settings
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -125,6 +130,7 @@ class MainActivity : ComponentActivity() {
         if (IdentityStore(applicationContext).trustedMac() != null) {
             LinkitReceiverService.start(applicationContext)
             linkitViewModel.discoverAndReconnect()
+            requestBatteryExemptionIfNeeded()
         }
         setContent {
             LinkitTheme {
@@ -133,6 +139,26 @@ class MainActivity : ComponentActivity() {
                     onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) }
                 )
             }
+        }
+    }
+
+    // Asking the OS to exempt Linkit from Doze is what actually keeps the receiver
+    // foreground service + Wi-Fi alive while the screen is off, so the Mac doesn't see
+    // "not connected". Prompted once; the system shows a single allow/deny dialog.
+    private fun requestBatteryExemptionIfNeeded() {
+        val powerManager = getSystemService(PowerManager::class.java) ?: return
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+        val prefs = getSharedPreferences("linkit_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("battery_exemption_prompted", false)) return
+        prefs.edit().putBoolean("battery_exemption_prompted", true).apply()
+        runCatching {
+            @Suppress("BatteryLife")
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
+            )
         }
     }
 
@@ -155,10 +181,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         linkitViewModel.refreshPhoneControlStatus()
-        if (IdentityStore(applicationContext).trustedMac() != null &&
-            !linkitViewModel.uiState.value.isConnectedToMac
-        ) {
-            linkitViewModel.discoverAndReconnect()
+        if (IdentityStore(applicationContext).trustedMac() != null) {
+            linkitViewModel.discoverAndReconnect(force = true)
         }
     }
 
@@ -234,8 +258,11 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private var startedAtMillis: Long = 0
     private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
     private var lastClipboardText: String? = null
+    private var networkRefreshJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     init {
+        startNetworkMonitor()
         viewModelScope.launch {
             AndroidDropEvents.events.collect { handleDropEvent(it) }
         }
@@ -264,13 +291,20 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 val trustedMac = state.trustedMac ?: continue
                 val lastSeen = MacPresence.lastSeenMillis.value ?: continue
                 val ageMs = System.currentTimeMillis() - lastSeen
-                if (ageMs > 90_000) {
+                if (ageMs > 45_000) {
                     val stillReachable = withTimeoutOrNull(10_000) {
-                        runCatching { client.verifyMacEndpoint(trustedMac) }.isSuccess
+                        runCatching {
+                            client.verifyMacEndpoint(trustedMac)
+                            client.registerReceiver(
+                                mac = trustedMac,
+                                identityStore = identityStore,
+                                receivePort = AndroidDropReceiver.PORT,
+                                batteryPercent = BatteryStatus.percent(getApplication())
+                            )
+                        }.isSuccess
                     } == true
                     if (stillReachable) {
-                        MacPresence.touch()
-                        DebugTelemetry.recordEvent("presence", "kept online after active Mac proof (last seen ${ageMs / 1000}s ago)")
+                        DebugTelemetry.recordEvent("presence", "renewed Mac registration after active proof (last seen ${ageMs / 1000}s ago)")
                         continue
                     }
                     DebugTelemetry.recordEvent("presence", "demoted to offline after failed Mac proof (last seen ${ageMs / 1000}s ago)")
@@ -288,12 +322,46 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         stopClipboardSync()
+        stopNetworkMonitor()
         discovery.stop()
         super.onCleared()
     }
 
     fun refreshPhoneControlStatus() {
         _uiState.update { it.copy(phoneControlStatus = PhonePermissions.status(getApplication())) }
+    }
+
+    private fun startNetworkMonitor() {
+        val connectivity = getApplication<Application>().getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = scheduleNetworkRefresh("available")
+
+            override fun onLost(network: Network) = scheduleNetworkRefresh("lost")
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                scheduleNetworkRefresh("capabilities")
+            }
+        }
+        networkCallback = callback
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
+            .onFailure { DebugTelemetry.recordEvent("network", "monitor failed: ${it.message}") }
+    }
+
+    private fun stopNetworkMonitor() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        val connectivity = getApplication<Application>().getSystemService(ConnectivityManager::class.java)
+        runCatching { connectivity.unregisterNetworkCallback(callback) }
+    }
+
+    private fun scheduleNetworkRefresh(reason: String) {
+        if (_uiState.value.trustedMac == null) return
+        DebugTelemetry.recordEvent("network", "change detected: $reason")
+        networkRefreshJob?.cancel()
+        networkRefreshJob = viewModelScope.launch {
+            delay(750)
+            discoverAndReconnect(force = true)
+        }
     }
 
     fun setMacIp(value: String) {
@@ -430,9 +498,10 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     private var reconnectJob: Job? = null
 
-    fun discoverAndReconnect() {
+    fun discoverAndReconnect(force: Boolean = false) {
         val mac = _uiState.value.trustedMac ?: return
-        if (_uiState.value.isConnectedToMac || _uiState.value.isPairing) return
+        if (_uiState.value.isPairing) return
+        if (!force && _uiState.value.isConnectedToMac) return
         if (reconnectJob?.isActive == true) return
         _uiState.update {
             it.copy(
