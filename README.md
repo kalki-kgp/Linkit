@@ -62,7 +62,7 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 
 **Verified.** Every file is hashed end-to-end while it streams. If a single byte is off, the transfer fails loudly instead of silently writing a corrupt file.
 
-**Private.** Devices pair once with a QR code. Every request after that is signed by a key that never leaves the device. An unknown phone on your network cannot send anything.
+**Private.** Devices pair once with a QR code. Every request after that is signed by a key that never leaves the device — an unknown phone on your network cannot send anything. Your clipboard, links, phone data, and file contents are **end-to-end encrypted** (AES-256) with a key carried only in the pairing QR, so other devices on the same Wi-Fi can't read them either.
 
 **Quiet.** Linkit lives in your menu bar on Mac and a single silent notification on Android. It doesn't ping you. It doesn't ask for reviews. It does its job.
 
@@ -107,7 +107,7 @@ Some of these may come later. The first version is about making one phone and on
 
 ## Status
 
-Private project for personal use. **Latest release: [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/latest)** (June 2026) — signed Android APK and macOS zip on GitHub Releases, with in-app updaters on both platforms.
+Open source under the **[GPLv3](LICENSE)**. **Latest release: [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/latest)** (June 2026) — a signed Android APK and a macOS app (ad-hoc signed, **not** Apple-notarized — see [install notes](docs/SETUP.md#installing-the-macos-app)) on GitHub Releases, with in-app updaters on both platforms.
 
 For the technical feature snapshot, see [`docs/current-state.md`](docs/current-state.md).
 
@@ -117,4 +117,6 @@ For local setup, sideloading, and build scripts, see [`docs/SETUP.md`](docs/SETU
 
 ## License & contact
 
-Built by Krishna ([@kalki-kgp](https://kalkikgp.tech)). Source-available for personal use — see [`LICENSE`](LICENSE).
+Built by Krishna ([@kalki-kgp](https://kalkikgp.tech)). Linkit is open source under the **[GNU GPLv3](LICENSE)** — you're free to use, study, modify, and share it, but any distributed derivative must stay under the GPL (no closed-source forks). Contributions are welcome under the terms in [`CONTRIBUTING.md`](CONTRIBUTING.md). The name **"Linkit"** and its logo are trademarks of the author and are **not** licensed for use in redistributed or derivative builds — fork freely, but ship it under a different name.
+
+Found a security issue? See [`SECURITY.md`](SECURITY.md).
