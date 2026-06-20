@@ -1,10 +1,20 @@
 # Linkit Current State
 
-Last updated: 2026-05-24
+Last updated: 2026-06-20  
+**Release:** [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.6.1)
 
-> Recent additions: in-app Reconnect via Bonjour after network change; bidirectional presence detection; consumer Compose redesign; clipboard-action buttons on the receiver notification; hidden debug telemetry panel (7-tap unlock).
+Linkit is a private Android + macOS local device link for one phone and one Mac. It moves files, clipboard text, plain text, links, and phone-call control directly over the local network or phone hotspot. There is no account, cloud relay, or internet data path.
 
-Linkit is a private Android + macOS local device link for one phone and one Mac. It moves files, clipboard text, plain text, and links directly over the local network or phone hotspot. There is no account, cloud relay, or internet data path.
+> **Recent (v0.6.1):** `MacRediscovery` shared utility; receiver-service rediscovery on failed Mac registration; UI offline retry loop; persisted endpoint sync after background rediscovery.  
+> **Recent (v0.6):** Phone control + caller ID; experimental Bluetooth Hands-Free call audio on Mac; Doze resistance; Mac last-known Android endpoint persistence.  
+> **Earlier:** In-app updaters (v0.4+); bidirectional presence; Bonjour reconnect; consumer Compose UI; debug telemetry; clipboard notification actions; Mac→Android drops; signed pairing and uploads.
+
+## Distribution
+
+- **GitHub Releases** — signed `linkit-release.apk` and `linkit-macos.zip` per tag (`v0.1.0`, `v0.4.0`, `v0.5.0`, `v0.6`, `v0.6.1`, …).
+- **In-app updaters** — both apps fetch `releases/latest/download/linkit-*-update.json`, verify SHA-256, and install (Android requires user approval; Mac swaps `Linkit.app` and relaunches).
+- **Release CI** — `.github/workflows/release.yml` runs tests, builds both platforms, uploads assets. Use workflow dispatch with explicit `version_code` (must increase; v0.6.1 = build **7**).
+- Not on Play Store; macOS app is not notarized. Personal sideload / GitHub download only.
 
 ## What Works
 
@@ -15,17 +25,18 @@ Linkit is a private Android + macOS local device link for one phone and one Mac.
 - Both devices store trusted public keys after pairing.
 - Manual token pairing is intentionally disabled because QR pairing proves possession of the Android private key.
 - Requests after pairing are signed with P-256 ECDSA + SHA-256.
+- Mac private identity key lives in Keychain (migrated from legacy `mac-identity.p256` file).
 
 ### Android To Mac Files
 
 - Android app can pick one or more files and send them to the Mac.
-- Android share sheet can send files from other apps to Linkit.
+- Android share sheet can send files from other apps to Linkit (content URIs passed directly to send service — no share-cache copy).
 - Files land in `~/Downloads/Linkit Drop`.
 - Uploads stream with constant memory and SHA-256 verification.
 - Finalize is idempotent.
 - Unknown/unpaired devices are rejected.
 - Transfer progress, speed, ETA, success, failure, and cancel state are shown on the Mac.
-- A 1 GB Android -> Mac soak transfer completed with matching SHA-256 and empty `.tmp`.
+- A 1 GB Android → Mac soak transfer completed with matching SHA-256 and empty `.tmp`.
 
 ### Mac To Android Files
 
@@ -33,13 +44,14 @@ Linkit is a private Android + macOS local device link for one phone and one Mac.
 - Android foreground receiver accepts signed file sessions from the Mac.
 - Files land in `Downloads/Linkit Drop` on Android.
 - Transfer progress, speed, ETA, success, failure, and cancel state are shown in the Mac popup.
-- A 1 GB Mac -> Android soak transfer completed.
+- A 1 GB Mac → Android soak transfer completed.
+- Receive path holds a partial wake lock during upload so Doze cannot suspend mid-transfer.
 
 ### Cancel
 
 - The Mac transfer popup has a **Cancel** button.
-- Mac -> Android cancel aborts the local upload and sends signed `DELETE /v1/transfers/:id`.
-- Android -> Mac cancel marks the receiver transfer canceled and removes the temp file.
+- Mac → Android cancel aborts the local upload and sends signed `DELETE /v1/transfers/:id`.
+- Android → Mac cancel marks the receiver transfer canceled and removes the temp file.
 
 ### Clipboard, Text, And Link Handoff
 
@@ -47,115 +59,102 @@ Linkit is a private Android + macOS local device link for one phone and one Mac.
   - `clipboard` for plain-text clipboard handoff.
   - `text` for plain-text handoff.
   - `open_url` for opening `http` or `https` links on the other device.
-- Mac menu can:
-  - send clipboard text to Android;
-  - open the clipboard link on Android;
-  - turn on Mac -> Android clipboard text sync.
-- Android app can:
-  - send current clipboard text to Mac;
-  - open the current clipboard link on Mac;
-  - turn on foreground clipboard text sync.
-- Android share sheet can:
-  - send selected plain text to the Mac clipboard;
-  - open shared `http` or `https` URLs on the Mac.
-- Mac receiving text sets the Mac clipboard.
-- Android receiving text sets the Android clipboard.
+- Mac menu can send clipboard text to Android, open the clipboard link on Android, and turn on Mac → Android clipboard text sync.
+- Android app can send current clipboard text to Mac, open the current clipboard link on Mac, and turn on foreground clipboard text sync.
+- Android share sheet can send selected plain text to the Mac clipboard or open shared URLs on the Mac.
+- Mac receiving text sets the Mac clipboard; Android receiving text sets the Android clipboard.
 
-Android limitation: Android 10+ does not let ordinary background apps read clipboard contents unless the app is focused or is the active input method. Therefore Mac -> Android clipboard sync can run from the Mac menu-bar app, but automatic Android -> Mac clipboard sync is foreground-only. Background Android copies should use the Linkit share sheet or the explicit **Send Clipboard** button.
+Android limitation: Android 10+ does not let ordinary background apps read clipboard contents unless the app is focused or is the active input method. Mac → Android clipboard sync can run from the Mac menu-bar app; automatic Android → Mac clipboard sync is foreground-only.
 
 ### Phone Control
 
 - Android exposes signed phone-control actions to the paired Mac:
-  - `phone_call` validates a normal phone number and starts the call on Android. If direct-call permission is not granted, Android opens the dialer with the number filled in.
-  - `phone_answer` answers a ringing Android call when Android grants call-control permission.
-  - `phone_decline` and `phone_hangup` end the current Android call when Android grants call-control permission.
+  - `phone_call` — validates a normal phone number and starts the call on Android; without `CALL_PHONE`, opens the dialer prefilled.
+  - `phone_answer` — answers a ringing call when `ANSWER_PHONE_CALLS` is granted (Android 8+).
+  - `phone_decline` / `phone_hangup` — end the current call when call-control permission is granted (Android 9+).
 - Android's foreground receiver service mirrors call state to the Mac with signed `phone_state` actions when `READ_PHONE_STATE` is granted.
-- Mac menu shows a **Phone** section with **Call Number on Android...**, **Answer Android Call**, **Decline Android Call**, and **Hang Up Android Call**.
-- Incoming Android calls can show a Mac prompt with Answer / Decline / Dismiss.
+- With `READ_CALL_LOG` and `READ_CONTACTS`, incoming calls can include caller number and resolved contact display name on the Mac.
+- Mac menu **Phone** section: **Call Number on Android...**, **Answer**, **Decline**, **Hang Up**; incoming-call panel when ringing.
+- Cellular call audio is **not** relayed over the signed HTTP channel — normal third-party apps cannot capture/forward cellular audio with public permissions.
 
-Call audio is not relayed to the Mac. Normal third-party Android apps cannot capture and forward cellular call audio with public permissions, so Linkit currently controls calls while audio remains routed on Android.
+### Bluetooth Call Audio (Experimental)
+
+- Mac `HandsFreeBridge` uses `IOBluetooth` Hands-Free Profile to route call audio to Mac speaker/mic when paired.
+- Android `BluetoothPairAssist` bonds to the Mac using the Bluetooth address from `GET /v1/info`.
+- Mac menu: **Set Up Call Audio...**, **Move Call Audio to Mac** / **Move Call Audio to Phone**.
+- Android UI can enable call audio and shows Bluetooth pairing status.
+- Requires classic Bluetooth pairing between phone and Mac; separate from Wi-Fi/LAN Linkit pairing.
 
 ### Reconnect After Network Change
 
-- Android remembers the paired Mac across Wi-Fi/hotspot toggles.
-- On app open/resume, Android filters Bonjour for the paired Mac name, then verifies the candidate with signed Mac identity proof (`POST /v1/identity/proof`) before updating the stored IP/port and re-registering. No re-scan of the QR is required.
-- Android `ConnectivityManager` callbacks run the same signed discovery/re-register path after Wi-Fi/hotspot/default-network changes.
-- macOS `NWPathMonitor` callbacks refresh the displayed local IP and force a signed Android status probe after network path changes.
-- A **Reconnect** button on the device card runs the same flow on demand.
-- `MacPresence.touch()` fires on every successful Android → Mac signed request (register, action, finalize), so the UI cannot get stuck in "offline" right after a successful action.
+- Pairing trust is key-bound; only IP/port go stale when either device moves networks (e.g. hotspot → shared Wi-Fi).
+- **`MacRediscovery.kt`** — Bonjour lookup filtered by paired Mac name → signed `POST /v1/identity/proof` → persist new endpoint. Mutex prevents concurrent rediscovery races.
+- **Android UI (`MainActivity`):** `ConnectivityManager` callbacks and resume trigger `discoverAndReconnect()`; **Reconnect** on device card; paired-but-offline retry every ~30 s (3 × 10 s ticks); `MacPresence` listener syncs UI when the receiver service updated the stored endpoint in the background.
+- **Android receiver service (`LinkitReceiverService`):** on failed verify/register at stored Mac address, runs `MacRediscovery` then re-registers; updates notification to "Listening for Mac drops" on success.
+- **macOS:** `NWPathMonitor` refreshes local IP display and forces signed Android status probe; `lastKnownHost` / `receivePort` persisted per trusted Android device and used to revive sends after reconnect.
+- `MacPresence.touch()` on every successful Android → Mac signed request so the UI does not stick "offline" right after a successful action.
 
 ### Bidirectional Presence Detection
 
-- Mac runs a 15 s presence sweep with 30 s staleness threshold (`Timer.scheduledTimer`, tolerance 3 s). Stale connected devices are probed via signed `GET /v1/devices/self/status`; failures trigger `disconnectDevice`.
-- Android records each signed Mac request in `MacPresence`; the foreground receiver refreshes Mac registration every ~20 s, and after > 45 s of silence the 10 s tick runs active Mac identity proof. If proof succeeds, Android renews its receiver registration on the Mac; if proof fails, Android demotes the connection to "Paired, offline".
-- Both sides usually converge within ~30-60 s of a real disconnect, while a restored hotspot can recover as soon as Android refreshes or the app resumes.
+- Mac: ~15 s presence sweep, ~30 s staleness threshold; stale devices probed via signed `GET /v1/devices/self/status`; failures disconnect.
+- Android: foreground service refreshes Mac registration ~every 20 s; after >45 s silence the 10 s UI tick runs active Mac identity proof; success renews registration, failure shows "Paired, offline".
+- Connected Android battery % shown on Mac when registered.
+- Both sides usually converge within ~30–60 s of a real disconnect; restored hotspot can recover as soon as refresh or rediscovery succeeds.
 
 ### Notification Action Buttons
 
-- The Android receiver notification (`Mac drops enabled on …`) carries **Send Clipboard** and **Open Link** action buttons.
-- Tapping launches `ClipboardActionActivity` (translucent theme, real window focus). The clipboard read is deferred to `onWindowFocusChanged(hasFocus = true)` so Android 10+ grants access.
-- Result is reported via a Toast, then the activity finishes.
+- Android receiver notification (`Mac drops enabled on …`) carries **Send Clipboard** and **Open Link** actions.
+- Tapping launches `ClipboardActionActivity` (translucent theme, real window focus). Clipboard read deferred to `onWindowFocusChanged(true)` for Android 10+.
+- Result via Toast, then activity finishes.
 
-### Consumer UI Redesign (Android)
+### Consumer UI (Android)
 
-- Compose home built around a single Device card (avatar + name + pulsing status line) and a 4-tile action grid (Send file, Send clipboard, Open link, Clipboard sync).
-- Recent activity list replaces the previous debug-style metrics row.
-- A warm-paper Light/Dark palette derived from custom `LinkitPalette` tokens.
-- Pairing-only state shows a Welcome screen; debug/dev fields (IP, port, token) are no longer visible in normal use.
+- Compose home: Device card (avatar, name, pulsing status), action grid (send file, clipboard, link, sync, reconnect), recent activity.
+- Warm-paper Light/Dark palette from `LinkitPalette`.
+- Pairing-only Welcome screen; debug IP/port/token hidden from normal use.
+- Network hints when hotspot or flaky connectivity is detected.
+- One-time prompts: notification permission (Android 13+), battery optimization exemption (keeps FGS + Wi-Fi alive on Doze), phone and Bluetooth permissions as needed.
+
+### Menu Bar And UX (macOS)
+
+- Packaged menu-bar `.app` with animated status icon (paired, transferring, success, error, pairing).
+- Menu: connected/paired devices, pairing QR, transfer progress, drop folder, phone controls, call-audio setup, clipboard actions, in-app update check, diagnostics, transfer log, preferences, launch at login, recent transfers.
+- Drag-and-drop onto menu-bar icon for Mac → Android sends.
+- Separate **paired** vs **connected** device state in UI and trust store.
 
 ### Debug Panel (Android)
 
-- Hidden screen launched by tapping the **Linkit** wordmark seven times within ~1.5 s windows.
-- `DebugTelemetry` is a process-scoped singleton that exposes:
-  - CPU time via `android.os.Process.getElapsedCpuTime()` (since process start and since baseline)
-  - Per-UID network bytes via `TrafficStats.getUidRxBytes/getUidTxBytes(uid)`
-  - Foreground-service uptime windows (`LinkitReceiverService`, `LinkitSendService`)
-  - System battery samples on service start/stop + on demand
-  - Event log (reconnect, discovery, presence, fgs, client calls) — last 120 entries
-  - Log ring buffer — last 500 lines
-- Controls: **Reset baseline**, **Clear logs**, **Copy full report**, **Copy `adb dumpsys batterystats` command** (`adb shell dumpsys batterystats --charged tech.kalkikgp.linkit`).
-- In-app numbers are proxies; ground-truth mAh attribution still requires the adb command on a host machine.
-
-### Menu Bar And UX
-
-- Mac runs as a packaged menu-bar `.app`.
-- Menu shows connected and paired devices.
-- Menu includes pairing QR, transfer progress, drop folder, diagnostics, transfer log, preferences, launch-at-login toggle, recent transfers, clipboard actions, and refresh.
-- Mac private identity key is stored in Keychain with migration from the old `mac-identity.p256` file.
-- Packaged app supports launch at login.
-- Android app has hotspot/flaky-network hints.
+- Hidden screen: tap **Linkit** wordmark seven times within ~1.5 s windows.
+- `DebugTelemetry` (process singleton): CPU time, per-UID `TrafficStats`, FGS uptime (`LinkitReceiverService`, `LinkitSendService`), battery samples, event log (120 entries), log ring buffer (500 lines).
+- Controls: reset baseline, clear logs, copy report, copy `adb dumpsys batterystats` command.
 
 ### Packaging And Verification
 
-- Local macOS app build: `dist/Linkit.app`
-- Signed Android release APK: `dist/linkit-release.apk`
-- Debug APK: `android/app/build/outputs/apk/debug/app-debug.apk`
-- Current verification has passed:
-  - `swift test`
-  - `./gradlew testDebugUnitTest`
-  - `./gradlew assembleDebug`
-  - `./scripts/build-macos-app.sh`
-  - `./scripts/build-android-release.sh`
-  - `git diff --check`
+Local builds:
+```sh
+./scripts/build-macos-app.sh       # -> dist/Linkit.app
+./scripts/build-android-release.sh # -> dist/linkit-release.apk
+./scripts/verify.sh                # swift test + Mac build + Android tests + debug APK
+```
+
+Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gradlew assembleDebug`, release build scripts, `git diff --check`. Release workflow also runs Mac + Android tests before upload.
 
 ## Known Limits
 
 - One trusted phone + one Mac is the intended personal-use path.
-- Each HTTP transfer session is still one file; UI queues multiple files by sending multiple sessions.
-- Android -> Mac automatic clipboard sync cannot run in the background because of Android clipboard privacy rules.
-- Android phone call audio relay is not implemented; current phone support is call control only.
-- Android receive still depends on the foreground receiver service.
-- TLS/mTLS/Noise is not implemented; traffic is local HTTP with signed control/upload requests.
-- Resumable/chunked transfers are not implemented.
-- Folder sync is not implemented.
-- Remote internet transfer is not implemented.
-- Public distribution, Play Store release, notarized macOS app, and CI are not done.
+- Each HTTP transfer session is one file; UI queues multiple files as multiple sessions.
+- Android → Mac automatic clipboard sync cannot run in the background (Android clipboard privacy).
+- Cellular call audio is not relayed over LAN; Bluetooth HFP is experimental and separate from Wi-Fi pairing.
+- Android receive depends on the foreground receiver service (and user granting notifications / optional battery exemption).
+- TLS/mTLS/Noise not implemented — local HTTP with signed control/upload requests.
+- Resumable/chunked transfers, folder sync, remote internet transfer, multi-device, and non-Android/non-macOS clients not implemented.
+- Play Store and notarized macOS distribution not done.
 
 ## Next Sensible Improvements
 
 - Add SAF-selected save location for Android receives.
 - Add multi-file transfer sessions instead of one session per file.
 - Add WebSocket or event stream for richer live state.
-- Add a Quick Settings tile for **Send Clipboard to Mac** (notification action buttons already exist).
-- Mirror the Debug telemetry panel into the Mac menu-bar app (Option-click → diagnostics) with `proc_pid_rusage` and `powermetrics` callouts.
-- Add CI for Swift and Android test/build checks.
+- Quick Settings tile for **Send Clipboard to Mac** (notification actions already exist).
+- Mirror debug telemetry into the Mac menu-bar diagnostics.
+- Add CI workflow for PR test/build checks (release workflow exists; no separate PR CI yet).

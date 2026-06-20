@@ -4,21 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Linkit is
 
-A private, cloud-free local device link between **one** Android phone and **one** Mac. It moves files, clipboard text, links, and (newer) phone-call control directly over the LAN / phone hotspot using signed HTTP requests. No accounts, no relay server, no internet data path. Two native apps share one symmetric protocol — there is no shared code between them, only the wire format in `protocol/`.
+A private, cloud-free local device link between **one** Android phone and **one** Mac. It moves files, clipboard text, links, and phone-call control directly over the LAN / phone hotspot using signed HTTP requests. No accounts, no relay server, no internet data path. Two native apps share one symmetric wire format implemented separately in Swift and Kotlin.
 
-The README is product-facing and largely accurate; `docs/current-state.md` is the most current feature snapshot, and `protocol/mvp.md` is the authoritative wire spec. When behavior and docs disagree, trust the code and update the docs.
+The README is product-facing. **`docs/current-state.md`** is the technical feature snapshot (keep it updated when shipping). When behavior and docs disagree, trust the code and update the docs.
+
+**Latest release:** v0.6.1 on GitHub Releases (in-app updaters on both platforms).
 
 ## Repository layout
 
 - `macos/` — Swift Package (`swift-tools-version: 5.9`, macOS 13+). Three targets:
   - `LinkitMacCore` (library) — all protocol, HTTP server, trust, transfer, identity logic. Almost all real Mac logic lives here and is the only target with unit tests.
-  - `LinkitMacMenu` (executable) — the shipped menu-bar app (`LSUIElement`), links `IOBluetooth`. Packaged into `dist/Linkit.app`.
+  - `LinkitMacMenu` (executable) — the shipped menu-bar app (`LSUIElement`), links `IOBluetooth` for Hands-Free call audio. Packaged into `dist/Linkit.app` by build scripts.
   - `LinkitMacReceiver` (executable) — headless terminal receiver, used for dev/smoke tests.
 - `android/` — Gradle/Kotlin app, package `tech.kalkikgp.linkit`, Compose UI, minSdk 26 / target+compile 36. Single `app` module; all sources flat in `android/app/src/main/java/tech/kalkikgp/linkit/`.
-- `protocol/` — wire spec (`mvp.md` is current; `phase0.md`/`phase1.md` are historical) plus `examples/`.
 - `scripts/` — build / package / smoke-test shell scripts.
-- `docs/` — `current-state.md`, `SETUP.md`, design notes.
-- `dist/` — built artifacts (`Linkit.app`, `linkit-release.apk`, update manifests). Committed.
+- `docs/` — `current-state.md`, `SETUP.md` (developer setup).
+- `dist/` — local build output (`Linkit.app`, `linkit-release.apk`, update manifests). **Gitignored**; release binaries live on GitHub Releases.
 
 ## Build, test, run
 
@@ -48,12 +49,13 @@ Smoke the whole signed-transfer stack without a phone:
 ./scripts/smoke-signed-transfer.sh
 ```
 
-Packaging (see `docs/SETUP.md` for the in-app-updater manifest details):
+Packaging (see `docs/SETUP.md` for in-app-updater manifest URLs):
 ```sh
 ./scripts/build-macos-app.sh       # -> dist/Linkit.app
 ./scripts/build-android-release.sh # -> dist/linkit-release.apk (creates local keystore on first run)
 ```
-Release CI: `.github/workflows/release.yml` builds both apps + updater manifests on tag.
+
+Release CI: `.github/workflows/release.yml` builds both apps + updater manifests. Prefer **`workflow_dispatch`** with explicit `version_name` and `version_code` (must increase Android `versionCode`). Tag-only pushes use `GITHUB_RUN_NUMBER` for `version_code`, which may not track the app version — v0.6+ were cut via workflow dispatch.
 
 ## Architecture
 
@@ -66,24 +68,30 @@ Key `/v1` routes (same on both sides): `GET /info`, `POST /identity/proof`, `POS
 
 ### Trust & crypto (the core invariant)
 All control requests after pairing are **P-256 ECDSA + SHA-256 signed**. Each device generates a private signing key on first run that never leaves the device (Mac: Keychain via `IdentityStore`/`IdentityAndTrust.swift`; Android: `IdentityStore.kt`). Verifier: `SignedRequestVerifier.swift` / signing in `AndroidDropReceiver` + `LinkitClient`.
-- Signed-header scheme, canonical strings, pairing challenge, and `identity/proof` are specified exactly in `protocol/mvp.md` — **read it before touching any request signing/verification.** Both implementations must match byte-for-byte (e.g. the Android public key is base64 x963 and must be byte-identical across QR payload and pair canonical string).
+- Signed-header scheme, canonical strings, pairing challenge, and `identity/proof` are implemented in `IdentityStore` / `IdentityAndTrust.swift` (Mac) and `IdentityStore.kt` / `AndroidDropReceiver` + `LinkitClient` (Android). **Read both sides before touching signing or verification.** Both implementations must match byte-for-byte (e.g. the Android public key is base64 x963 and must be byte-identical across QR payload and pair canonical string).
 - Receiver rejects unless: device id is trusted, timestamp within ±60s, nonce unused for 120s, signature valid against the stored peer key.
 - Pairing is QR-only (Mac shows QR → Android scans, signs a one-time challenge). Manual token pairing is intentionally disabled.
 
 ### Transfers
-Streamed with constant memory and end-to-end SHA-256 verification; the upload slot is signed but the file body streams unsigned under a single-use upload token bound to transfer/file/size/device. Finalize is idempotent. One file per HTTP session — multi-file is done by issuing multiple sessions. Files land in `~/Downloads/Linkit Drop` (Mac) / `Downloads/Linkit Drop` (Android). Mac transfer/trust/history state: `TransferStore`, `TransferHistoryStore`, `TrustStore`, `DeviceConnectionRegistry`.
+Streamed with constant memory and end-to-end SHA-256 verification; the upload slot is signed but the file body streams unsigned under a single-use upload token bound to transfer/file/size/device. Finalize is idempotent. One file per HTTP session — multi-file is done by issuing multiple sessions. Files land in `~/Downloads/Linkit Drop` (Mac) / `Downloads/Linkit Drop` (Android). Mac transfer/trust/history state: `TransferStore`, `TransferHistoryStore`, `TrustStore`, `DeviceConnectionRegistry`. Android share intents pass content URIs directly to `LinkitSendService` (no share-cache copy).
 
 ### Discovery, reconnect & presence
-- Bonjour `_linkit._tcp` advertises the receiver (`BonjourAdvertiser.swift` / `BonjourDiscovery.kt`); Bonjour is treated as **address discovery only**. After rediscovery Android re-verifies the Mac via signed `POST /v1/identity/proof` (`MacRediscovery.kt`, `MacPresence.kt`) before trusting a new IP/port — never trust a rediscovered endpoint without identity proof.
-- Reconnect after Wi-Fi/hotspot changes happens without re-pairing: Android `ConnectivityManager` callbacks and Mac `NWPathMonitor` (`LocalNetwork.swift`) drive re-registration.
-- Bidirectional presence: Mac runs a periodic signed `GET /v1/devices/self/status` sweep; Android refreshes its registration and runs active identity proof after silence. Both converge on the same UI connection state.
+- Bonjour `_linkit._tcp` advertises the receiver (`BonjourAdvertiser.swift` / `BonjourDiscovery.kt`); Bonjour is **address discovery only**. After rediscovery Android re-verifies the Mac via signed `POST /v1/identity/proof` (`MacRediscovery.kt`, `MacPresence.kt`) before trusting a new IP/port — never trust a rediscovered endpoint without identity proof.
+- **`MacRediscovery.kt`** — shared mutex-guarded Bonjour lookup by paired device name + identity proof + persist new endpoint. Used by `MainActivity.discoverAndReconnect()` and `LinkitReceiverService.refreshMacRegistration()` when the stored Mac address fails.
+- Reconnect after Wi-Fi/hotspot changes happens without re-pairing: Android `ConnectivityManager` callbacks, resume-time rediscovery, and a paired-but-offline UI retry loop (~30 s); Mac `NWPathMonitor` (`LocalNetwork.swift` / menu app) drives re-probe and persists `lastKnownHost`/`receivePort` for Android.
+- Bidirectional presence: Mac runs a periodic signed `GET /v1/devices/self/status` sweep (~30 s staleness); Android foreground service refreshes Mac registration (~20 s) and runs active identity proof after >45 s silence. Both converge on the same UI connection state.
+- Android Doze resistance: foreground service holds a Wi-Fi lock; optional battery-optimization exemption prompt; partial wake lock during receive uploads.
 
 ### Android service model
 `LinkitReceiverService` is a foreground service (`foregroundServiceType="specialUse"`) that owns the receiver socket, presence refresh, network monitor, Wi-Fi lock, and `PhoneCallBridge`. `LinkitSendService` (`dataSync`) handles outbound sends. The app must be opened once to start the receiver. Android receive depends on this foreground service running.
 
+### Phone control & call audio
+- **Call control** (`PhoneControl.kt` / Mac menu): signed `phone_call`, `phone_answer`, `phone_decline`, `phone_hangup` actions; Android mirrors state with `phone_state` (number, display name when call log/contacts granted). Mac shows incoming-call panel when ringing.
+- **Cellular call audio** cannot be relayed over HTTP with public Android APIs — audio stays on the phone unless Bluetooth Hands-Free is used.
+- **Bluetooth call audio (experimental):** Mac `HandsFreeBridge.swift` + `IOBluetooth`; Android `BluetoothPairAssist.kt` bonds using the Mac's Bluetooth address from `GET /info`. Menu: **Set Up Call Audio...**, **Move Call Audio to Mac/Phone**.
+
 ### Notable platform constraints (don't "fix" these — they're OS limits)
 - **Clipboard:** Android 10+ blocks background clipboard reads. Mac→Android clipboard push works anytime; automatic Android→Mac clipboard sync is foreground-only. `ClipboardActionActivity` defers the read to `onWindowFocusChanged(true)` so notification-button copies work.
-- **Phone control** (`feat/phone-control` branch, `PhoneControl.kt` / `HandsFreeBridge.swift`): call control only — start/answer/decline/hang-up via signed `phone_call`/`phone_answer`/`phone_decline`/`phone_hangup` actions, with `phone_state` mirroring to the Mac. Cellular **call audio stays on Android**; ordinary apps can't forward it with public permissions. Bluetooth audio routing to the Mac is the separate experimental path.
 - No TLS/mTLS/Noise — transport is plain local HTTP; security comes from the signing layer.
 
 ### Android debug telemetry
@@ -92,5 +100,5 @@ Hidden panel: tap the **Linkit** wordmark 7× (`DebugActivity` / `DebugTelemetry
 ## Conventions
 
 - Commit messages: short single-line subject, no body, no `Co-Authored-By` trailer.
-- Keep `macos` (Swift) and `android` (Kotlin) protocol implementations in lockstep; a change to signing, canonical strings, routes, or the QR payload must land on both sides and be reflected in `protocol/mvp.md`.
+- Keep `macos` (Swift) and `android` (Kotlin) protocol implementations in lockstep; a change to signing, canonical strings, routes, or the QR payload must land on both sides.
 - Secrets are gitignored: `android/keystore.properties`, `android/linkit-release.keystore`, `android/local.properties` (copy `keystore.properties.example` to set up your own).

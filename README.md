@@ -2,7 +2,7 @@
 
 **Drop files, text, and links between your Android phone and your Mac. Locally. Instantly. No cloud.**
 
-Linkit is a small, private device link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar. Clipboard text and links move across the same signed local channel.
+Linkit is a small, private device link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar. Clipboard text and links move across the same signed local channel. You can even place and control phone calls from your Mac, with optional Bluetooth call audio routing.
 
 No accounts. No upload to a server. No 25 MB email limit. No "your file is too large for AirDrop." Just your phone and your Mac talking directly over your local network.
 
@@ -38,9 +38,15 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 - Use the Mac menu to send clipboard text to Android or open the clipboard URL on Android.
 - Turn on clipboard text sync from the Mac menu to push Mac clipboard changes to Android.
 
+**Phone calls from Mac**
+- **Call Number on Android...** — dial from the Mac; Android places the call (or opens the dialer if permission is missing).
+- **Answer**, **Decline**, and **Hang Up** when Android grants call-control permission.
+- Incoming calls can show a Mac prompt with caller number and contact name when Android grants call log / contacts access.
+- **Experimental:** pair over Bluetooth and route call audio to the Mac speaker/mic via Hands-Free (HFP). Cellular audio otherwise stays on the phone — normal apps cannot forward call audio over the LAN.
+
 **Clipboard caveat:** Android 10+ limits clipboard reads to focused apps and input methods. Automatic Android → Mac clipboard sync only works while Linkit is open/focused; background copies from other Android apps need the Linkit share sheet or the explicit **Send Clipboard** button. Mac → Android clipboard sync can run from the Mac menu-bar app.
 
-**Reconnect after network changes** — when Wi-Fi or hotspot is toggled, both apps refresh presence immediately. Android re-discovers the paired Mac via Bonjour, verifies it with signed Mac identity proof, and re-registers its receiver; macOS probes connected Android devices as soon as its network path changes. No re-scanning the QR.
+**Reconnect after network changes** — when Wi-Fi or hotspot is toggled, both apps refresh presence without re-pairing. Android rediscovers the paired Mac by name over Bonjour, verifies it with signed identity proof, and re-registers its receiver — including from the background foreground service and while the UI shows paired-but-offline. macOS persists the last-known Android endpoint, probes on network path changes, and can revive the peer when you send. No re-scanning the QR.
 
 **Bidirectional presence** — both sides know when the peer goes away. The Mac probes Android every ~30 s; Android refreshes its Mac registration in the background and actively proves the Mac before marking it offline after ~45 s of silence. The UI on each device reflects the same connection state.
 
@@ -78,9 +84,9 @@ You can pair on home Wi-Fi, office Wi-Fi, a coffee shop hotspot, or your phone's
 
 ## What's in the box
 
-**macOS app** — menu bar app. Click for paired devices, pairing QR, recent transfers, drop folder, and diagnostics. The icon changes when you're paired so you always know the state at a glance.
+**macOS app** — menu-bar app. Click for paired devices, pairing QR, recent transfers, drop folder, phone controls, optional call-audio setup, in-app update check, and diagnostics. The icon animates to reflect pairing, transfer, and connection state.
 
-**Android app** — Consumer-grade Compose UI: device hero card, four-tile action grid, recent activity, and a quiet background receiver so the Mac can push files or signed actions at any time. The receiver notification carries **Send Clipboard** and **Open Link** action buttons so you can hand off without opening the app. A hidden debug panel (tap the **Linkit** wordmark seven times) shows process CPU, per-UID network bytes, foreground-service uptime, battery delta, reconnect/discovery events, and a log ring buffer.
+**Android app** — Consumer-grade Compose UI: device hero card, action grid (send file, clipboard, link, sync, reconnect), recent activity, phone-permission status, and a quiet background receiver so the Mac can push files or signed actions at any time. The receiver notification carries **Send Clipboard** and **Open Link** action buttons so you can hand off without opening the app. A hidden debug panel (tap the **Linkit** wordmark seven times) shows process CPU, per-UID network bytes, foreground-service uptime, battery delta, reconnect/discovery events, and a log ring buffer.
 
 ---
 
@@ -93,21 +99,22 @@ Linkit is deliberately one thing done well. These are not in the MVP:
 - Sending to multiple devices at once
 - Remote transfers over the internet
 - iPhone / Linux / Windows
+- Play Store or notarized macOS distribution
 
-Some of these may come later. The first version is about making one phone and one Mac feel like the same machine for local file transfer and text handoff.
+Some of these may come later. The first version is about making one phone and one Mac feel like the same machine for local file transfer, text handoff, and phone control.
 
 ---
 
 ## Status
 
-This is a private MVP for personal use. It is not on the Play Store or in a notarized macOS installer yet.
+Private project for personal use. **Latest release: [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/latest)** (June 2026) — signed Android APK and macOS zip on GitHub Releases, with in-app updaters on both platforms.
 
-For the current feature snapshot, see [`docs/current-state.md`](docs/current-state.md).
+For the technical feature snapshot, see [`docs/current-state.md`](docs/current-state.md).
 
-For local setup, sideloading, scripts, and protocol details, see [`docs/SETUP.md`](docs/SETUP.md).
+For local setup, sideloading, and build scripts, see [`docs/SETUP.md`](docs/SETUP.md).
 
 ---
 
 ## License & contact
 
-Built by Krishna ([@kalki-kgp](https://kalkikgp.tech)). Private project — no public distribution yet.
+Built by Krishna ([@kalki-kgp](https://kalkikgp.tech)). Source-available for personal use — see [`LICENSE`](LICENSE).
