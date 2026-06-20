@@ -4,6 +4,26 @@ Developer / sideload instructions for running Linkit locally.
 
 **Latest release:** [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/latest) — download `linkit-release.apk` and `linkit-macos.zip`, or use **Check for Updates** in the Mac menu / Android app settings.
 
+## Installing the macOS app
+
+Linkit's Mac app is **ad-hoc code-signed but not Apple-notarized** — notarization requires a paid Apple Developer account, and Linkit is free. The app is safe (the source is in this repo and you can build it yourself), but because it isn't notarized, Gatekeeper warns the first time you open a downloaded copy. This is a **one-time** step:
+
+1. Download `linkit-macos.zip` from the [latest release](https://github.com/kalki-kgp/Linkit/releases/latest) and unzip it.
+2. Move `Linkit.app` to `/Applications`.
+3. Open it once. macOS says *"Apple could not verify 'Linkit' is free of malware."* Click **Done** — **not** "Move to Trash".
+4. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the Linkit message, then confirm with **Open**.
+
+After that first allow it launches normally and the in-app updater works without prompting again.
+
+Prefer the terminal? Remove the quarantine flag instead of steps 3–4:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Linkit.app
+open /Applications/Linkit.app
+```
+
+The most paranoia-friendly option is to **build from source** (below) — a locally built app is never quarantined.
+
 ## Run the Mac app
 
 Menu-bar app (recommended):
