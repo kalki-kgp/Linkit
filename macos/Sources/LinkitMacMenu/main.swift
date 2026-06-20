@@ -1,8 +1,10 @@
 import AppKit
+import Combine
 import CoreImage
 import LinkitMacCore
 import Network
 import ServiceManagement
+import SwiftUI
 import UserNotifications
 
 private enum LinkitTransferPanelDirection {
@@ -65,14 +67,18 @@ private enum LinkitCallPanelMode {
     case active
 }
 
-final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
+final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
     private var app: LinkitReceiverApp?
     private var statusItem: NSStatusItem?
     private var statusIcon: StatusIconAnimator?
+    private let panelViewModel = PanelViewModel()
+    private let settingsViewModel = SettingsViewModel()
+    private var settingsWindow: NSWindow?
+    private var popover: NSPopover?
+    private var popoverClosedAt = Date.distantPast
+    private var transferStripClearWorkItem: DispatchWorkItem?
     private var qrWindow: NSWindow?
     private var retiredWindows: [NSWindow] = []
-    private var diagnosticsWindow: NSWindow?
-    private var preferencesWindow: NSWindow?
     private var transferPanel: LinkitTransferPanel?
     private var currentTransfer: LinkitTransferPanelState?
     private var transferStartedAtById: [String: Date] = [:]
@@ -82,7 +88,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var transferObservers: [NSObjectProtocol] = []
     private var deviceObserver: NSObjectProtocol?
     private var clipboardSyncTimer: Timer?
-    private var clipboardSyncEnabled = true
+    private let prefs = Preferences.shared
+    /// Proxies the persisted preference so existing call sites keep working and
+    /// the choice survives relaunch.
+    private var clipboardSyncEnabled: Bool {
+        get { prefs.clipboardSyncEnabled }
+        set { prefs.clipboardSyncEnabled = newValue }
+    }
     private var presenceTimer: Timer?
     private var presenceFailureCounts: [String: Int] = [:]
     private let presenceFailureThreshold = 3
@@ -102,12 +114,15 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private let handsFreeBridge = HandsFreeBridge.shared
     private var notificationCenter: UNUserNotificationCenter?
     private var appUpdater: MacAppUpdater?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        observeAppearance()
         configureNotifications()
         appUpdater = try? MacAppUpdater()
         do {
             let receiver = try LinkitReceiverApp(
+                configuration: makeReceiverConfiguration(),
                 bluetoothAddressProvider: { BluetoothInfo.macAddress() }
             )
             self.app = receiver
@@ -130,7 +145,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func setupHandsFreeBridge() {
         handsFreeBridge.onStateChange = { [weak self] in
-            self?.refreshMenu()
+            self?.refreshPanel()
         }
         handsFreeBridge.connectIfNeeded()
     }
@@ -141,9 +156,14 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         statusItem = item
         if let button = item.button {
             statusIcon = StatusIconAnimator(button: button)
+            button.target = self
+            button.action = #selector(statusItemClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        wirePanelActions()
+        wireSettingsActions()
         refreshStatusButton()
-        refreshMenu()
+        refreshPanel()
         startTransferObservers()
         startActionObserver()
         startDeviceObserver()
@@ -181,7 +201,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             lastTrustedSignature = trustedSignature
             lastConnectedSignature = connectedSignature
             refreshStatusButton()
-            refreshMenu()
+            refreshPanel()
 
             if hadTrustedSignature && !devices.isEmpty && !trustedSignature.isEmpty {
                 announcePairing(devices.last)
@@ -219,112 +239,171 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
-    private func refreshMenu() {
+    /// Pushes the current core state into the SwiftUI popover view model. Named
+    /// `refreshPanel` (formerly `refreshMenu`) and still called from every place
+    /// that used to rebuild the flat menu.
+    private func refreshPanel() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.refreshPanel() }
+            return
+        }
         guard let app else { return }
-        let menu = NSMenu()
-        menu.delegate = self
-        menu.addItem(NSMenuItem(title: "Receiving on \(LocalNetwork.bestPrivateIPv4()):\(app.configuration.port)", action: nil, keyEquivalent: ""))
         let trusted = app.trustedDevices()
         let connected = app.connectedDevices()
-        let connectedIds = Set(connected.map(\.deviceId))
-        if connected.isEmpty {
-            let item = NSMenuItem(title: "No connected devices", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-        } else {
-            let header = NSMenuItem(title: "Connected devices", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            for device in connected {
-                let item = NSMenuItem(title: "  \(device.deviceName) (\(device.platform))\(batterySuffix(device.batteryPercent))", action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                menu.addItem(item)
-                let refresh = NSMenuItem(title: "    Refresh \(device.deviceName) Status", action: #selector(refreshDeviceStatus(_:)), keyEquivalent: "")
-                refresh.representedObject = device.deviceId
-                menu.addItem(refresh)
-            }
-        }
-        menu.addItem(NSMenuItem.separator())
-        if trusted.isEmpty {
-            let item = NSMenuItem(title: "No paired devices", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-        } else {
-            let header = NSMenuItem(title: "Paired devices", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            for device in trusted {
-                let state = connectedIds.contains(device.deviceId) ? "connected" : "paired, offline"
-                let label = "  \(device.deviceName) (\(device.platform)) - \(state)"
-                let pairedItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
-                pairedItem.isEnabled = false
-                menu.addItem(pairedItem)
-                if connectedIds.contains(device.deviceId) {
-                    let disconnect = NSMenuItem(title: "    Disconnect \(device.deviceName)", action: #selector(disconnectDevice(_:)), keyEquivalent: "")
-                    disconnect.representedObject = device.deviceId
-                    menu.addItem(disconnect)
-                }
-                let forget = NSMenuItem(title: "    Forget \(device.deviceName)", action: #selector(forgetDevice(_:)), keyEquivalent: "")
-                forget.representedObject = device.deviceId
-                menu.addItem(forget)
-            }
-        }
         let androidTargets = connected.filter { $0.platform.lowercased() == "android" }
-        menu.addItem(NSMenuItem(title: androidTargets.isEmpty ? "Android drop target: connect Android first" : "Drop files here to send to \(androidTargets[0].deviceName)", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        let sendClipboard = NSMenuItem(title: "Send Clipboard Text to Android", action: #selector(sendClipboardTextToAndroid), keyEquivalent: "c")
-        sendClipboard.isEnabled = !androidTargets.isEmpty
-        menu.addItem(sendClipboard)
-        let openClipboardLink = NSMenuItem(title: "Open Clipboard Link on Android", action: #selector(openClipboardLinkOnAndroid), keyEquivalent: "u")
-        openClipboardLink.isEnabled = !androidTargets.isEmpty
-        menu.addItem(openClipboardLink)
-        let clipboardSync = NSMenuItem(title: "Clipboard Text Sync: \(clipboardSyncEnabled ? "On" : "Off")", action: #selector(toggleClipboardSync), keyEquivalent: "")
-        clipboardSync.isEnabled = !androidTargets.isEmpty || clipboardSyncEnabled
-        menu.addItem(clipboardSync)
-        menu.addItem(NSMenuItem.separator())
-        let phoneHeader = NSMenuItem(title: phoneMenuTitle(), action: nil, keyEquivalent: "")
-        phoneHeader.isEnabled = false
-        menu.addItem(phoneHeader)
-        let callNumber = NSMenuItem(title: "Call Number on Android...", action: #selector(callNumberOnAndroid), keyEquivalent: "")
-        callNumber.isEnabled = !androidTargets.isEmpty
-        menu.addItem(callNumber)
-        let phoneState = currentPhoneState?.state.lowercased()
-        let answerCall = NSMenuItem(title: "Answer Android Call", action: #selector(answerAndroidCall), keyEquivalent: "")
-        answerCall.isEnabled = !androidTargets.isEmpty && phoneState == "ringing"
-        menu.addItem(answerCall)
-        let declineCall = NSMenuItem(title: "Decline Android Call", action: #selector(declineAndroidCall), keyEquivalent: "")
-        declineCall.isEnabled = !androidTargets.isEmpty && phoneState == "ringing"
-        menu.addItem(declineCall)
-        let hangupCall = NSMenuItem(title: "Hang Up Android Call", action: #selector(hangupAndroidCall), keyEquivalent: "")
-        hangupCall.isEnabled = !androidTargets.isEmpty && (phoneState == "ringing" || phoneState == "active")
-        menu.addItem(hangupCall)
-        let callAudioStatus = NSMenuItem(title: "    \(handsFreeBridge.statusLabel)", action: nil, keyEquivalent: "")
-        callAudioStatus.isEnabled = false
-        menu.addItem(callAudioStatus)
-        let setupCallAudio = NSMenuItem(title: "Set Up Call Audio...", action: #selector(setupCallAudio), keyEquivalent: "")
-        setupCallAudio.isEnabled = !androidTargets.isEmpty
-        menu.addItem(setupCallAudio)
-        if handsFreeBridge.isConnected {
-            let moveAudioTitle = handsFreeBridge.audioLocation == .mac ? "Move Call Audio to Phone" : "Move Call Audio to Mac"
-            let moveAudio = NSMenuItem(title: moveAudioTitle, action: #selector(toggleCallAudioRoute), keyEquivalent: "")
-            moveAudio.isEnabled = phoneState == "active"
-            menu.addItem(moveAudio)
+        let pairedAndroid = trusted.first { $0.platform.lowercased() == "android" } ?? trusted.first
+
+        panelViewModel.localAddress = "\(LocalNetwork.bestPrivateIPv4()):\(app.configuration.port)"
+        panelViewModel.pairedDeviceName = pairedAndroid?.deviceName
+        panelViewModel.connectedDeviceName = androidTargets.first?.deviceName
+        panelViewModel.batteryPercent = androidTargets.first?.batteryPercent
+        panelViewModel.isConnected = !androidTargets.isEmpty
+        panelViewModel.hasAndroidTarget = !androidTargets.isEmpty
+        panelViewModel.clipboardSyncEnabled = clipboardSyncEnabled
+        panelViewModel.phone = panelPhoneState()
+        panelViewModel.callAudioStatus = handsFreeBridge.statusLabel
+        panelViewModel.callAudioConfigured = handsFreeBridge.isConnected
+        panelViewModel.callAudioOnMac = handsFreeBridge.audioLocation == .mac
+        panelViewModel.recentTransfers = app.recentTransfers(limit: 8).enumerated().map { index, entry in
+            RecentTransferRow(
+                id: "\(index)-\(entry.filename)",
+                filename: entry.filename,
+                status: entry.status,
+                savedPath: entry.savedPath,
+                direction: .unknown
+            )
         }
+    }
+
+    private func panelPhoneState() -> PanelPhoneState {
+        var phone = PanelPhoneState()
+        guard let state = currentPhoneState?.state.lowercased() else {
+            phone.statusText = "Waiting for Android permission"
+            return phone
+        }
+        switch state {
+        case "ringing":
+            phone.isRinging = true
+            phone.statusText = "Incoming call"
+            phone.callerLabel = currentPhoneState?.displayName
+        case "active":
+            phone.isActive = true
+            phone.statusText = "On a call"
+            phone.callerLabel = currentPhoneState?.displayName
+        default:
+            phone.statusText = "Ready"
+        }
+        return phone
+    }
+
+    /// Connects the popover's buttons to the delegate's existing handlers.
+    private func wirePanelActions() {
+        panelViewModel.onSendFile = { [weak self] in self?.pickFilesToSend() }
+        panelViewModel.onSendClipboard = { [weak self] in self?.sendClipboardTextToAndroid() }
+        panelViewModel.onOpenLink = { [weak self] in self?.openClipboardLinkOnAndroid() }
+        panelViewModel.onToggleClipboardSync = { [weak self] in self?.toggleClipboardSync() }
+        panelViewModel.onShowQR = { [weak self] in self?.closePopover(); self?.showPairingQR() }
+        panelViewModel.onReconnect = { [weak self] in self?.refreshAllDeviceStatus() }
+        panelViewModel.onCallNumber = { [weak self] in self?.callNumberOnAndroid() }
+        panelViewModel.onAnswer = { [weak self] in self?.answerAndroidCall() }
+        panelViewModel.onDecline = { [weak self] in self?.declineAndroidCall() }
+        panelViewModel.onHangUp = { [weak self] in self?.hangupAndroidCall() }
+        panelViewModel.onSetupCallAudio = { [weak self] in self?.setupCallAudio() }
+        panelViewModel.onToggleCallAudioRoute = { [weak self] in self?.toggleCallAudioRoute() }
+        panelViewModel.onOpenDropFolder = { [weak self] in self?.openDropFolder() }
+        panelViewModel.onOpenRecent = { [weak self] path in
+            self?.openRecentTransferPath(path)
+        }
+        panelViewModel.onCancelTransfer = { [weak self] in self?.cancelCurrentTransfer() }
+        panelViewModel.onOpenSettings = { [weak self] in self?.closePopover(); self?.showSettings() }
+        panelViewModel.onQuit = { [weak self] in self?.quit() }
+    }
+
+    // MARK: Status item interaction
+
+    @objc private func statusItemClicked() {
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+            showFallbackMenu()
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func togglePopover() {
+        guard let button = statusItem?.button else { return }
+        if let popover, popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        // The transient popover dismisses on the click that re-opens it; this
+        // guard stops the same click from immediately re-showing it.
+        if Date().timeIntervalSince(popoverClosedAt) < 0.25 { return }
+        refreshPanel()
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.delegate = self
+        let host = NSHostingController(rootView: LinkitPanelView(model: panelViewModel))
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
+        self.popover = popover
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func closePopover() {
+        popover?.performClose(nil)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popoverClosedAt = Date()
+        popover = nil
+    }
+
+    /// Minimal right-click safety net so the app is never stuck if the popover
+    /// misbehaves.
+    private func showFallbackMenu() {
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Open Linkit", action: #selector(togglePopoverAction), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
-        menu.addItem(NSMenuItem(title: "Transfer Progress", action: #selector(showTransferProgress), keyEquivalent: "t"))
-        menu.addItem(NSMenuItem(title: "Open Linkit Drop", action: #selector(openDropFolder), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem(title: "Diagnostics", action: #selector(showDiagnostics), keyEquivalent: "d"))
-        menu.addItem(NSMenuItem(title: "Open Transfer Log", action: #selector(openTransferLog), keyEquivalent: "l"))
-        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "u"))
-        menu.addItem(NSMenuItem(title: "Preferences", action: #selector(showPreferences), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: launchAtLoginMenuTitle(), action: #selector(toggleLaunchAtLogin), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(recentTransfersMenuItem(app: app))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Refresh", action: #selector(refreshMenuAction), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Quit Linkit", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
+        statusItem?.button?.performClick(nil)
+        statusItem?.menu = nil
+    }
+
+    @objc private func togglePopoverAction() {
+        togglePopover()
+    }
+
+    /// Lets the user pick files to send to Android (the drag-to-icon path still
+    /// works too).
+    @objc private func pickFilesToSend() {
+        closePopover()
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Send"
+        panel.message = "Choose files to send to your Android device"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        sendDroppedFiles(panel.urls)
+    }
+
+    private func openRecentTransferPath(_ path: String) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    private func refreshAllDeviceStatus() {
+        guard let app else { return }
+        for device in app.connectedDevices() {
+            _ = try? app.refreshConnectedDevice(device.deviceId)
+        }
+        refreshStatusButton()
+        refreshPanel()
     }
 
     @objc private func showPairingQR() {
@@ -385,11 +464,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         qrWindow = window
     }
 
-    @objc private func showTransferProgress() {
-        let state = currentTransfer ?? idleTransferState()
-        showTransferPanel(state: state)
-    }
-
     @objc private func openDropFolder() {
         guard let app else { return }
         NSWorkspace.shared.open(app.dropFolder)
@@ -420,7 +494,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             stopClipboardSync()
             showTransientIcon(.connected, tooltip: "Clipboard sync off")
         }
-        refreshMenu()
+        refreshPanel()
     }
 
     private func startClipboardSync() {
@@ -461,26 +535,12 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     if self.clipboardSyncEnabled {
                         self.clipboardSyncEnabled = false
                         self.stopClipboardSync()
-                        self.refreshMenu()
+                        self.refreshPanel()
                     }
                     self.showTransientIcon(.error, tooltip: "Android action failed")
                     self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
                 }
             }
-        }
-    }
-
-    private func phoneMenuTitle() -> String {
-        guard let state = currentPhoneState?.state.lowercased() else {
-            return "Phone: waiting for Android permission"
-        }
-        switch state {
-        case "ringing":
-            return "Phone: incoming \(currentPhoneState?.displayName ?? "Android call")"
-        case "active":
-            return "Phone: active Android call"
-        default:
-            return "Phone: ready"
         }
     }
 
@@ -570,7 +630,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func adoptPhoneForCallAudio(_ address: String) {
         handsFreeBridge.setPhoneAddress(address)
         showTransientIcon(.success, tooltip: "Call audio ready on Mac")
-        refreshMenu()
+        refreshPanel()
     }
 
     private func detectPairedPhoneAddress() -> String? {
@@ -596,7 +656,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             handsFreeBridge.moveAudioToMac()
             showTransientIcon(.success, tooltip: "Call audio moved to Mac")
         }
-        refreshMenu()
+        refreshPanel()
         if let state = currentPhoneState, callPanel?.isShown == true {
             callPanel?.present(
                 state: state,
@@ -788,104 +848,249 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
-    @objc private func showDiagnostics() {
-        guard let app else { return }
+    @objc private func showSettings() {
+        closePopover()
+        refreshSettings()
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let host = NSHostingController(rootView: SettingsView(model: settingsViewModel, prefs: prefs))
+        let window = NSWindow(contentViewController: host)
+        window.title = "Linkit Settings"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 760, height: 500))
+        window.delegate = self
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+    }
 
-        let trustedCount = app.trustedDevices().count
-        let recent = app.recentTransfers(limit: 5)
+    private func wireSettingsActions() {
+        settingsViewModel.onSetLaunchAtLogin = { [weak self] on in
+            self?.setLaunchAtLogin(enabled: on)
+            self?.refreshSettings()
+        }
+        settingsViewModel.onSetClipboardSync = { [weak self] on in
+            self?.setClipboardSync(enabled: on)
+            self?.refreshSettings()
+        }
+        settingsViewModel.onDisconnect = { [weak self] id in
+            self?.app?.disconnectDevice(id)
+            self?.refreshStatusButton()
+            self?.refreshPanel()
+            self?.refreshSettings()
+        }
+        settingsViewModel.onForget = { [weak self] id in self?.forgetDevice(id: id) }
+        settingsViewModel.onShowQR = { [weak self] in self?.showPairingQR() }
+        settingsViewModel.onRevealDropFolder = { [weak self] in self?.revealDropFolder() }
+        settingsViewModel.onOpenDropFolder = { [weak self] in self?.openDropFolder() }
+        settingsViewModel.onChangeDropFolder = { [weak self] in self?.chooseDropFolder() }
+        settingsViewModel.onResetDropFolder = { [weak self] in self?.resetDropFolder() }
+        settingsViewModel.onRelaunch = { [weak self] in self?.relaunchApp() }
+        settingsViewModel.onOpenRecent = { [weak self] path in self?.openRecentTransferPath(path) }
+        settingsViewModel.onOpenLog = { [weak self] in self?.openTransferLog() }
+        settingsViewModel.onSetupCallAudio = { [weak self] in self?.setupCallAudio() }
+        settingsViewModel.onToggleCallAudioRoute = { [weak self] in self?.toggleCallAudioRoute() }
+        settingsViewModel.onCheckUpdates = { [weak self] in self?.checkForUpdates() }
+        settingsViewModel.onCopyReport = { [weak self] in self?.copyDiagnosticsReport() }
+        settingsViewModel.onRefresh = { [weak self] in self?.refreshSettings() }
+    }
+
+    private func refreshSettings() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.refreshSettings() }
+            return
+        }
+        guard let app else { return }
+        let connected = app.connectedDevices()
+        let connectedIds = Set(connected.map(\.deviceId))
+        let byId = Dictionary(connected.map { ($0.deviceId, $0) }, uniquingKeysWith: { first, _ in first })
+        settingsViewModel.launchAtLogin = isLaunchAtLoginEnabled
+        settingsViewModel.launchAtLoginAvailable = isRunningFromAppBundle
+        settingsViewModel.clipboardSyncEnabled = clipboardSyncEnabled
+        settingsViewModel.devices = app.trustedDevices().map { device in
+            SettingsDeviceRow(
+                id: device.deviceId,
+                name: device.deviceName,
+                platform: device.platform,
+                isConnected: connectedIds.contains(device.deviceId),
+                batteryPercent: byId[device.deviceId]?.batteryPercent
+            )
+        }
+        settingsViewModel.localIP = LocalNetwork.bestPrivateIPv4()
+        settingsViewModel.port = "\(app.configuration.port)"
+        settingsViewModel.dropFolderPath = app.dropFolder.path
+        settingsViewModel.dropFolderIsCustom = prefs.dropFolderBookmark != nil
+        settingsViewModel.canRelaunch = isRunningFromAppBundle
+        settingsViewModel.logPath = app.logFile.path
+        settingsViewModel.trustedCount = app.trustedDevices().count
+        settingsViewModel.recentTransfers = app.recentTransfers(limit: 10).enumerated().map { index, entry in
+            RecentTransferRow(
+                id: "\(index)-\(entry.filename)",
+                filename: entry.filename,
+                status: entry.status,
+                savedPath: entry.savedPath,
+                direction: .unknown
+            )
+        }
+        settingsViewModel.phoneStatus = panelPhoneState().statusText
+        settingsViewModel.callAudioStatus = handsFreeBridge.statusLabel
+        settingsViewModel.callAudioConfigured = handsFreeBridge.isConnected
+        settingsViewModel.callAudioOnMac = handsFreeBridge.audioLocation == .mac
+        settingsViewModel.version = appVersionString()
+        settingsViewModel.build = appBuildString()
+    }
+
+    private func setClipboardSync(enabled: Bool) {
+        guard enabled != clipboardSyncEnabled else { return }
+        toggleClipboardSync()
+    }
+
+    // MARK: Preferences applied at launch
+
+    /// Builds the receiver configuration from saved preferences. Port and drop
+    /// folder are applied here (at launch) rather than live, so the bound socket
+    /// and transfer store are never rebuilt under a running transfer.
+    private func makeReceiverConfiguration() -> ReceiverConfiguration {
+        let port = prefs.listenPort
+        let portValue: UInt16 = (port > 0 && port <= 65_535) ? UInt16(port) : 52718
+        return ReceiverConfiguration(port: portValue, destination: resolvedDropFolder())
+    }
+
+    private func resolvedDropFolder() -> URL? {
+        guard let data = prefs.dropFolderBookmark else { return nil }
+        var stale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        ) else { return nil }
+        _ = url.startAccessingSecurityScopedResource()
+        return url
+    }
+
+    private func observeAppearance() {
+        prefs.$appearance
+            .receive(on: RunLoop.main)
+            .sink { [weak self] pref in self?.applyAppearance(pref) }
+            .store(in: &cancellables)
+    }
+
+    private func applyAppearance(_ pref: LinkitAppearancePreference) {
+        switch pref {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+
+    @objc private func chooseDropFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose where received files are saved"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            prefs.dropFolderBookmark = data
+            refreshSettings()
+            promptRelaunchToApply(what: "new save location")
+        } catch {
+            showNonFatalError("Could not set the save location: \(error.localizedDescription)")
+        }
+    }
+
+    private func resetDropFolder() {
+        prefs.dropFolderBookmark = nil
+        refreshSettings()
+        promptRelaunchToApply(what: "default save location")
+    }
+
+    private func promptRelaunchToApply(what: String) {
+        let alert = NSAlert()
+        alert.messageText = "Relaunch to apply"
+        alert.informativeText = "Linkit applies the \(what) when it starts. Relaunch now?"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: isRunningFromAppBundle ? "Relaunch" : "OK")
+        if isRunningFromAppBundle {
+            alert.addButton(withTitle: "Later")
+        }
+        let response = alert.runModal()
+        if isRunningFromAppBundle, response == .alertFirstButtonReturn {
+            relaunchApp()
+        }
+    }
+
+    private func relaunchApp() {
+        guard isRunningFromAppBundle else { return }
+        let url = Bundle.main.bundleURL
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+
+    private func forgetDevice(id deviceId: String) {
+        guard let app else { return }
+        do {
+            try app.forgetDevice(deviceId)
+            lastTrustedSignature = ""
+            lastConnectedSignature = ""
+            refreshStatusButton()
+            refreshPanel()
+            refreshSettings()
+        } catch {
+            showNonFatalError("Could not forget device: \(error.localizedDescription)")
+        }
+    }
+
+    private func revealDropFolder() {
+        guard let app else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([app.dropFolder])
+    }
+
+    private func copyDiagnosticsReport() {
+        guard let app else { return }
         let body = [
+            "Linkit \(appVersionString()) (\(appBuildString()))",
             "Status: receiving",
             "IP: \(LocalNetwork.bestPrivateIPv4())",
             "Port: \(app.configuration.port)",
             "Drop: \(app.dropFolder.path)",
-            "Trusted devices: \(trustedCount)",
-            "Recent transfers: \(recent.count)",
-            "Log: \(app.logFile.path)"
+            "Trusted devices: \(app.trustedDevices().count)",
+            "Log: \(app.logFile.path)",
         ].joined(separator: "\n")
-
-        let text = NSTextField(wrappingLabelWithString: body)
-        text.frame = NSRect(x: 24, y: 24, width: 420, height: 180)
-        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        text.isSelectable = true
-
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 468, height: 228))
-        content.addSubview(text)
-
-        let window = NSWindow(contentRect: content.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Linkit Diagnostics"
-        window.center()
-        window.contentView = content
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        diagnosticsWindow = window
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(body, forType: .string)
+        showTransientIcon(.success, tooltip: "Diagnostics copied")
     }
 
-    @objc private func showPreferences() {
-        if let preferencesWindow {
-            preferencesWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 188))
-
-        let title = label("Preferences", frame: NSRect(x: 24, y: 138, width: 360, height: 26), size: 20, weight: .semibold)
-        let launchCheckbox = NSButton(checkboxWithTitle: "Launch Linkit at login", target: self, action: #selector(setLaunchAtLogin(_:)))
-        launchCheckbox.frame = NSRect(x: 24, y: 100, width: 280, height: 24)
-        launchCheckbox.state = isLaunchAtLoginEnabled ? .on : .off
-        launchCheckbox.isEnabled = isRunningFromAppBundle
-
-        let explanation = isRunningFromAppBundle
-            ? "Starts the menu-bar receiver automatically after you sign in."
-            : "Build and run dist/Linkit.app to enable this setting."
-        let helper = NSTextField(wrappingLabelWithString: explanation)
-        helper.frame = NSRect(x: 24, y: 62, width: 392, height: 34)
-        helper.textColor = NSColor.secondaryLabelColor
-        helper.font = .systemFont(ofSize: 12)
-
-        let keyStorage = NSTextField(wrappingLabelWithString: "Mac identity key: Keychain")
-        keyStorage.frame = NSRect(x: 24, y: 28, width: 392, height: 20)
-        keyStorage.textColor = NSColor.secondaryLabelColor
-        keyStorage.font = .systemFont(ofSize: 12, weight: .medium)
-
-        content.addSubview(title)
-        content.addSubview(launchCheckbox)
-        content.addSubview(helper)
-        content.addSubview(keyStorage)
-
-        let window = NSWindow(contentRect: content.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Linkit Preferences"
-        window.delegate = self
-        window.center()
-        window.contentView = content
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        preferencesWindow = window
+    private func appVersionString() -> String {
+        appUpdater?.currentVersion ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
     }
 
-    @objc private func openRecentTransfer(_ sender: NSMenuItem) {
-        guard let path = sender.representedObject as? String else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
-    }
-
-    @objc private func refreshMenuAction() {
-        checkForTrustChanges()
-        refreshMenu()
-    }
-
-    @objc private func toggleLaunchAtLogin() {
-        setLaunchAtLogin(enabled: !isLaunchAtLoginEnabled)
-    }
-
-    @objc private func setLaunchAtLogin(_ sender: NSButton) {
-        setLaunchAtLogin(enabled: sender.state == .on)
-        sender.state = isLaunchAtLoginEnabled ? .on : .off
+    private func appBuildString() -> String {
+        if let appUpdater { return "\(appUpdater.currentBuild)" }
+        return (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "0"
     }
 
     private func setLaunchAtLogin(enabled: Bool) {
         guard isRunningFromAppBundle else {
             showNonFatalError("Launch at login is only available from the packaged Linkit.app.")
-            refreshMenu()
+            refreshPanel()
             return
         }
         do {
@@ -896,64 +1101,15 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             } else if isLaunchAtLoginEnabled {
                 try SMAppService.mainApp.unregister()
             }
-            refreshMenu()
+            refreshPanel()
         } catch {
             showNonFatalError("Could not update launch at login: \(error.localizedDescription)")
-            refreshMenu()
+            refreshPanel()
         }
     }
 
     private var isLaunchAtLoginEnabled: Bool {
         SMAppService.mainApp.status == .enabled
-    }
-
-    private func launchAtLoginMenuTitle() -> String {
-        "Launch at Login: \(isLaunchAtLoginEnabled ? "On" : "Off")"
-    }
-
-    @objc private func disconnectDevice(_ sender: NSMenuItem) {
-        guard let deviceId = sender.representedObject as? String else { return }
-        app?.disconnectDevice(deviceId)
-        refreshStatusButton()
-        refreshMenu()
-    }
-
-    @objc private func forgetDevice(_ sender: NSMenuItem) {
-        guard let app, let deviceId = sender.representedObject as? String else { return }
-        do {
-            try app.forgetDevice(deviceId)
-            lastTrustedSignature = ""
-            lastConnectedSignature = ""
-            refreshStatusButton()
-            refreshMenu()
-        } catch {
-            showNonFatalError("Could not forget device: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func refreshDeviceStatus(_ sender: NSMenuItem) {
-        guard let app, let deviceId = sender.representedObject as? String else { return }
-        statusIcon?.setState(.transferring(direction: .macToAndroid), tooltip: "Refreshing device status")
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let connected = try app.refreshConnectedDevice(deviceId)
-                DispatchQueue.main.async {
-                    let battery = connected.batteryPercent.map { "\($0)%" } ?? "unknown"
-                    self.showTransientIcon(.success, tooltip: "Battery \(battery)")
-                    self.refreshMenu()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    if let failure = error as? HTTPFailure,
-                       failure.status == 401 || failure.error == "device_status_mismatch" {
-                        app.disconnectDevice(deviceId)
-                    }
-                    self.showTransientIcon(.error, tooltip: "Device status unavailable")
-                    self.refreshMenu()
-                    self.showNonFatalError("Could not refresh device status: \(error.localizedDescription)")
-                }
-            }
-        }
     }
 
     @objc private func quit() {
@@ -974,7 +1130,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     func menuWillOpen(_ menu: NSMenu) {
         checkForTrustChanges()
-        refreshMenu()
+        refreshPanel()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -982,10 +1138,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if closedWindow === qrWindow {
             qrWindow = nil
             refreshStatusButton()
-        } else if closedWindow === preferencesWindow {
-            preferencesWindow = nil
-        } else if closedWindow === diagnosticsWindow {
-            diagnosticsWindow = nil
+        } else if closedWindow === settingsWindow {
+            settingsWindow = nil
         }
     }
 
@@ -996,6 +1150,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         dropView.button = button
         dropView.onDrop = { [weak self] urls in
             self?.sendDroppedFiles(urls)
+        }
+        dropView.onRightClick = { [weak self] in
+            self?.showFallbackMenu()
         }
         button.addSubview(dropView)
     }
@@ -1068,7 +1225,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                         )
                     )
                     self.showTransientIcon(.success, tooltip: "Sent \(results.count) file\(results.count == 1 ? "" : "s")")
-                    self.refreshMenu()
+                    self.refreshPanel()
                 }
             } catch is CancellationError {
                 DispatchQueue.main.async {
@@ -1090,7 +1247,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                         )
                     )
                     self.refreshStatusButton()
-                    self.refreshMenu()
+                    self.refreshPanel()
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -1113,7 +1270,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     )
                     self.showTransientIcon(.error, tooltip: "Send failed")
                     self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
-                    self.refreshMenu()
+                    self.refreshPanel()
                 }
             }
         }
@@ -1264,7 +1421,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     self?.showTransientIcon(.error, tooltip: "Transfer failed")
                     self?.postReceiveFailedNotification(userInfo: notification.userInfo)
                 }
-                self?.refreshMenu()
+                self?.refreshPanel()
             }
         )
     }
@@ -1309,7 +1466,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         else { return }
         currentPhoneState = state
         handsFreeBridge.connectIfNeeded()
-        refreshMenu()
+        refreshPanel()
 
         let panel = ensureCallPanel()
         let hfpConnected = handsFreeBridge.isConnected
@@ -1402,7 +1559,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         fputs("Linkit network changed: \(signature)\n", stderr)
         refreshStatusButton()
-        refreshMenu()
+        refreshPanel()
 
         networkRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
@@ -1444,7 +1601,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                             self.presenceFailureCounts[deviceId] = 0
                             app.disconnectDevice(deviceId)
                             self.refreshStatusButton()
-                            self.refreshMenu()
+                            self.refreshPanel()
                             return
                         }
                         let next = (self.presenceFailureCounts[deviceId] ?? 0) + 1
@@ -1480,6 +1637,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func postReceivedNotification(userInfo: [AnyHashable: Any]?) {
+        guard prefs.notifyOnTransferComplete else { return }
         guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let senderId = userInfo?[LinkitTransferNotification.senderDeviceIdKey] as? String
@@ -1503,6 +1661,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func postReceiveFailedNotification(userInfo: [AnyHashable: Any]?) {
+        guard prefs.notifyOnTransferComplete else { return }
         guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let error = (userInfo?[LinkitTransferNotification.errorKey] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -1546,6 +1705,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func showTransferPanel(state: LinkitTransferPanelState) {
         currentTransfer = state
+        updatePanelTransfer(state)
         let panel = transferPanel ?? LinkitTransferPanel()
         transferPanel = panel
         panel.onCancel = { [weak self] in self?.cancelCurrentTransfer() }
@@ -1557,6 +1717,23 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         if !state.isActive {
             panel.closeAfterDelay(5)
+        }
+    }
+
+    private func updatePanelTransfer(_ state: LinkitTransferPanelState) {
+        transferStripClearWorkItem?.cancel()
+        panelViewModel.activeTransfer = PanelTransfer(
+            title: state.title,
+            detail: state.detail,
+            progress: state.progress,
+            isOutgoing: state.direction == .macToAndroid,
+            isActive: state.isActive,
+            didFail: state.didFail
+        )
+        if !state.isActive {
+            let work = DispatchWorkItem { [weak self] in self?.panelViewModel.activeTransfer = nil }
+            transferStripClearWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
         }
     }
 
@@ -1573,43 +1750,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
-    private func idleTransferState() -> LinkitTransferPanelState {
-        LinkitTransferPanelState(
-            title: "No active transfer",
-            detail: "Recent Linkit drops",
-            progress: nil,
-            bytesDone: 0,
-            totalBytes: 0,
-            speedBytesPerSecond: 0,
-            etaSeconds: nil,
-            direction: .androidToMac,
-            isActive: false,
-            didFail: false
-        )
-    }
-
-    private func recentTransfersMenuItem(app: LinkitReceiverApp) -> NSMenuItem {
-        let item = NSMenuItem(title: "Recent Transfers", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        let entries = app.recentTransfers(limit: 8)
-        if entries.isEmpty {
-            submenu.addItem(NSMenuItem(title: "No transfers yet", action: nil, keyEquivalent: ""))
-        } else {
-            for entry in entries {
-                let title = "\(entry.filename)  \(entry.status)"
-                let recentItem = NSMenuItem(title: title, action: entry.savedPath == nil ? nil : #selector(openRecentTransfer(_:)), keyEquivalent: "")
-                recentItem.representedObject = entry.savedPath
-                submenu.addItem(recentItem)
-            }
-        }
-        item.submenu = submenu
-        return item
-    }
-
-    private func batterySuffix(_ percent: Int?) -> String {
-        guard let percent else { return "" }
-        return " - \(percent)% battery"
-    }
 
     private func formatBytes(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
@@ -2245,6 +2385,7 @@ private func formatDuration(_ seconds: TimeInterval) -> String {
 final class StatusDropView: NSView {
     weak var button: NSStatusBarButton?
     var onDrop: (([URL]) -> Void)?
+    var onRightClick: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2258,6 +2399,10 @@ final class StatusDropView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         button?.performClick(nil)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
