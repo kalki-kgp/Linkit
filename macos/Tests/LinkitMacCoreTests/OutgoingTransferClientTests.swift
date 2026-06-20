@@ -12,7 +12,8 @@ final class OutgoingTransferClientTests: XCTestCase {
             publicKey: publicKey.base64EncodedString(),
             privateKey: key
         )
-        let receiver = try MockAndroidReceiver(macIdentity: identity)
+        let pairingSecret = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64EncodedString()
+        let receiver = try MockAndroidReceiver(macIdentity: identity, pairingSecret: pairingSecret)
         defer { receiver.stop() }
 
         let target = TrustedDevice(
@@ -22,7 +23,8 @@ final class OutgoingTransferClientTests: XCTestCase {
             publicKey: "unused",
             pairedAt: Date().iso8601(),
             lastKnownHost: "127.0.0.1",
-            receivePort: receiver.port
+            receivePort: receiver.port,
+            pairingSecret: pairingSecret
         )
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("linkit-outgoing-\(UUID().uuidString).txt")
@@ -89,7 +91,8 @@ final class OutgoingTransferClientTests: XCTestCase {
             publicKey: publicKey.base64EncodedString(),
             privateKey: key
         )
-        let receiver = try MockAndroidReceiver(macIdentity: identity)
+        let pairingSecret = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64EncodedString()
+        let receiver = try MockAndroidReceiver(macIdentity: identity, pairingSecret: pairingSecret)
         defer { receiver.stop() }
 
         let target = TrustedDevice(
@@ -99,7 +102,8 @@ final class OutgoingTransferClientTests: XCTestCase {
             publicKey: "unused",
             pairedAt: Date().iso8601(),
             lastKnownHost: "127.0.0.1",
-            receivePort: receiver.port
+            receivePort: receiver.port,
+            pairingSecret: pairingSecret
         )
 
         let response = try runOffMain {
@@ -120,12 +124,14 @@ private final class MockAndroidReceiver {
     private var stopped = false
     private let lock = NSLock()
     private let macIdentity: LinkitIdentity
+    private let pairingSecret: String?
     private(set) var uploadedBody = Data()
     private(set) var receivedActionType: String?
     private(set) var receivedActionText: String?
 
-    init(macIdentity: LinkitIdentity) throws {
+    init(macIdentity: LinkitIdentity, pairingSecret: String? = nil) throws {
         self.macIdentity = macIdentity
+        self.pairingSecret = pairingSecret
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         socketFD = fd
@@ -212,7 +218,12 @@ private final class MockAndroidReceiver {
                 XCTAssertEqual(request.headers["x-linkit-upload-token"], "upload-token")
                 XCTAssertTrue(try verifyUploadSignature(request, transferId: "tr_mock", uploadToken: "upload-token"))
                 lock.lock()
-                uploadedBody = request.body
+                if let pskString = pairingSecret, let psk = Data(base64Encoded: pskString) {
+                    let key = LinkitSecretBox.transferKey(pairingSecret: psk, transferId: "tr_mock", fileIndex: 0)
+                    uploadedBody = (try? LinkitStreamCipher(key: key).update(request.body)) ?? request.body
+                } else {
+                    uploadedBody = request.body
+                }
                 lock.unlock()
                 try writeJSON(fd, status: 200, json: "{}")
             case ("POST", "/v1/transfers/tr_mock/finalize"):
@@ -253,7 +264,8 @@ private final class MockAndroidReceiver {
                 """)
             case ("POST", "/v1/actions"):
                 XCTAssertTrue(try verifyControlSignature(request))
-                let json = try JSONSerialization.jsonObject(with: request.body) as? [String: String]
+                let plaintext = try LinkitWireCrypto.open(pairingSecret: pairingSecret, body: request.body)
+                let json = try JSONSerialization.jsonObject(with: plaintext) as? [String: String]
                 lock.lock()
                 receivedActionType = json?["type"]
                 receivedActionText = json?["text"]

@@ -132,7 +132,8 @@ class LinkitClient(
             deviceName = json.optString("deviceName", payload.deviceName),
             publicKey = json.getString("publicKey"),
             ip = payload.ip,
-            port = payload.port
+            port = payload.port,
+            pairingSecret = payload.pairingSecret
         )
         validatePairingResponse(payload, identity, mac, json)
         return mac
@@ -220,10 +221,12 @@ class LinkitClient(
 
     suspend fun sendAction(mac: TrustedMac, identityStore: IdentityStore, type: String, text: String) {
         val baseUrl = PrivateLanTarget.baseUrl(mac.ip, mac.port)
-        val body = JSONObject()
+        val plaintext = JSONObject()
             .put("type", type)
             .put("text", text)
             .toString()
+            .toByteArray(Charsets.UTF_8)
+        val body = LinkitWireCrypto.seal(mac.pairingSecret, plaintext)
         val request = signedRequest(
             identityStore = identityStore,
             method = "POST",
@@ -290,6 +293,7 @@ class LinkitClient(
                     identityStore = identityStore,
                     identity = identityStore.identity(),
                     file = file,
+                    pairingSecret = mac.pairingSecret,
                     onProgress = onProgress
                 )
 
@@ -382,10 +386,14 @@ class LinkitClient(
         identityStore: IdentityStore,
         identity: AndroidIdentity,
         file: PickedFile,
+        pairingSecret: String?,
         onProgress: (Long, Long) -> Unit
     ): UploadResult {
         val digest = MessageDigest.getInstance("SHA-256")
-        val body = ContentUriRequestBody(contentResolver, file, digest, onProgress)
+        val psk = pairingSecret?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
+            ?: error("No encryption key for this Mac. Re-pair to enable encryption.")
+        val cipher = LinkitStreamCipher(LinkitSecretBox.transferKey(psk, create.transferId, 0))
+        val body = ContentUriRequestBody(contentResolver, file, digest, cipher, onProgress)
 
         val request = Request.Builder()
             .url(baseUrl + create.uploadUrl)
@@ -539,6 +547,7 @@ private class ContentUriRequestBody(
     private val contentResolver: ContentResolver,
     private val file: PickedFile,
     private val digest: MessageDigest,
+    private val cipher: LinkitStreamCipher,
     private val onProgress: (Long, Long) -> Unit
 ) : RequestBody() {
     @Volatile
@@ -556,7 +565,7 @@ private class ContentUriRequestBody(
                 val read = input.read(buffer)
                 if (read == -1) break
                 digest.update(buffer, 0, read)
-                sink.write(buffer, 0, read)
+                sink.write(cipher.update(buffer, 0, read))
                 bytesSent += read.toLong()
                 onProgress(bytesSent, file.size)
             }

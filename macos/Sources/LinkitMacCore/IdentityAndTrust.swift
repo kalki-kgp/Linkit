@@ -16,6 +16,29 @@ public struct TrustedDevice: Codable, Equatable {
     public let pairedAt: String
     public let lastKnownHost: String?
     public let receivePort: UInt16?
+    /// Shared AES key (standard base64) established at pairing. `nil` for devices
+    /// paired before encryption shipped — those must re-pair to enable it.
+    public let pairingSecret: String?
+
+    public init(
+        deviceId: String,
+        deviceName: String,
+        platform: String,
+        publicKey: String,
+        pairedAt: String,
+        lastKnownHost: String?,
+        receivePort: UInt16?,
+        pairingSecret: String? = nil
+    ) {
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.platform = platform
+        self.publicKey = publicKey
+        self.pairedAt = pairedAt
+        self.lastKnownHost = lastKnownHost
+        self.receivePort = receivePort
+        self.pairingSecret = pairingSecret
+    }
 }
 
 final class IdentityStore {
@@ -182,7 +205,8 @@ final class TrustStore {
             publicKey: existing.publicKey,
             pairedAt: existing.pairedAt,
             lastKnownHost: host,
-            receivePort: receivePort
+            receivePort: receivePort,
+            pairingSecret: existing.pairingSecret
         )
         try? saveLocked()
     }

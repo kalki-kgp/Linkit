@@ -5,6 +5,7 @@ Last updated: 2026-06-20
 
 Linkit is a private Android + macOS local device link for one phone and one Mac. It moves files, clipboard text, plain text, links, and phone-call control directly over the local network or phone hotspot. There is no account, cloud relay, or internet data path.
 
+> **Unreleased (`security/open-source` branch):** wire payloads are now **end-to-end encrypted** — control actions via AES-256-GCM and file contents via AES-256-CTR, keyed from the pairing-QR secret (`LinkitSecretBox` / `LinkitWireCrypto` / `LinkitStreamCipher`, cross-language golden-vector tested, device-validated to 1 GB+). Also: GPLv3 relicense + `CONTRIBUTING`/`SECURITY`/`PRIVACY`; PR CI; Mac HTTP read-timeout + connection cap; ad-hoc Mac codesign; Android Settings screen + theme.  
 > **Recent (v0.6.1):** `MacRediscovery` shared utility; receiver-service rediscovery on failed Mac registration; UI offline retry loop; persisted endpoint sync after background rediscovery.  
 > **Recent (v0.6):** Phone control + caller ID; experimental Bluetooth Hands-Free call audio on Mac; Doze resistance; Mac last-known Android endpoint persistence.  
 > **Earlier:** In-app updaters (v0.4+); bidirectional presence; Bonjour reconnect; consumer Compose UI; debug telemetry; clipboard notification actions; Mac→Android drops; signed pairing and uploads.
@@ -149,7 +150,7 @@ Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gra
 - Android → Mac automatic clipboard sync cannot run in the background (Android clipboard privacy).
 - Cellular call audio is not relayed over LAN; Bluetooth HFP is experimental and separate from Wi-Fi pairing.
 - Android receive depends on the foreground receiver service (and user granting notifications / optional battery exemption).
-- TLS/mTLS/Noise not implemented — local HTTP with signed control/upload requests.
+- No TLS/mTLS/Noise — plain local HTTP, but payloads are app-layer encrypted (AES-256-GCM control actions, AES-256-CTR file contents) over signed requests. Transfer filenames/sizes and control responses are still cleartext.
 - Resumable/chunked transfers, folder sync, remote internet transfer, multi-device, and non-Android/non-macOS clients not implemented.
 - Play Store and notarized macOS distribution not done.
 

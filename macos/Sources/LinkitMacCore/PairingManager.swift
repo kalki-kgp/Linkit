@@ -9,6 +9,7 @@ final class PairingManager {
     private let lock = NSLock()
     private var token: String
     private var challenge: String
+    private var secret: String
     private var expiresAt: Date
 
     init(identity: LinkitIdentity, trustStore: TrustStore, connections: DeviceConnectionRegistry, logger: LinkitLogger) throws {
@@ -18,6 +19,7 @@ final class PairingManager {
         self.logger = logger
         self.token = try LinkitRandom.token(byteCount: 18)
         self.challenge = try LinkitRandom.token(byteCount: 32)
+        self.secret = PairingManager.generateSecret()
         self.expiresAt = Date().addingTimeInterval(2 * 60)
     }
 
@@ -37,7 +39,7 @@ final class PairingManager {
     }
 
     func pairingPayload(ip: String, port: UInt16) -> PairingPayload {
-        let (token, challenge, expiresAt) = pairingMaterialRotatingIfExpired()
+        let (token, challenge, secret, expiresAt) = pairingMaterialRotatingIfExpired()
         return PairingPayload(
             v: 1,
             deviceId: identity.deviceId,
@@ -48,7 +50,8 @@ final class PairingManager {
             publicKey: identity.publicKey,
             pairingToken: token,
             pairingChallenge: challenge,
-            pairingTokenExpiresAt: expiresAt.iso8601()
+            pairingTokenExpiresAt: expiresAt.iso8601(),
+            pairingSecret: secret
         )
     }
 
@@ -99,7 +102,8 @@ final class PairingManager {
             publicKey: request.publicKey,
             pairedAt: Date().iso8601(),
             lastKnownHost: nil,
-            receivePort: nil
+            receivePort: nil,
+            pairingSecret: expected.secret
         )
         try trustStore.add(trusted)
         if let remoteHost, let receivePort = request.receivePort {
@@ -127,23 +131,29 @@ final class PairingManager {
     private func rotateLocked() {
         token = (try? LinkitRandom.token(byteCount: 18)) ?? UUID().uuidString
         challenge = (try? LinkitRandom.token(byteCount: 32)) ?? UUID().uuidString
+        secret = PairingManager.generateSecret()
         expiresAt = Date().addingTimeInterval(2 * 60)
         logger.info("rotated pairing token expiresAt=\(expiresAt.iso8601())")
     }
 
-    private func pairingMaterialRotatingIfExpired() -> (token: String, challenge: String, expiresAt: Date) {
+    /// 32 random bytes as standard base64 — the per-pairing AES key carried in the QR.
+    private static func generateSecret() -> String {
+        SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64EncodedString()
+    }
+
+    private func pairingMaterialRotatingIfExpired() -> (token: String, challenge: String, secret: String, expiresAt: Date) {
         lock.lock()
         defer { lock.unlock() }
         if Date() > expiresAt {
             rotateLocked()
         }
-        return (token, challenge, expiresAt)
+        return (token, challenge, secret, expiresAt)
     }
 
-    private func pairingMaterialForVerification() -> (token: String, challenge: String, expiresAt: Date) {
+    private func pairingMaterialForVerification() -> (token: String, challenge: String, secret: String, expiresAt: Date) {
         lock.lock()
         defer { lock.unlock() }
-        return (token, challenge, expiresAt)
+        return (token, challenge, secret, expiresAt)
     }
 
     #if DEBUG

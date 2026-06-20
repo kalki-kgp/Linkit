@@ -12,6 +12,7 @@ data class MacPairingPayload(
     val port: Int,
     val pairingToken: String,
     val pairingChallenge: String,
+    val pairingSecret: String,
     val pairingTokenExpiresAt: String? = null
 )
 
@@ -42,6 +43,7 @@ object PairingPayloadParser {
                 ?: throw IllegalArgumentException("Missing or invalid port"),
             pairingToken = json.requiredString("pairingToken"),
             pairingChallenge = json.requiredString("pairingChallenge"),
+            pairingSecret = json.requiredString("pairingSecret"),
             pairingTokenExpiresAt = json.optString("pairingTokenExpiresAt").takeIf { it.isNotBlank() }
         )
     }
