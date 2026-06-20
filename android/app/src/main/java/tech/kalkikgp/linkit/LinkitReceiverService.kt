@@ -171,21 +171,43 @@ class LinkitReceiverService : Service() {
     }
 
     private suspend fun refreshMacRegistration(identityStore: IdentityStore, client: LinkitClient, source: String) {
-        identityStore.trustedMac()?.let { mac ->
-            runCatching {
-                client.verifyMacEndpoint(mac)
-                client.registerReceiver(
-                    mac = mac,
-                    identityStore = identityStore,
-                    receivePort = AndroidDropReceiver.PORT,
-                    batteryPercent = BatteryStatus.percent(applicationContext)
-                )
-            }.onSuccess {
-                DebugTelemetry.recordEvent("presence", "receiver registration refreshed ($source)")
-            }.onFailure { error ->
-                updateNotification("Waiting for Mac")
-                DebugTelemetry.recordEvent("presence", "receiver registration failed ($source): ${error.message}")
-            }
+        val mac = identityStore.trustedMac() ?: return
+        val registered = runCatching {
+            client.verifyMacEndpoint(mac)
+            client.registerReceiver(
+                mac = mac,
+                identityStore = identityStore,
+                receivePort = AndroidDropReceiver.PORT,
+                batteryPercent = BatteryStatus.percent(applicationContext)
+            )
+        }.onSuccess {
+            DebugTelemetry.recordEvent("presence", "receiver registration refreshed ($source)")
+        }.onFailure { error ->
+            DebugTelemetry.recordEvent("presence", "receiver registration failed ($source): ${error.message}")
+        }.isSuccess
+        if (registered) return
+
+        // The stored endpoint goes stale when either device moves networks (e.g.
+        // hotspot -> shared Wi-Fi). Trust is key-bound, so rediscover the Mac over
+        // Bonjour and re-register at the identity-verified new address.
+        val rediscovered = MacRediscovery.rediscover(applicationContext, identityStore, client)
+        if (rediscovered == null) {
+            updateNotification("Waiting for Mac")
+            return
+        }
+        runCatching {
+            client.registerReceiver(
+                mac = rediscovered,
+                identityStore = identityStore,
+                receivePort = AndroidDropReceiver.PORT,
+                batteryPercent = BatteryStatus.percent(applicationContext)
+            )
+        }.onSuccess {
+            updateNotification("Listening for Mac drops")
+            DebugTelemetry.recordEvent("presence", "receiver registration refreshed after rediscovery ($source)")
+        }.onFailure { error ->
+            updateNotification("Waiting for Mac")
+            DebugTelemetry.recordEvent("presence", "receiver registration failed after rediscovery ($source): ${error.message}")
         }
     }
 

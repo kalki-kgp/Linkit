@@ -20,3 +20,4 @@ dist/
 graphify-out/
 .graphify_python
 .graphify_*
+.cursor

@@ -96,7 +96,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
@@ -293,9 +292,16 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             MacPresence.lastSeenMillis.collect { seenAt ->
                 if (seenAt == null) return@collect
                 if (_uiState.value.trustedMac == null) return@collect
+                // The receiver service may have rediscovered the Mac at a new address
+                // while this screen was offline; pick up the persisted endpoint.
+                val stored = identityStore.trustedMac() ?: return@collect
                 _uiState.update { state ->
-                    if (state.isConnectedToMac && state.error == null) state
+                    val endpointChanged = stored != state.trustedMac
+                    if (state.isConnectedToMac && state.error == null && !endpointChanged) state
                     else state.copy(
+                        trustedMac = stored,
+                        macIp = if (endpointChanged) stored.ip else state.macIp,
+                        port = if (endpointChanged) stored.port.toString() else state.port,
                         isConnectedToMac = true,
                         status = if (state.isSending || state.isPairing) state.status else "Connected",
                         androidReceiverStatus = "Mac drops enabled",
@@ -306,12 +312,23 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         viewModelScope.launch {
+            var offlineTicks = 0
             while (true) {
                 delay(10_000)
                 val state = _uiState.value
-                if (!state.isConnectedToMac) continue
                 if (state.isSending || state.isPairing) continue
                 val trustedMac = state.trustedMac ?: continue
+                if (!state.isConnectedToMac) {
+                    // Keep retrying while paired-but-offline: covers the Mac joining
+                    // the new network after the phone's connectivity callbacks fired.
+                    offlineTicks += 1
+                    if (offlineTicks >= 3) {
+                        offlineTicks = 0
+                        discoverAndReconnect()
+                    }
+                    continue
+                }
+                offlineTicks = 0
                 val lastSeen = MacPresence.lastSeenMillis.value ?: continue
                 val ageMs = System.currentTimeMillis() - lastSeen
                 if (ageMs > 45_000) {
@@ -572,9 +589,9 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun connectMac() {
-        val mac = _uiState.value.trustedMac ?: return
+        if (_uiState.value.trustedMac == null) return
         _uiState.update { it.copy(status = "Connecting", androidReceiverStatus = "Connecting to Mac for drops", error = null, networkHint = null) }
-        registerAndroidReceiver(mac)
+        discoverAndReconnect(force = true)
     }
 
     private var reconnectJob: Job? = null
@@ -594,49 +611,20 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
         DebugTelemetry.recordEvent("reconnect", "discover requested for ${mac.deviceName}")
         reconnectJob = viewModelScope.launch {
-            val found = withTimeoutOrNull(5_000) {
-                suspendCancellableCoroutine<DiscoveredMac?> { cont ->
-                    discovery.start(
-                        onFound = { discovered ->
-                            if (cont.isActive) cont.resume(discovered) { discovery.stop() }
-                        },
-                        onError = {
-                            if (cont.isActive) cont.resume(null) { discovery.stop() }
-                        },
-                        nameFilter = mac.deviceName
+            val updated = MacRediscovery.rediscover(getApplication(), identityStore, client)
+            val target = if (updated != null) {
+                _uiState.update {
+                    it.copy(
+                        trustedMac = updated,
+                        macIp = updated.ip,
+                        port = updated.port.toString(),
+                        status = "Connecting"
                     )
-                    cont.invokeOnCancellation { discovery.stop() }
                 }
-            }
-            discovery.stop()
-
-            val target = if (found != null) {
-                val updated = mac.copy(ip = found.ip, port = found.port)
-                val verified = runCatching {
-                    client.verifyMacEndpoint(updated)
-                }.onFailure { error ->
-                    DebugTelemetry.recordEvent("reconnect", "Bonjour candidate rejected: ${error.message}")
-                }.isSuccess
-                if (verified) {
-                    identityStore.saveTrustedMac(updated)
-                    _uiState.update {
-                        it.copy(
-                            trustedMac = updated,
-                            macIp = updated.ip,
-                            port = updated.port.toString(),
-                            status = "Connecting"
-                        )
-                    }
-                    DebugTelemetry.recordEvent("reconnect", "Bonjour verified ${updated.ip}:${updated.port}")
-                    updated
-                } else {
-                    _uiState.update { it.copy(status = "Trying last known address") }
-                    DebugTelemetry.recordEvent("reconnect", "using last known after untrusted Bonjour candidate")
-                    mac
-                }
+                updated
             } else {
                 _uiState.update { it.copy(status = "Trying last known address") }
-                DebugTelemetry.recordEvent("reconnect", "Bonjour timeout, using last known ${mac.ip}:${mac.port}")
+                DebugTelemetry.recordEvent("reconnect", "using last known ${mac.ip}:${mac.port}")
                 mac
             }
             registerAndroidReceiver(target)
