@@ -118,6 +118,26 @@ final class OutgoingTransferClient {
         return response
     }
 
+    func fetchPhonebook(of device: TrustedDevice) throws -> PhonebookResponse {
+        guard device.platform.lowercased() == "android" else {
+            throw HTTPFailure.badRequest("unsupported_target", "Target device is not Android")
+        }
+        guard let host = device.lastKnownHost, let port = device.receivePort else {
+            throw HTTPFailure.badRequest("missing_android_receiver", "Android receiver address is missing")
+        }
+
+        let baseURL = httpBaseURL(host: host, port: port)
+        let path = "/v1/phonebook"
+        let result = try execute(signedRequest(method: "GET", url: baseURL + path, path: path, body: Data()))
+        guard result.status == 200 else {
+            throw decodeFailure(status: result.status, data: result.data)
+        }
+        // The address book and call history are sensitive PII, so the receiver seals the
+        // response with the pairing secret. This is the one route that returns ciphertext.
+        let plaintext = try LinkitWireCrypto.open(pairingSecret: device.pairingSecret, body: result.data)
+        return try decoder.decode(PhonebookResponse.self, from: plaintext)
+    }
+
     private func send(
         file: URL,
         baseURL: String,

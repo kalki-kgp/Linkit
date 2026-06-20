@@ -115,6 +115,70 @@ final class OutgoingTransferClientTests: XCTestCase {
         XCTAssertEqual(receiver.receivedActionType, "clipboard")
         XCTAssertEqual(receiver.receivedActionText, "hello from mac")
     }
+
+    func testFetchesEncryptedPhonebook() throws {
+        let key = P256.Signing.PrivateKey()
+        let publicKey = key.publicKey.x963Representation
+        let identity = LinkitIdentity(
+            deviceId: LinkitDeviceId.fromPublicKey(publicKey),
+            publicKey: publicKey.base64EncodedString(),
+            privateKey: key
+        )
+        let pairingSecret = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64EncodedString()
+        let receiver = try MockAndroidReceiver(macIdentity: identity, pairingSecret: pairingSecret)
+        defer { receiver.stop() }
+
+        let target = TrustedDevice(
+            deviceId: "android-device",
+            deviceName: "Pixel",
+            platform: "android",
+            publicKey: "unused",
+            pairedAt: Date().iso8601(),
+            lastKnownHost: "127.0.0.1",
+            receivePort: receiver.port,
+            pairingSecret: pairingSecret
+        )
+
+        let book = try runOffMain {
+            try OutgoingTransferClient(identity: identity, logger: LinkitLogger()).fetchPhonebook(of: target)
+        }
+
+        XCTAssertEqual(book.contacts.count, 2)
+        XCTAssertEqual(book.contacts.first?.name, "Aarav Sharma")
+        XCTAssertEqual(book.contacts.last?.numbers.count, 2)
+        XCTAssertEqual(book.recentCalls.first?.number, "+91 98765 43210")
+        XCTAssertTrue(book.permissions.contacts)
+        XCTAssertTrue(book.permissions.callLog)
+    }
+
+    func testPhonebookFetchRequiresEncryptionKey() throws {
+        let key = P256.Signing.PrivateKey()
+        let publicKey = key.publicKey.x963Representation
+        let identity = LinkitIdentity(
+            deviceId: LinkitDeviceId.fromPublicKey(publicKey),
+            publicKey: publicKey.base64EncodedString(),
+            privateKey: key
+        )
+        let pairingSecret = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64EncodedString()
+        let receiver = try MockAndroidReceiver(macIdentity: identity, pairingSecret: pairingSecret)
+        defer { receiver.stop() }
+
+        // Same paired Android, but this client copy lost the pairing secret: the sealed
+        // response must be undecryptable rather than silently readable.
+        let targetWithoutSecret = TrustedDevice(
+            deviceId: "android-device",
+            deviceName: "Pixel",
+            platform: "android",
+            publicKey: "unused",
+            pairedAt: Date().iso8601(),
+            lastKnownHost: "127.0.0.1",
+            receivePort: receiver.port
+        )
+
+        XCTAssertThrowsError(try runOffMain {
+            try OutgoingTransferClient(identity: identity, logger: LinkitLogger()).fetchPhonebook(of: targetWithoutSecret)
+        })
+    }
 }
 
 private final class MockAndroidReceiver {
@@ -271,6 +335,22 @@ private final class MockAndroidReceiver {
                 receivedActionText = json?["text"]
                 lock.unlock()
                 try writeJSON(fd, status: 200, json: #"{"status":"ok","type":"clipboard"}"#)
+            case ("GET", "/v1/phonebook"):
+                XCTAssertTrue(try verifyControlSignature(request))
+                let plaintext = Data("""
+                {
+                  "contacts":[
+                    {"name":"Aarav Sharma","numbers":["+91 98765 43210"]},
+                    {"name":"Bhavna Rao","numbers":["99887 66554","+91 90000 00000"]}
+                  ],
+                  "recentCalls":[
+                    {"number":"+91 98765 43210","name":"Aarav Sharma","timestampMillis":1718900000000}
+                  ],
+                  "permissions":{"contacts":true,"callLog":true}
+                }
+                """.utf8)
+                let sealed = try LinkitWireCrypto.seal(pairingSecret: pairingSecret, plaintext: plaintext)
+                try writeJSON(fd, status: 200, json: String(data: sealed, encoding: .utf8)!)
             default:
                 try writeJSON(fd, status: 404, json: #"{"error":"not_found","message":"not found"}"#)
             }

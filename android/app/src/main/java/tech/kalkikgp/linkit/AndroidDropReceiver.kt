@@ -130,13 +130,20 @@ class AndroidDropReceiver(
                     .put("platform", "android")
                     .put("port", PORT)
                     .put("publicKey", identity.publicKey)
-                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url").put("phone_control").put("bt_pair"))
+                    .put("capabilities", JSONArray().put("receive_files").put("stream_sha256").put("signed_controls").put("device_status").put("text_actions").put("clipboard_text").put("open_url").put("phone_control").put("phonebook").put("bt_pair"))
             )
         }
 
         if (request.method == "GET" && request.path == "/v1/devices/self/status") {
             verifySigned(request, ByteArray(0))
             return jsonResponse(200, deviceStatusJson())
+        }
+
+        if (request.method == "GET" && request.path == "/v1/phonebook") {
+            verifySigned(request, ByteArray(0))
+            val plaintext = PhoneDirectory.phonebookJson(context).toString().toByteArray(Charsets.UTF_8)
+            val sealed = LinkitWireCrypto.seal(trustedMac().pairingSecret, plaintext)
+            return DropResponse(200, sealed.toByteArray(Charsets.UTF_8))
         }
 
         if (request.method == "POST" && request.path == "/v1/actions") {

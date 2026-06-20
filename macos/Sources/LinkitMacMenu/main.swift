@@ -73,6 +73,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var statusIcon: StatusIconAnimator?
     private let panelViewModel = PanelViewModel()
     private let settingsViewModel = SettingsViewModel()
+    private let callPickerViewModel = CallPickerViewModel()
+    private var callPickerWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var popover: NSPopover?
     private var popoverClosedAt = Date.distantPast
@@ -545,8 +547,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc private func callNumberOnAndroid() {
-        guard let number = promptForPhoneNumber() else { return }
-        guard let normalized = normalizedDialNumber(number) else {
+        showCallPicker()
+    }
+
+    /// Normalizes a picked/typed number and places the call, preferring Mac-routed Hands-Free
+    /// audio when connected and otherwise asking Android to dial.
+    private func dialNormalizedNumber(_ raw: String) {
+        guard let normalized = normalizedDialNumber(raw) else {
             showNonFatalError("Enter a normal phone number with digits and an optional leading +.")
             return
         }
@@ -555,6 +562,43 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return
         }
         sendActionToAndroid(type: "phone_call", text: normalized, successTooltip: "Android call started")
+    }
+
+    private func showCallPicker() {
+        closePopover()
+        callPickerViewModel.loadPhonebook = { [weak self] in
+            guard let app = self?.app else {
+                throw NSError(
+                    domain: "Linkit",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Connect your Android first by opening Linkit."]
+                )
+            }
+            return try app.fetchPhonebookFromFirstAndroid()
+        }
+        callPickerViewModel.onDial = { [weak self] number in
+            self?.dialNormalizedNumber(number)
+        }
+        callPickerViewModel.onClose = { [weak self] in
+            self?.callPickerWindow?.close()
+        }
+        if let callPickerWindow {
+            callPickerViewModel.query = ""
+            callPickerViewModel.reload()
+            callPickerWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let host = NSHostingController(rootView: CallPickerView(model: callPickerViewModel))
+        let window = NSWindow(contentViewController: host)
+        window.title = "Call on Android"
+        window.styleMask = [.titled, .closable]
+        window.setContentSize(NSSize(width: 380, height: 480))
+        window.delegate = self
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        callPickerWindow = window
     }
 
     @objc private func answerAndroidCall() {
@@ -740,21 +784,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         RunLoop.main.add(timer, forMode: .common)
         callAudioSetupTimer = timer
-    }
-
-    private func promptForPhoneNumber() -> String? {
-        let alert = NSAlert()
-        alert.messageText = "Call on Android"
-        alert.informativeText = "The call starts on your phone. Audio stays on Android."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Call")
-        alert.addButton(withTitle: "Cancel")
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        input.placeholderString = "+911234567890"
-        alert.accessoryView = input
-        let result = alert.runModal()
-        guard result == .alertFirstButtonReturn else { return nil }
-        return input.stringValue
     }
 
     private func normalizedDialNumber(_ input: String) -> String? {
@@ -1140,6 +1169,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             refreshStatusButton()
         } else if closedWindow === settingsWindow {
             settingsWindow = nil
+        } else if closedWindow === callPickerWindow {
+            callPickerWindow = nil
         }
     }
 
