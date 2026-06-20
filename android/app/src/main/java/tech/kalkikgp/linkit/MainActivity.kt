@@ -40,6 +40,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -55,13 +56,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -139,7 +140,13 @@ class MainActivity : ComponentActivity() {
             requestBatteryExemptionIfNeeded()
         }
         setContent {
-            LinkitTheme {
+            val settings by linkitViewModel.settings.collectAsStateWithLifecycle()
+            val darkTheme = when (settings.appearance) {
+                AppearancePreference.SYSTEM -> isSystemInDarkTheme()
+                AppearancePreference.LIGHT -> false
+                AppearancePreference.DARK -> true
+            }
+            LinkitTheme(darkTheme = darkTheme) {
                 LinkitScreen(
                     viewModel = linkitViewModel,
                     onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) },
@@ -257,7 +264,9 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     private val discovery = BonjourDiscovery(application)
     private val history = TransferHistoryStore.get(application)
     private val appUpdater = AndroidAppUpdater(application)
+    private val preferences = LinkitPreferences.get(application)
     val historyEntries: StateFlow<List<TransferHistoryEntry>> = history.entries
+    val settings: StateFlow<LinkitSettings> = preferences.settings
 
     private val _uiState = MutableStateFlow(
         LinkitUiState(
@@ -271,7 +280,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 "Connecting to Mac for drops"
             },
             currentAndroidVersion = appUpdater.currentVersionLabel(),
-            phoneControlStatus = PhonePermissions.status(application)
+            phoneControlStatus = PhonePermissions.status(application),
+            clipboardSyncEnabled = preferences.settings.value.clipboardSyncEnabled
         )
     )
     val uiState: StateFlow<LinkitUiState> = _uiState
@@ -358,7 +368,13 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
-        startClipboardSync()
+        if (preferences.settings.value.clipboardSyncEnabled) {
+            startClipboardSync()
+        }
+    }
+
+    fun setAppearance(value: AppearancePreference) {
+        preferences.setAppearance(value)
     }
 
     override fun onCleared() {
@@ -862,10 +878,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleClipboardSync() {
         if (_uiState.value.clipboardSyncEnabled) {
             stopClipboardSync()
+            preferences.setClipboardSyncEnabled(false)
             _uiState.update { it.copy(clipboardSyncEnabled = false, status = "Clipboard sync off") }
             return
         }
         startClipboardSync()
+        preferences.setClipboardSyncEnabled(true)
         _uiState.update { it.copy(status = "Clipboard sync on", error = null) }
     }
 
@@ -1110,7 +1128,9 @@ private fun LinkitScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val history by viewModel.historyEntries.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    var showSettings by remember { mutableStateOf(false) }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
@@ -1156,6 +1176,25 @@ private fun LinkitScreen(
                     error = state.error,
                     onPair = launchQrScanner
                 )
+            } else if (showSettings) {
+                BackHandler { showSettings = false }
+                SettingsScreen(
+                    state = state,
+                    settings = settings,
+                    history = history,
+                    onBack = { showSettings = false },
+                    onReconnect = { viewModel.discoverAndReconnect() },
+                    onDisconnect = viewModel::disconnectMac,
+                    onRePair = launchQrScanner,
+                    onForget = { showSettings = false; viewModel.forgetMac() },
+                    onClearHistory = viewModel::clearHistory,
+                    onToggleClipboardSync = viewModel::toggleClipboardSync,
+                    onSetAppearance = viewModel::setAppearance,
+                    onCheckUpdate = viewModel::checkForAndroidUpdate,
+                    onInstallUpdate = viewModel::installAndroidUpdate,
+                    onEnablePhoneControls = onEnablePhoneControls,
+                    onEnableCallAudio = onEnableCallAudio
+                )
             } else {
                 HomeScreen(
                     state = state,
@@ -1165,13 +1204,8 @@ private fun LinkitScreen(
                     onOpenLink = viewModel::openClipboardLinkOnMac,
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
                     onReconnect = viewModel::discoverAndReconnect,
-                    onRePair = launchQrScanner,
-                    onForget = viewModel::forgetMac,
                     onClearHistory = viewModel::clearHistory,
-                    onCheckUpdate = viewModel::checkForAndroidUpdate,
-                    onInstallUpdate = viewModel::installAndroidUpdate,
-                    onEnablePhoneControls = onEnablePhoneControls,
-                    onEnableCallAudio = onEnableCallAudio
+                    onOpenSettings = { showSettings = true }
                 )
             }
 
@@ -1275,13 +1309,8 @@ private fun HomeScreen(
     onOpenLink: () -> Unit,
     onToggleClipboardSync: () -> Unit,
     onReconnect: () -> Unit,
-    onRePair: () -> Unit,
-    onForget: () -> Unit,
     onClearHistory: () -> Unit,
-    onCheckUpdate: () -> Unit,
-    onInstallUpdate: () -> Unit,
-    onEnablePhoneControls: () -> Unit,
-    onEnableCallAudio: () -> Unit
+    onOpenSettings: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1290,7 +1319,7 @@ private fun HomeScreen(
             .padding(horizontal = 20.dp)
             .padding(bottom = if (state.isSending) 120.dp else 24.dp)
     ) {
-        TopBar(onRePair = onRePair, onForget = onForget)
+        TopBar(onOpenSettings = onOpenSettings)
         Spacer(modifier = Modifier.height(4.dp))
         DeviceCard(state = state, onReconnect = onReconnect)
         Spacer(modifier = Modifier.height(20.dp))
@@ -1302,35 +1331,17 @@ private fun HomeScreen(
             onOpenLink = onOpenLink,
             onToggleClipboardSync = onToggleClipboardSync
         )
-        Spacer(modifier = Modifier.height(20.dp))
-        PhoneControlsSection(
-            status = state.phoneControlStatus,
-            onEnable = onEnablePhoneControls
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        CallAudioSection(
-            status = state.callAudioStatus,
-            enabled = state.isConnectedToMac,
-            onEnable = onEnableCallAudio
-        )
         state.error?.takeIf { !state.isSending }?.let {
             Spacer(modifier = Modifier.height(16.dp))
             ErrorBanner(it)
         }
-        Spacer(modifier = Modifier.height(28.dp))
-        UpdateSection(
-            state = state,
-            onCheck = onCheckUpdate,
-            onInstall = onInstallUpdate
-        )
         Spacer(modifier = Modifier.height(28.dp))
         RecentActivity(entries = history, onClear = onClearHistory)
     }
 }
 
 @Composable
-private fun TopBar(onRePair: () -> Unit, onForget: () -> Unit) {
-    var menuOpen by remember { mutableStateOf(false) }
+private fun TopBar(onOpenSettings: () -> Unit) {
     val context = LocalContext.current
     var tapCount by remember { mutableStateOf(0) }
     var lastTapMillis by remember { mutableStateOf(0L) }
@@ -1356,27 +1367,12 @@ private fun TopBar(onRePair: () -> Unit, onForget: () -> Unit) {
                 }
             }
         )
-        Box {
-            IconButton(onClick = { menuOpen = true }) {
-                Text(
-                    "⋮",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false }
-            ) {
-                DropdownMenuItem(
-                    text = { Text("Pair with a different Mac") },
-                    onClick = { menuOpen = false; onRePair() }
-                )
-                DropdownMenuItem(
-                    text = { Text("Forget this Mac") },
-                    onClick = { menuOpen = false; onForget() }
-                )
-            }
+        IconButton(onClick = onOpenSettings) {
+            Text(
+                "⚙",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -2092,10 +2088,427 @@ private fun ErrorBanner(message: String) {
     }
 }
 
+/* ------------------------------------------------------------------------- *
+ * UI · Settings · dedicated screen pushed from the Home gear icon
+ *   grouped, Android-Settings-style sections mirroring the Mac Settings window
+ * ------------------------------------------------------------------------- */
+
 @Composable
-private fun LinkitTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val colors = if (dark) {
+private fun SettingsScreen(
+    state: LinkitUiState,
+    settings: LinkitSettings,
+    history: List<TransferHistoryEntry>,
+    onBack: () -> Unit,
+    onReconnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onRePair: () -> Unit,
+    onForget: () -> Unit,
+    onClearHistory: () -> Unit,
+    onToggleClipboardSync: () -> Unit,
+    onSetAppearance: (AppearancePreference) -> Unit,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    onEnablePhoneControls: () -> Unit,
+    onEnableCallAudio: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 24.dp)
+    ) {
+        SettingsTopBar(onBack = onBack)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        SettingsSectionLabel("Connection")
+        SettingsCard {
+            val mac = state.trustedMac
+            SettingsInfoRow(
+                label = mac?.deviceName ?: "Mac",
+                value = if (state.isConnectedToMac) "Connected" else "Paired, offline"
+            )
+            SettingsRowDivider()
+            SettingsInfoRow(label = "Address", value = "${state.macIp}:${state.port}")
+            SettingsRowDivider()
+            if (state.isConnectedToMac) {
+                SettingsActionRow(title = "Disconnect", onClick = onDisconnect)
+            } else {
+                SettingsActionRow(title = "Reconnect", onClick = onReconnect)
+            }
+            SettingsRowDivider()
+            SettingsActionRow(title = "Pair with a different Mac", onClick = onRePair)
+            SettingsRowDivider()
+            SettingsActionRow(title = "Forget this Mac", destructive = true, onClick = onForget)
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+
+        SettingsSectionLabel("Clipboard")
+        SettingsCard {
+            SettingsToggleRow(
+                title = "Mirror clipboard to Mac",
+                subtitle = "Text you copy is pushed to the Mac. Android only allows clipboard reads while Linkit is open.",
+                checked = state.clipboardSyncEnabled,
+                enabled = state.isConnectedToMac || state.clipboardSyncEnabled,
+                onCheckedChange = { onToggleClipboardSync() }
+            )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+
+        SettingsSectionLabel("Transfers")
+        SettingsCard {
+            SettingsInfoRow(label = "Received files", value = "Downloads/Linkit Drop")
+            SettingsRowDivider()
+            SettingsActionRow(
+                title = "Clear recent activity",
+                enabled = history.isNotEmpty(),
+                onClick = onClearHistory
+            )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+
+        PhoneControlsSection(
+            status = state.phoneControlStatus,
+            onEnable = onEnablePhoneControls
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+
+        CallAudioSection(
+            status = state.callAudioStatus,
+            enabled = state.isConnectedToMac,
+            onEnable = onEnableCallAudio
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+
+        NotificationsGroup()
+        Spacer(modifier = Modifier.height(20.dp))
+
+        SettingsSectionLabel("Appearance")
+        SettingsCard {
+            AppearanceSelector(current = settings.appearance, onSelect = onSetAppearance)
+        }
+        Spacer(modifier = Modifier.height(28.dp))
+
+        UpdateSection(
+            state = state,
+            onCheck = onCheckUpdate,
+            onInstall = onInstallUpdate
+        )
+        Spacer(modifier = Modifier.height(28.dp))
+
+        AboutCard(version = state.currentAndroidVersion)
+    }
+}
+
+@Composable
+private fun SettingsTopBar(onBack: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onBack) {
+            Text(
+                "←",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Text(
+            "Settings",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+    }
+}
+
+@Composable
+private fun SettingsSectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
+    )
+}
+
+@Composable
+private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(
+                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                RoundedCornerShape(18.dp)
+            ),
+        content = content
+    )
+}
+
+@Composable
+private fun SettingsRowDivider() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant)
+    )
+}
+
+@Composable
+private fun SettingsInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun SettingsActionRow(
+    title: String,
+    subtitle: String? = null,
+    destructive: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val titleColor = when {
+        destructive -> MaterialTheme.colorScheme.error
+        enabled -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+    }
+    val base = Modifier.fillMaxWidth()
+    val interactive = if (enabled) base.clickable(onClick = onClick) else base
+    Row(
+        modifier = interactive.padding(horizontal = 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = titleColor
+            )
+            subtitle?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        if (enabled && !destructive) {
+            Text(
+                "›",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                checkedTrackColor = MaterialTheme.colorScheme.primary
+            )
+        )
+    }
+}
+
+@Composable
+private fun AppearanceSelector(
+    current: AppearancePreference,
+    onSelect: (AppearancePreference) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        AppearancePreference.values().forEach { option ->
+            val selected = option == current
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .clickable { onSelect(option) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    option.label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = if (selected) MaterialTheme.colorScheme.onPrimary
+                    else MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationsGroup() {
+    val context = LocalContext.current
+    val powerManager = context.getSystemService(PowerManager::class.java)
+    val ignoringBattery = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
+    SettingsSectionLabel("Notifications & background")
+    SettingsCard {
+        SettingsActionRow(
+            title = "Background activity",
+            subtitle = if (ignoringBattery) {
+                "Allowed — Linkit keeps receiving while the screen is off."
+            } else {
+                "Restricted — allow so the Mac can reach this phone in the background."
+            },
+            enabled = !ignoringBattery,
+            onClick = {
+                runCatching {
+                    @Suppress("BatteryLife")
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                    )
+                }
+            }
+        )
+        SettingsRowDivider()
+        SettingsActionRow(
+            title = "Notification settings",
+            subtitle = "Open Android's notification settings for Linkit.",
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    )
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AboutCard(version: String) {
+    val context = LocalContext.current
+    SettingsSectionLabel("About")
+    SettingsCard {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(R.mipmap.ic_launcher),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))
+                )
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "Linkit",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    version,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        SettingsRowDivider()
+        SettingsActionRow(
+            title = "View on GitHub",
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/kalki-kgp/Linkit"))
+                    )
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun LinkitTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+    val colors = if (darkTheme) {
         darkColorScheme(
             primary = LinkitPalette.AmberLight,
             onPrimary = LinkitPalette.InkDark,

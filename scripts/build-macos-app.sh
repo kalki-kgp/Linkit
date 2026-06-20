@@ -76,4 +76,14 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Ad-hoc code signature (free; no Apple Developer ID required).
+# This does NOT notarize the app, so Gatekeeper still warns on first open of a
+# downloaded copy (see docs/SETUP.md). It DOES give the bundle a stable code
+# identity — steadier Keychain ACLs and Local Network permission, and it avoids
+# the "app is damaged" hard-fail that unsigned bundles can hit. Diagnostics go to
+# stderr so stdout stays just the app path for callers.
+codesign --force --sign - "$APP_DIR" 1>&2
+codesign --verify --strict "$APP_DIR" 1>&2
+echo "ad-hoc signed $APP_DIR" 1>&2
+
 printf '%s\n' "$APP_DIR"

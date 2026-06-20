@@ -30,6 +30,7 @@ class PairingPayloadParserTest {
               "port": 52718,
               "pairingToken": "token",
               "pairingChallenge": "challenge",
+              "pairingSecret": "dGVzdC1zZWNyZXQ=",
               "pairingTokenExpiresAt": "2026-05-16T02:30:00Z"
             }
             """.trimIndent()
@@ -40,11 +41,12 @@ class PairingPayloadParserTest {
         assertEquals(52718, payload.port)
         assertEquals("2026-05-16T02:30:00Z", payload.pairingTokenExpiresAt)
         assertEquals("challenge", payload.pairingChallenge)
+        assertEquals("dGVzdC1zZWNyZXQ=", payload.pairingSecret)
     }
 
     @Test
     fun parsesUrlEncodedPayload() {
-        val json = """{"v":1,"deviceId":"mac","deviceName":"Linkit Mac","publicKey":"pk","ip":"192.168.1.7","port":52718,"pairingToken":"tok","pairingChallenge":"challenge"}"""
+        val json = """{"v":1,"deviceId":"mac","deviceName":"Linkit Mac","publicKey":"pk","ip":"192.168.1.7","port":52718,"pairingToken":"tok","pairingChallenge":"challenge","pairingSecret":"dGVzdC1zZWNyZXQ="}"""
         val encoded = URLEncoder.encode(json, Charsets.UTF_8.name())
         val payload = PairingPayloadParser.parse("linkit://pair?payload=$encoded")
 

@@ -90,7 +90,7 @@ final class OutgoingTransferClient {
         var results: [OutgoingTransferResult] = []
         for (index, file) in files.enumerated() {
             try cancellation?.throwIfCanceled()
-            results.append(try send(file: file, baseURL: baseURL, fileIndex: index, fileCount: files.count, cancellation: cancellation, onProgress: onProgress))
+            results.append(try send(file: file, baseURL: baseURL, fileIndex: index, fileCount: files.count, pairingSecret: device.pairingSecret, cancellation: cancellation, onProgress: onProgress))
         }
         return results
     }
@@ -123,6 +123,7 @@ final class OutgoingTransferClient {
         baseURL: String,
         fileIndex: Int,
         fileCount: Int,
+        pairingSecret: String?,
         cancellation: LinkitCancellationToken?,
         onProgress: ((OutgoingTransferProgress) -> Void)?
     ) throws -> OutgoingTransferResult {
@@ -153,6 +154,13 @@ final class OutgoingTransferClient {
             expectedStatus: 201
         )
 
+        guard let pskString = pairingSecret, let psk = Data(base64Encoded: pskString) else {
+            throw HTTPFailure.unauthorized("not_paired_for_encryption", "No encryption key for this device. Re-pair to enable encryption.")
+        }
+        let transferKey = LinkitSecretBox.transferKey(pairingSecret: psk, transferId: createResponse.transferId, fileIndex: 0)
+        let encryptedFile = try encryptFileToTemp(file, key: transferKey)
+        defer { try? FileManager.default.removeItem(at: encryptedFile) }
+
         do {
             try cancellation?.throwIfCanceled()
             let uploadPath = "/v1/transfers/\(createResponse.transferId)/files/0"
@@ -170,7 +178,7 @@ final class OutgoingTransferClient {
                 uploadToken: createResponse.uploadToken,
                 contentLength: size
             )
-            try executeUpload(uploadRequest, file: file, expectedStatus: 200, expectedBytes: size, cancellation: cancellation) { sent in
+            try executeUpload(uploadRequest, file: encryptedFile, expectedStatus: 200, expectedBytes: size, cancellation: cancellation) { sent in
                 onProgress?(
                     OutgoingTransferProgress(
                         fileURL: file,
@@ -243,7 +251,8 @@ final class OutgoingTransferClient {
             throw HTTPFailure.badRequest("missing_android_receiver", "Open Linkit on Android once so it can register its receiver")
         }
         let baseURL = httpBaseURL(host: host, port: port)
-        let body = try encoder.encode(action)
+        let plaintext = try encoder.encode(action)
+        let body = try LinkitWireCrypto.seal(pairingSecret: device.pairingSecret, plaintext: plaintext)
         let path = "/v1/actions"
         return try executeJSON(
             signedRequest(method: "POST", url: baseURL + path, path: path, body: body),
@@ -353,6 +362,26 @@ final class OutgoingTransferClient {
             return HTTPFailure(status: status, error: error.error, message: error.message)
         }
         return HTTPFailure(status: status, error: "send_failed", message: "Android receiver returned HTTP \(status)")
+    }
+
+    /// CTR-encrypts `source` to a temp file (same size) for upload. Caller removes it.
+    private func encryptFileToTemp(_ source: URL, key: SymmetricKey) throws -> URL {
+        let cipher = try LinkitStreamCipher(key: key)
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("linkit-enc-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: temp.path, contents: nil) else {
+            throw HTTPFailure.badRequest("temp_create_failed", "Could not create encryption temp file")
+        }
+        let reader = try FileHandle(forReadingFrom: source)
+        defer { try? reader.close() }
+        let writer = try FileHandle(forWritingTo: temp)
+        defer { try? writer.close() }
+        while true {
+            let chunk = try reader.read(upToCount: 1024 * 1024) ?? Data()
+            if chunk.isEmpty { break }
+            try writer.write(contentsOf: cipher.update(chunk))
+        }
+        return temp
     }
 
     private func sha256Hex(_ file: URL) throws -> String {

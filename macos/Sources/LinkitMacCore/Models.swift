@@ -85,6 +85,9 @@ public struct PairingPayload: Codable {
     public let pairingToken: String
     public let pairingChallenge: String
     public let pairingTokenExpiresAt: String
+    /// 32-byte AES key (standard base64) for payload encryption. Travels only via
+    /// the QR (Mac screen -> phone camera), never over the network.
+    public let pairingSecret: String
 }
 
 public struct CreateTransferRequest: Codable {

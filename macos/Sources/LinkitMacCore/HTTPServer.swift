@@ -119,7 +119,8 @@ public final class LinkitReceiverApp {
             publicKey: trusted.publicKey,
             pairedAt: trusted.pairedAt,
             lastKnownHost: connected.host,
-            receivePort: connected.receivePort
+            receivePort: connected.receivePort,
+            pairingSecret: trusted.pairingSecret
         )
         let status = try outgoingClient.status(of: target)
         return connections.refreshStatus(deviceId: deviceId, batteryPercent: status.batteryPercent) ?? connected
@@ -156,7 +157,8 @@ public final class LinkitReceiverApp {
                 publicKey: trusted.publicKey,
                 pairedAt: trusted.pairedAt,
                 lastKnownHost: connected.host,
-                receivePort: connected.receivePort
+                receivePort: connected.receivePort,
+                pairingSecret: trusted.pairingSecret
             )
         }
         // The presence sweep may have marked the phone disconnected during a screen-off
@@ -212,6 +214,12 @@ final class HTTPServer {
     private let bluetoothAddressProvider: () -> String?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+
+    /// Bound concurrent connections so a LAN peer cannot exhaust threads/FDs before auth.
+    private static let maxConcurrentConnections = 16
+    /// Per-connection inactivity timeout (recv/send) to defeat slowloris-style stalls.
+    private static let socketTimeoutSeconds = 60
+    private let connectionLimiter = DispatchSemaphore(value: HTTPServer.maxConcurrentConnections)
 
     init(
         port: UInt16,
@@ -283,14 +291,27 @@ final class HTTPServer {
             }
             let remoteHost = HTTPServer.ipv4String(from: clientAddress)
 
+            if connectionLimiter.wait(timeout: .now()) == .timedOut {
+                logger.info("connection rejected port=\(port): too many concurrent connections")
+                close(clientFD)
+                continue
+            }
             DispatchQueue.global(qos: .userInitiated).async {
+                defer { self.connectionLimiter.signal() }
                 self.handleConnection(clientFD, remoteHost: remoteHost)
             }
         }
     }
 
+    private static func applyTimeout(to fd: Int32, seconds: Int) {
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     private func handleConnection(_ fd: Int32, remoteHost: String?) {
         defer { close(fd) }
+        HTTPServer.applyTimeout(to: fd, seconds: HTTPServer.socketTimeoutSeconds)
 
         do {
             guard let request = try readRequest(from: fd, remoteHost: remoteHost) else {
@@ -394,7 +415,9 @@ final class HTTPServer {
         if request.method == "POST", request.path == "/v1/actions" {
             let body = try readJSONBody(request, fd: fd, maxBytes: 256 * 1024)
             let deviceId = try authenticateControl(request, body: body)
-            let action: LinkitActionRequest = try decodeJSON(body)
+            let pairingSecret = deviceId.flatMap { trustStore.trustedDevice(id: $0)?.pairingSecret }
+            let plaintext = try LinkitWireCrypto.open(pairingSecret: pairingSecret, body: body)
+            let action: LinkitActionRequest = try decodeJSON(plaintext)
             return jsonResponse(status: 200, body: try handleAction(action, senderDeviceId: deviceId))
         }
 
@@ -469,8 +492,14 @@ final class HTTPServer {
         var received: Int64 = 0
 
         do {
+            let pairingSecret = (authenticatedDeviceId ?? clientDeviceId).flatMap { trustStore.trustedDevice(id: $0)?.pairingSecret }
+            guard let pskString = pairingSecret, let psk = Data(base64Encoded: pskString) else {
+                throw HTTPFailure.unauthorized("not_paired_for_encryption", "No encryption key for this device. Re-pair to enable encryption.")
+            }
+            let cipher = try LinkitStreamCipher(key: LinkitSecretBox.transferKey(pairingSecret: psk, transferId: transferId, fileIndex: index))
+
             try consumeUploadChunk(
-                request.bodyRemainder,
+                cipher.update(request.bodyRemainder),
                 maxBytes: record.expectedSize,
                 fileFD: fileFD,
                 hasher: &hasher,
@@ -492,7 +521,7 @@ final class HTTPServer {
                     throw HTTPFailure.badRequest("connection_closed", "Client disconnected before upload completed")
                 }
                 try consumeUploadChunk(
-                    Data(buffer.prefix(count)),
+                    cipher.update(Data(buffer.prefix(count))),
                     maxBytes: record.expectedSize,
                     fileFD: fileFD,
                     hasher: &hasher,

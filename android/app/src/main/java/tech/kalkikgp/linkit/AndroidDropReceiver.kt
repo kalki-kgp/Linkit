@@ -142,7 +142,8 @@ class AndroidDropReceiver(
         if (request.method == "POST" && request.path == "/v1/actions") {
             val body = readBody(request, maxBytes = 256 * 1024)
             verifySigned(request, body)
-            val json = JSONObject(String(body, Charsets.UTF_8))
+            val plaintext = LinkitWireCrypto.open(trustedMac().pairingSecret, body)
+            val json = JSONObject(String(plaintext, Charsets.UTF_8))
             return jsonResponse(200, handleAction(json))
         }
 
@@ -303,6 +304,9 @@ class AndroidDropReceiver(
         session.uploadTokenConsumed = true
         session.status = "uploading"
         val digest = MessageDigest.getInstance("SHA-256")
+        val psk = trustedMac().pairingSecret?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
+            ?: throw DropHttpFailure(401, "not_paired_for_encryption", "No encryption key. Re-pair to enable encryption.")
+        val cipher = LinkitStreamCipher(LinkitSecretBox.transferKey(psk, transferId, index))
         var received = 0L
         // Pin the CPU only for the duration of the actual byte stream so a screen-off
         // Doze window can't suspend the transfer midway. Released in finally; the timeout
@@ -322,8 +326,9 @@ class AndroidDropReceiver(
                     if (read == -1) {
                         throw DropHttpFailure(400, "connection_closed", "Client disconnected before upload completed")
                     }
-                    output.write(buffer, 0, read)
-                    digest.update(buffer, 0, read)
+                    val plaintext = cipher.update(buffer, 0, read)
+                    output.write(plaintext)
+                    digest.update(plaintext)
                     received += read
                 }
             }

@@ -28,7 +28,9 @@ data class TrustedMac(
     val deviceName: String,
     val publicKey: String,
     val ip: String,
-    val port: Int
+    val port: Int,
+    /** Shared AES key (standard base64) from pairing. null if paired before encryption shipped. */
+    val pairingSecret: String? = null
 )
 
 class IdentityStore(private val context: Context) {
@@ -62,7 +64,8 @@ class IdentityStore(private val context: Context) {
             deviceName = json.getString("deviceName"),
             publicKey = json.getString("publicKey"),
             ip = json.getString("ip"),
-            port = json.getInt("port")
+            port = json.getInt("port"),
+            pairingSecret = json.optString("pairingSecret").takeIf { it.isNotBlank() }
         )
     }
 
@@ -73,6 +76,7 @@ class IdentityStore(private val context: Context) {
             .put("publicKey", mac.publicKey)
             .put("ip", mac.ip)
             .put("port", mac.port)
+            .put("pairingSecret", mac.pairingSecret)
         preferences.edit().putString("trusted_mac", json.toString()).apply()
     }
 
