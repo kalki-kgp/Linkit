@@ -109,8 +109,9 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 
 ### Consumer UI (Android)
 
-- Compose home: Device card (avatar, name, pulsing status), action grid (send file, clipboard, link, sync, reconnect), recent activity.
-- Warm-paper Light/Dark palette from `LinkitPalette`.
+- Compose **Home** (focused dashboard): device card (avatar, name, pulsing status), action grid (send file, send clipboard, open link, mirror clipboard), recent activity. Top bar has the Linkit wordmark (7-tap debug) and a **gear icon**.
+- **Settings screen** (pushed from the gear, system back / arrow to return) with Android-style grouped sections mirroring the Mac Settings window: Connection (status, address, reconnect/disconnect, pair with a different Mac, forget), Clipboard (persisted mirror-to-Mac toggle), Transfers (received-files location, clear recent activity), Phone, Call audio (experimental), Notifications & background (battery-optimization exemption, app notification settings), Appearance (System/Light/Dark), Updates, About (version, GitHub).
+- **Preferences** persisted in `LinkitPreferences` (SharedPreferences-backed `StateFlow`): appearance theme override and clipboard-sync state. Theme follows the chosen appearance (was system-only); warm-paper Light/Dark palette from `LinkitPalette`.
 - Pairing-only Welcome screen; debug IP/port/token hidden from normal use.
 - Network hints when hotspot or flaky connectivity is detected.
 - One-time prompts: notification permission (Android 13+), battery optimization exemption (keeps FGS + Wi-Fi alive on Doze), phone and Bluetooth permissions as needed.
@@ -118,8 +119,10 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 ### Menu Bar And UX (macOS)
 
 - Packaged menu-bar `.app` with animated status icon (paired, transferring, success, error, pairing).
-- Menu: connected/paired devices, pairing QR, transfer progress, drop folder, phone controls, call-audio setup, clipboard actions, in-app update check, diagnostics, transfer log, preferences, launch at login, recent transfers.
-- Drag-and-drop onto menu-bar icon for Mac → Android sends.
+- **Popover panel** (left-click the icon): device header with name, status dot, battery, and a gear to Settings; quick-action tiles (Send File, Clipboard, Open Link); persisted clipboard-sync toggle; contextual Phone and Call Audio rows; inline transfer progress with cancel; recent transfers; footer (Pairing QR, Drop Folder, Quit). Built in SwiftUI (`LinkitPanelView`) over a `PanelViewModel` bridge. Right-click gives a minimal fallback menu (Open, Settings, Updates, Quit).
+- **Settings window** (`SettingsView`, sidebar sections): General (launch at login, clipboard sync, appearance Match System/Light/Dark, transfer-received notifications), Devices (paired/connected list with disconnect/forget, pairing QR), Transfers (drop-folder location with Change…/Reset/Reveal/Open, recent transfers, transfer log), Phone & Audio, Network (listening address + custom port), Diagnostics (live status, copy report, version, check for updates), About.
+- **Preferences** persisted in `UserDefaults` (`Preferences`); port and drop-folder location apply on relaunch (offered inline).
+- File picker for Mac → Android sends, plus drag-and-drop onto the menu-bar icon.
 - Separate **paired** vs **connected** device state in UI and trust store.
 
 ### Debug Panel (Android)
