@@ -275,6 +275,13 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 direction: .unknown
             )
         }
+
+        // refreshPanel is the universal "state changed" hook (~25 call sites), but the
+        // Settings window has its own view model. Keep it live while it's open so changes
+        // show without closing and reopening it.
+        if settingsWindow != nil {
+            refreshSettings()
+        }
     }
 
     private func panelPhoneState() -> PanelPhoneState {
