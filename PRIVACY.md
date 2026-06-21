@@ -14,7 +14,8 @@ party.**
 - Received files land in `Downloads/Linkit Drop` on each device. Nothing else is
   copied off-device.
 - Each device's **private signing key** is generated on first run and never leaves
-  the device (Mac: Keychain; Android: app-private storage).
+  the device (Mac: Keychain; Android: the Android Keystore — non-exportable, and
+  hardware-backed where the device supports it).
 - The in-app **debug telemetry** panel (Android) is entirely on-device — it is a
   local diagnostics view and transmits nothing.
 
