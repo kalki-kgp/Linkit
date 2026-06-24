@@ -143,6 +143,10 @@ public final class LinkitReceiverApp {
         try outgoingClient.sendAction(action, to: firstConnectedAndroid())
     }
 
+    public func fetchPhonebookFromFirstAndroid() throws -> PhonebookResponse {
+        try outgoingClient.fetchPhonebook(of: firstConnectedAndroid())
+    }
+
     public func cancelIncomingTransfer(_ transferId: String) throws {
         _ = try store.cancel(id: transferId)
     }

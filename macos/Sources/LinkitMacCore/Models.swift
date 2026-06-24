@@ -227,6 +227,52 @@ public struct AndroidDeviceStatusResponse: Codable, Equatable {
     public let batteryPercent: Int?
 }
 
+public struct PhonebookContact: Codable, Equatable, Identifiable {
+    public let name: String
+    public let numbers: [String]
+    public var id: String { name + "\u{1F}" + numbers.joined(separator: "\u{1F}") }
+
+    public init(name: String, numbers: [String]) {
+        self.name = name
+        self.numbers = numbers
+    }
+}
+
+public struct PhonebookRecentCall: Codable, Equatable, Identifiable {
+    public let number: String
+    public let name: String?
+    public let timestampMillis: Int64
+    public var id: String { number + "\u{1F}" + String(timestampMillis) }
+
+    public init(number: String, name: String?, timestampMillis: Int64) {
+        self.number = number
+        self.name = name
+        self.timestampMillis = timestampMillis
+    }
+}
+
+public struct PhonebookPermissions: Codable, Equatable {
+    public let contacts: Bool
+    public let callLog: Bool
+
+    public init(contacts: Bool, callLog: Bool) {
+        self.contacts = contacts
+        self.callLog = callLog
+    }
+}
+
+public struct PhonebookResponse: Codable, Equatable {
+    public let contacts: [PhonebookContact]
+    public let recentCalls: [PhonebookRecentCall]
+    public let permissions: PhonebookPermissions
+
+    public init(contacts: [PhonebookContact], recentCalls: [PhonebookRecentCall], permissions: PhonebookPermissions) {
+        self.contacts = contacts
+        self.recentCalls = recentCalls
+        self.permissions = permissions
+    }
+}
+
 public struct LinkitActionRequest: Codable, Equatable {
     public let type: String
     public let text: String

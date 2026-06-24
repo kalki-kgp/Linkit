@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.CallLog
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
@@ -16,6 +17,7 @@ import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class PhoneControlPermissionStatus(
@@ -107,6 +109,118 @@ object PhoneContactLookup {
                 }
             }
         }.getOrNull()
+    }
+}
+
+data class ContactNumberEntry(val name: String, val numbers: List<String>)
+
+data class RecentCallEntry(val number: String, val name: String?, val timestampMillis: Long)
+
+/**
+ * Enumerates the on-device address book and recently dialed numbers so the Mac can show a
+ * searchable call picker. Read-only; reuses the existing READ_CONTACTS / READ_CALL_LOG grants
+ * (the same ones that already power incoming caller ID). Returns empty lists without the grant.
+ */
+object PhoneDirectory {
+    private const val RECENT_LIMIT = 20
+
+    private fun dedupKey(number: String): String = number.filter { it.isDigit() || it == '+' }
+
+    fun contacts(context: Context): List<ContactNumberEntry> {
+        if (!PhonePermissions.status(context).canResolveContacts) return emptyList()
+        val byContact = LinkedHashMap<Long, Pair<String, MutableList<String>>>()
+        runCatching {
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                ),
+                null,
+                null,
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} COLLATE NOCASE ASC"
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+                val nameCol = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val numberCol = cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val name = cursor.getString(nameCol)?.takeIf { it.isNotBlank() } ?: continue
+                    val number = cursor.getString(numberCol)?.trim()?.takeIf { it.isNotBlank() } ?: continue
+                    val entry = byContact.getOrPut(id) { name to mutableListOf() }
+                    val key = dedupKey(number)
+                    if (key.isNotEmpty() && entry.second.none { dedupKey(it) == key }) {
+                        entry.second.add(number)
+                    }
+                }
+            }
+        }
+        return byContact.values.mapNotNull { (name, numbers) ->
+            numbers.takeIf { it.isNotEmpty() }?.let { ContactNumberEntry(name, it) }
+        }
+    }
+
+    fun recentDialed(context: Context, limit: Int = RECENT_LIMIT): List<RecentCallEntry> {
+        if (!PhonePermissions.status(context).canSeeNumbers) return emptyList()
+        val out = mutableListOf<RecentCallEntry>()
+        val seen = HashSet<String>()
+        runCatching {
+            context.contentResolver.query(
+                CallLog.Calls.CONTENT_URI,
+                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME, CallLog.Calls.DATE),
+                "${CallLog.Calls.TYPE} = ?",
+                arrayOf(CallLog.Calls.OUTGOING_TYPE.toString()),
+                "${CallLog.Calls.DATE} DESC"
+            )?.use { cursor ->
+                val numberCol = cursor.getColumnIndexOrThrow(CallLog.Calls.NUMBER)
+                val nameCol = cursor.getColumnIndexOrThrow(CallLog.Calls.CACHED_NAME)
+                val dateCol = cursor.getColumnIndexOrThrow(CallLog.Calls.DATE)
+                while (cursor.moveToNext() && out.size < limit) {
+                    val number = cursor.getString(numberCol)?.trim()?.takeIf { it.isNotBlank() } ?: continue
+                    val key = dedupKey(number)
+                    if (key.isEmpty() || !seen.add(key)) continue
+                    out.add(
+                        RecentCallEntry(
+                            number = number,
+                            name = cursor.getString(nameCol)?.takeIf { it.isNotBlank() },
+                            timestampMillis = cursor.getLong(dateCol)
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    fun phonebookJson(context: Context): JSONObject {
+        val status = PhonePermissions.status(context)
+        val contactsArray = JSONArray()
+        for (contact in contacts(context)) {
+            contactsArray.put(
+                JSONObject()
+                    .put("name", contact.name)
+                    .put("numbers", JSONArray(contact.numbers))
+            )
+        }
+        val recentArray = JSONArray()
+        for (call in recentDialed(context)) {
+            recentArray.put(
+                JSONObject()
+                    .put("number", call.number)
+                    .put("name", call.name ?: JSONObject.NULL)
+                    .put("timestampMillis", call.timestampMillis)
+            )
+        }
+        return JSONObject()
+            .put("contacts", contactsArray)
+            .put("recentCalls", recentArray)
+            .put(
+                "permissions",
+                JSONObject()
+                    .put("contacts", status.canResolveContacts)
+                    .put("callLog", status.canSeeNumbers)
+            )
     }
 }
 
