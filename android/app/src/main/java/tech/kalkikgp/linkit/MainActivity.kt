@@ -122,13 +122,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val bluetoothPermissions = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        linkitViewModel.refreshCallAudioStatus()
-        linkitViewModel.enableCallAudioOnMac()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DebugTelemetry.install(applicationContext)
@@ -149,14 +142,7 @@ class MainActivity : ComponentActivity() {
             LinkitTheme(darkTheme = darkTheme) {
                 LinkitScreen(
                     viewModel = linkitViewModel,
-                    onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) },
-                    onEnableCallAudio = {
-                        if (BluetoothPermissions.status(applicationContext).canConnect) {
-                            linkitViewModel.enableCallAudioOnMac()
-                        } else {
-                            bluetoothPermissions.launch(BluetoothPermissions.requested)
-                        }
-                    }
+                    onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) }
                 )
             }
         }
@@ -201,7 +187,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         linkitViewModel.refreshPhoneControlStatus()
-        linkitViewModel.refreshCallAudioStatus()
         if (IdentityStore(applicationContext).trustedMac() != null) {
             linkitViewModel.discoverAndReconnect(force = true)
         }
@@ -243,12 +228,6 @@ data class LinkitUiState(
         canControlCalls = false,
         canSeeNumbers = false,
         canResolveContacts = false
-    ),
-    val callAudioStatus: CallAudioStatus = CallAudioStatus(
-        canConnect = false,
-        macBluetoothAddress = null,
-        isPairedWithMac = false,
-        isBonding = false
     ),
     val status: String = "Ready",
     val error: String? = null,
@@ -386,63 +365,6 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshPhoneControlStatus() {
         _uiState.update { it.copy(phoneControlStatus = PhonePermissions.status(getApplication())) }
-    }
-
-    fun refreshCallAudioStatus() {
-        val state = _uiState.value
-        val cachedAddress = state.callAudioStatus.macBluetoothAddress
-        if (state.trustedMac != null && state.isConnectedToMac && cachedAddress == null) {
-            viewModelScope.launch {
-                runCatching {
-                    val info = client.fetchMacInfo(state.trustedMac!!)
-                    val macAddress = info.optString("bluetoothAddress").takeIf { it.isNotBlank() }
-                    val status = BluetoothPairAssist(getApplication()).callAudioStatus(macAddress)
-                    _uiState.update { it.copy(callAudioStatus = status) }
-                }
-            }
-            return
-        }
-        val status = BluetoothPairAssist(getApplication()).callAudioStatus(cachedAddress)
-        _uiState.update { it.copy(callAudioStatus = status) }
-    }
-
-    fun enableCallAudioOnMac() {
-        val trustedMac = _uiState.value.trustedMac ?: return
-        if (!BluetoothPermissions.status(getApplication()).canConnect) {
-            _uiState.update {
-                it.copy(
-                    callAudioStatus = BluetoothPairAssist(getApplication()).callAudioStatus(null),
-                    status = "Bluetooth permission needed for call audio"
-                )
-            }
-            return
-        }
-        viewModelScope.launch {
-            _uiState.update { it.copy(status = "Setting up call audio on Mac...") }
-            runCatching {
-                val info = client.fetchMacInfo(trustedMac)
-                val macBluetoothAddress = info.optString("bluetoothAddress").takeIf { it.isNotBlank() }
-                    ?: throw IllegalStateException("Mac did not share a Bluetooth address")
-                val result = BluetoothPairAssist(getApplication()).bondWithMac(macBluetoothAddress)
-                val status = BluetoothPairAssist(getApplication()).callAudioStatus(macBluetoothAddress)
-                _uiState.update {
-                    it.copy(
-                        callAudioStatus = status,
-                        status = when (result.optString("mode")) {
-                            "already_paired" -> "Call audio on Mac is ready"
-                            else -> "Confirm Bluetooth pairing on your phone"
-                        }
-                    )
-                }
-            }.onFailure { error ->
-                _uiState.update {
-                    it.copy(
-                        status = "Call audio setup failed",
-                        error = error.message
-                    )
-                }
-            }
-        }
     }
 
     private fun startNetworkMonitor() {
@@ -1123,8 +1045,7 @@ private fun Intent.streamUris(): List<Uri> {
 @Composable
 private fun LinkitScreen(
     viewModel: LinkitViewModel,
-    onEnablePhoneControls: () -> Unit,
-    onEnableCallAudio: () -> Unit
+    onEnablePhoneControls: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val history by viewModel.historyEntries.collectAsStateWithLifecycle()
@@ -1191,9 +1112,7 @@ private fun LinkitScreen(
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
                     onSetAppearance = viewModel::setAppearance,
                     onCheckUpdate = viewModel::checkForAndroidUpdate,
-                    onInstallUpdate = viewModel::installAndroidUpdate,
-                    onEnablePhoneControls = onEnablePhoneControls,
-                    onEnableCallAudio = onEnableCallAudio
+                    onInstallUpdate = viewModel::installAndroidUpdate
                 )
             } else {
                 HomeScreen(
@@ -1205,6 +1124,7 @@ private fun LinkitScreen(
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
                     onReconnect = viewModel::discoverAndReconnect,
                     onClearHistory = viewModel::clearHistory,
+                    onEnablePhoneControls = onEnablePhoneControls,
                     onOpenSettings = { showSettings = true }
                 )
             }
@@ -1310,6 +1230,7 @@ private fun HomeScreen(
     onToggleClipboardSync: () -> Unit,
     onReconnect: () -> Unit,
     onClearHistory: () -> Unit,
+    onEnablePhoneControls: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     Column(
@@ -1335,6 +1256,13 @@ private fun HomeScreen(
             Spacer(modifier = Modifier.height(16.dp))
             ErrorBanner(it)
         }
+        Spacer(modifier = Modifier.height(28.dp))
+        PhoneControlsSection(
+            status = state.phoneControlStatus,
+            onEnable = onEnablePhoneControls
+        )
+        Spacer(modifier = Modifier.height(28.dp))
+        NotificationsGroup()
         Spacer(modifier = Modifier.height(28.dp))
         RecentActivity(entries = history, onClear = onClearHistory)
     }
@@ -1632,63 +1560,6 @@ private fun ActionTile(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-    }
-}
-
-@Composable
-private fun CallAudioSection(
-    status: CallAudioStatus,
-    enabled: Boolean,
-    onEnable: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            "Call audio on Mac",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .border(
-                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    RoundedCornerShape(18.dp)
-                )
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                status.summary,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                buildString {
-                    append("Bluetooth: ")
-                    append(if (status.canConnect) "On" else "Off")
-                    append("  ·  Mac paired: ")
-                    append(if (status.isPairedWithMac) "Yes" else "No")
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            if (!status.isReady) {
-                Button(
-                    onClick = onEnable,
-                    enabled = enabled,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                ) {
-                    Text("Enable call audio on Mac")
-                }
-            }
-        }
     }
 }
 
@@ -2107,9 +1978,7 @@ private fun SettingsScreen(
     onToggleClipboardSync: () -> Unit,
     onSetAppearance: (AppearancePreference) -> Unit,
     onCheckUpdate: () -> Unit,
-    onInstallUpdate: () -> Unit,
-    onEnablePhoneControls: () -> Unit,
-    onEnableCallAudio: () -> Unit
+    onInstallUpdate: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -2165,22 +2034,6 @@ private fun SettingsScreen(
                 onClick = onClearHistory
             )
         }
-        Spacer(modifier = Modifier.height(20.dp))
-
-        PhoneControlsSection(
-            status = state.phoneControlStatus,
-            onEnable = onEnablePhoneControls
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-
-        CallAudioSection(
-            status = state.callAudioStatus,
-            enabled = state.isConnectedToMac,
-            onEnable = onEnableCallAudio
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-
-        NotificationsGroup()
         Spacer(modifier = Modifier.height(20.dp))
 
         SettingsSectionLabel("Appearance")
