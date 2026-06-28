@@ -14,7 +14,7 @@ The README is product-facing. **`docs/current-state.md`** is the technical featu
 
 - `macos/` — Swift Package (`swift-tools-version: 5.9`, macOS 13+). Three targets:
   - `LinkitMacCore` (library) — all protocol, HTTP server, trust, transfer, identity logic. Almost all real Mac logic lives here and is the only target with unit tests.
-  - `LinkitMacMenu` (executable) — the shipped menu-bar app (`LSUIElement`), links `IOBluetooth` for Hands-Free call audio. Packaged into `dist/Linkit.app` by build scripts.
+  - `LinkitMacMenu` (executable) — the shipped menu-bar app (`LSUIElement`). Packaged into `dist/Linkit.app` by build scripts.
   - `LinkitMacReceiver` (executable) — headless terminal receiver, used for dev/smoke tests.
 - `android/` — Gradle/Kotlin app, package `tech.kalkikgp.linkit`, Compose UI, minSdk 26 / target+compile 36. Single `app` module; all sources flat in `android/app/src/main/java/tech/kalkikgp/linkit/`.
 - `scripts/` — build / package / smoke-test shell scripts.
@@ -85,10 +85,10 @@ Streamed with constant memory and end-to-end SHA-256 verification; the upload sl
 ### Android service model
 `LinkitReceiverService` is a foreground service (`foregroundServiceType="specialUse"`) that owns the receiver socket, presence refresh, network monitor, Wi-Fi lock, and `PhoneCallBridge`. `LinkitSendService` (`dataSync`) handles outbound sends. The app must be opened once to start the receiver. Android receive depends on this foreground service running.
 
-### Phone control & call audio
+### Phone control
 - **Call control** (`PhoneControl.kt` / Mac menu): signed `phone_call`, `phone_answer`, `phone_decline`, `phone_hangup` actions; Android mirrors state with `phone_state` (number, display name when call log/contacts granted). Mac shows incoming-call panel when ringing.
-- **Cellular call audio** cannot be relayed over HTTP with public Android APIs — audio stays on the phone unless Bluetooth Hands-Free is used.
-- **Bluetooth call audio (experimental):** Mac `HandsFreeBridge.swift` + `IOBluetooth`; Android `BluetoothPairAssist.kt` bonds using the Mac's Bluetooth address from `GET /info`. Menu: **Set Up Call Audio...**, **Move Call Audio to Mac/Phone**.
+- **Call picker:** Mac **Call a Number…** opens a search-over-contacts/recents picker fetched via signed `GET /phonebook` (needs Android `READ_CONTACTS`/`READ_CALL_LOG`); it surfaces the permission precondition when those aren't granted. On Android, phone controls live on the Home screen.
+- **Call audio stays on the phone.** Cellular audio cannot be relayed over HTTP with public Android APIs. The old experimental Bluetooth Hands-Free route (`HandsFreeBridge.swift`, `BluetoothPairAssist.kt`, `bt_pair`) was **removed** — it could never deliver Mac-side audio on Apple Silicon (SCO `kIOReturnUnsupported`). Don't re-add it.
 
 ### Notable platform constraints (don't "fix" these — they're OS limits)
 - **Clipboard:** Android 10+ blocks background clipboard reads. Mac→Android clipboard push works anytime; automatic Android→Mac clipboard sync is foreground-only. `ClipboardActionActivity` defers the read to `onWindowFocusChanged(true)` so notification-button copies work.

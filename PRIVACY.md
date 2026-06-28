@@ -31,7 +31,7 @@ party.**
 
 ## Android permissions — why each is requested
 
-Linkit only asks for what a given feature needs. You can decline the phone/Bluetooth
+Linkit only asks for what a given feature needs. You can decline the phone
 permissions and still use file, clipboard, and link transfer.
 
 | Permission | Why |
@@ -47,17 +47,16 @@ permissions and still use file, clipboard, and link transfer.
 | `READ_CALL_LOG` | Show the incoming caller's number on your Mac. **Optional.** |
 | `READ_CONTACTS` | Resolve the caller's name for the Mac incoming-call panel. **Optional.** |
 | `CALL_PHONE`, `ANSWER_PHONE_CALLS` | Place/answer/end calls initiated from your Mac. **Optional.** Without `CALL_PHONE`, the dialer is opened pre-filled instead. |
-| `BLUETOOTH`, `BLUETOOTH_ADMIN`, `BLUETOOTH_CONNECT` | Experimental Bluetooth Hands-Free routing of call audio to the Mac. **Optional.** |
 | `WRITE_EXTERNAL_STORAGE` | Save received files to Downloads on older Android versions. |
 
-Call-log, contacts, phone-control, and Bluetooth data are used **only** to drive the
+Call-log, contacts, and phone-control data are used **only** to drive the
 corresponding feature on your paired Mac, in real time, over the signed local link.
 They are not logged off-device, not retained, and not sent anywhere else.
 
 ## macOS
 
-- The Mac app declares Local Network and Bluetooth usage (for discovery and call
-  audio). Its identity key is stored in the macOS Keychain.
+- The Mac app declares Local Network usage (for discovery). Its identity key is
+  stored in the macOS Keychain.
 - Received files land in `~/Downloads/Linkit Drop`.
 
 ## Changes

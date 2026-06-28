@@ -61,8 +61,7 @@ Open the app once after install so the background receiver service starts.
 
 - **Notifications** (Android 13+) — required for the foreground receiver notification.
 - **Battery optimization exemption** (one-time) — keeps the receiver + Wi-Fi alive when the screen is off; strongly recommended on Doze-heavy devices.
-- **Phone permissions** — only if you use call control from the Mac.
-- **Bluetooth** — only if you use experimental call-audio routing to the Mac.
+- **Phone permissions** (call, phone state, contacts, call log) — only if you use call control from the Mac.
 
 The receiver runs as a foreground service; a quiet **Linkit ready** notification sits in the shade. Tap **Stop** on the notification to disable; reopen the app to re-enable.
 
@@ -106,20 +105,11 @@ On Android, open the Phone section and tap **Enable phone controls**. Grant phon
 
 Mac menu bar:
 
-- **Call Number on Android...**
+- **Call a Number…** — a search-as-you-type picker over the phone's contacts and recent calls (or dial a typed number). It tells you how to grant Contacts / Call log on Android if they're missing.
 - **Answer** / **Decline** / **Hang Up Android Call**
 - Incoming calls can show Answer / Decline / Dismiss on the Mac (with caller ID when Android grants call log + contacts).
 
-This is **call control only** over the signed LAN channel. Cellular audio stays on the phone unless you set up Bluetooth call audio (below).
-
-## Bluetooth call audio (experimental)
-
-1. Pair phone and Mac over **classic Bluetooth** (separate from Wi-Fi Linkit pairing).
-2. Mac menu → **Set Up Call Audio...** — shares the Mac Bluetooth address with Android.
-3. On Android, enable call audio when prompted (Bluetooth bond).
-4. Mac menu → **Move Call Audio to Mac** / **Move Call Audio to Phone** during a call.
-
-Uses macOS `IOBluetooth` Hands-Free Profile. Requires macOS 13+ and a Mac with Bluetooth.
+This is **call control only** over the signed LAN channel. Cellular call audio always stays on the phone — there is no Mac-side audio path (the experimental Bluetooth Hands-Free route was removed; it could not deliver audio on Apple Silicon).
 
 ## Reconnect after network change
 

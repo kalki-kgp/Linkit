@@ -1,10 +1,11 @@
 # Linkit Current State
 
-Last updated: 2026-06-20  
+Last updated: 2026-06-28  
 **Release:** [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.6.1)
 
 Linkit is a private Android + macOS local device link for one phone and one Mac. It moves files, clipboard text, plain text, links, and phone-call control directly over the local network or phone hotspot. There is no account, cloud relay, or internet data path.
 
+> **Unreleased (`feat/mac-calling` branch):** **Bluetooth Hands-Free call audio removed** on both platforms — it could never deliver Mac-side audio on Apple Silicon (SCO unsupported), so all call-audio routing UI/logic is gone (placing/answering Android calls from the Mac still works; audio stays on the phone). Mac call picker now surfaces the Android phone-permission precondition. The Mac transfer notification is a **free-floating panel** (consistent position over full-screen apps) you can **drag the received file out of**, with a manual close button. Android moved **Phone controls** and **Notifications & background** out of Settings onto the Home screen. New Mac **Appearance** settings: customizable accent color (preset swatches + custom picker) replacing the fixed amber scheme.  
 > **Unreleased (`security/open-source` branch):** wire payloads are now **end-to-end encrypted** — control actions via AES-256-GCM and file contents via AES-256-CTR, keyed from the pairing-QR secret (`LinkitSecretBox` / `LinkitWireCrypto` / `LinkitStreamCipher`, cross-language golden-vector tested, device-validated to 1 GB+). Also: GPLv3 relicense + `CONTRIBUTING`/`SECURITY`/`PRIVACY`; PR CI; Mac HTTP read-timeout + connection cap; ad-hoc Mac codesign; Android Settings screen + theme.  
 > **Recent (v0.6.1):** `MacRediscovery` shared utility; receiver-service rediscovery on failed Mac registration; UI offline retry loop; persisted endpoint sync after background rediscovery.  
 > **Recent (v0.6):** Phone control + caller ID; experimental Bluetooth Hands-Free call audio on Mac; Doze resistance; Mac last-known Android endpoint persistence.  
@@ -74,17 +75,10 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
   - `phone_answer` — answers a ringing call when `ANSWER_PHONE_CALLS` is granted (Android 8+).
   - `phone_decline` / `phone_hangup` — end the current call when call-control permission is granted (Android 9+).
 - Android's foreground receiver service mirrors call state to the Mac with signed `phone_state` actions when `READ_PHONE_STATE` is granted.
-- With `READ_CALL_LOG` and `READ_CONTACTS`, incoming calls can include caller number and resolved contact display name on the Mac.
-- Mac menu **Phone** section: **Call Number on Android...**, **Answer**, **Decline**, **Hang Up**; incoming-call panel when ringing.
-- Cellular call audio is **not** relayed over the signed HTTP channel — normal third-party apps cannot capture/forward cellular audio with public permissions.
-
-### Bluetooth Call Audio (Experimental)
-
-- Mac `HandsFreeBridge` uses `IOBluetooth` Hands-Free Profile to route call audio to Mac speaker/mic when paired.
-- Android `BluetoothPairAssist` bonds to the Mac using the Bluetooth address from `GET /v1/info`.
-- Mac menu: **Set Up Call Audio...**, **Move Call Audio to Mac** / **Move Call Audio to Phone**.
-- Android UI can enable call audio and shows Bluetooth pairing status.
-- Requires classic Bluetooth pairing between phone and Mac; separate from Wi-Fi/LAN Linkit pairing.
+- With `READ_CALL_LOG` and `READ_CONTACTS`, incoming calls can include caller number and resolved contact display name on the Mac, and the Mac call picker can list phonebook contacts and recent calls (fetched over signed `/v1/phonebook`, kept in memory only).
+- Mac menu **Phone** section: **Call a Number…** (opens a search-as-you-type picker over contacts/recents, or dial a typed number), **Answer**, **Decline**, **Hang Up**; incoming-call panel when ringing.
+- The call picker surfaces the phone-permission precondition: when Contacts / Call log aren't granted on Android it explains how to enable them ("open Linkit and tap *Enable phone controls*"), instead of silently showing an empty list.
+- Cellular call audio is **not** relayed — audio always stays on the phone. Normal third-party apps cannot capture/forward cellular audio with public permissions, so there is no Mac-side call-audio path (the experimental Bluetooth Hands-Free route was removed; see the unreleased note).
 
 ### Reconnect After Network Change
 
@@ -110,18 +104,20 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 
 ### Consumer UI (Android)
 
-- Compose **Home** (focused dashboard): device card (avatar, name, pulsing status), action grid (send file, send clipboard, open link, mirror clipboard), recent activity. Top bar has the Linkit wordmark (7-tap debug) and a **gear icon**.
-- **Settings screen** (pushed from the gear, system back / arrow to return) with Android-style grouped sections mirroring the Mac Settings window: Connection (status, address, reconnect/disconnect, pair with a different Mac, forget), Clipboard (persisted mirror-to-Mac toggle), Transfers (received-files location, clear recent activity), Phone, Call audio (experimental), Notifications & background (battery-optimization exemption, app notification settings), Appearance (System/Light/Dark), Updates, About (version, GitHub).
+- Compose **Home** (focused dashboard): device card (avatar, name, pulsing status), action grid (send file, send clipboard, open link, mirror clipboard), **Phone controls** (enable phone controls, call a number, mirrored call state), **Notifications & background** (battery-optimization exemption, app notification settings), recent activity. Top bar has the Linkit wordmark (7-tap debug) and a **gear icon**. Phone controls and the notification/background settings were promoted out of Settings so they are not gatekept.
+- **Settings screen** (pushed from the gear, system back / arrow to return) with Android-style grouped sections mirroring the Mac Settings window: Connection (status, address, reconnect/disconnect, pair with a different Mac, forget), Clipboard (persisted mirror-to-Mac toggle), Transfers (received-files location, clear recent activity), Appearance (System/Light/Dark), Updates, About (version, GitHub).
 - **Preferences** persisted in `LinkitPreferences` (SharedPreferences-backed `StateFlow`): appearance theme override and clipboard-sync state. Theme follows the chosen appearance (was system-only); warm-paper Light/Dark palette from `LinkitPalette`.
 - Pairing-only Welcome screen; debug IP/port/token hidden from normal use.
 - Network hints when hotspot or flaky connectivity is detected.
-- One-time prompts: notification permission (Android 13+), battery optimization exemption (keeps FGS + Wi-Fi alive on Doze), phone and Bluetooth permissions as needed.
+- One-time prompts: notification permission (Android 13+), battery optimization exemption (keeps FGS + Wi-Fi alive on Doze), and phone permissions (call, phone state, contacts, call log) as needed. Bluetooth permissions were dropped with the call-audio feature.
 
 ### Menu Bar And UX (macOS)
 
 - Packaged menu-bar `.app` with animated status icon (paired, transferring, success, error, pairing).
-- **Popover panel** (left-click the icon): device header with name, status dot, battery, and a gear to Settings; quick-action tiles (Send File, Clipboard, Open Link); persisted clipboard-sync toggle; contextual Phone and Call Audio rows; inline transfer progress with cancel; recent transfers; footer (Pairing QR, Drop Folder, Quit). Built in SwiftUI (`LinkitPanelView`) over a `PanelViewModel` bridge. Right-click gives a minimal fallback menu (Open, Settings, Updates, Quit).
-- **Settings window** (`SettingsView`, sidebar sections): General (launch at login, clipboard sync, appearance Match System/Light/Dark, transfer-received notifications), Devices (paired/connected list with disconnect/forget, pairing QR), Transfers (drop-folder location with Change…/Reset/Reveal/Open, recent transfers, transfer log), Phone & Audio, Network (listening address + custom port), Diagnostics (live status, copy report, version, check for updates), About.
+- **Popover panel** (left-click the icon): device header with name, status dot, battery, and a gear to Settings; quick-action tiles (Send File, Clipboard, Open Link); persisted clipboard-sync toggle; contextual Phone row (Call a Number…, Answer/Decline/Hang Up); inline transfer progress with cancel; recent transfers; footer (Pairing QR, Drop Folder, Quit). Built in SwiftUI (`LinkitPanelView`) over a `PanelViewModel` bridge. Right-click gives a minimal fallback menu (Open, Settings, Updates, Quit).
+- **Transfer notification** (`LinkitTransferPanel`): a free-floating `NSPanel` pinned to the top-right of the active screen at status-bar window level (`canJoinAllSpaces` + `fullScreenAuxiliary`), so it appears in the same place whether or not another app owns the menu bar / is full-screen. Completed Android → Mac files can be **dragged straight out of the notification** into Finder or any app (the card becomes a copy drag source showing the file icon). A close button dismisses it; it otherwise auto-dismisses 5 s after completion.
+- **Settings window** (`SettingsView`, sidebar sections): General (launch at login, clipboard sync, transfer-received notifications), **Appearance** (accent color — 9 preset swatches + custom `ColorPicker` with live preview, plus window theme Match System/Light/Dark), Devices (paired/connected list with disconnect/forget, pairing QR), Transfers (drop-folder location with Change…/Reset/Reveal/Open, recent transfers, transfer log), Phone & Audio, Network (listening address + custom port), Diagnostics (live status, copy report, version, check for updates), About.
+- **Accent color** is user-customizable (`Preferences.accentColorHex`, default amber `#D16B1F`); the popover and call picker recolor to the chosen accent. The menu-bar icon stays a monochrome template that follows the system tint.
 - **Preferences** persisted in `UserDefaults` (`Preferences`); port and drop-folder location apply on relaunch (offered inline).
 - File picker for Mac → Android sends, plus drag-and-drop onto the menu-bar icon.
 - Separate **paired** vs **connected** device state in UI and trust store.
@@ -148,7 +144,7 @@ Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gra
 - One trusted phone + one Mac is the intended personal-use path.
 - Each HTTP transfer session is one file; UI queues multiple files as multiple sessions.
 - Android → Mac automatic clipboard sync cannot run in the background (Android clipboard privacy).
-- Cellular call audio is not relayed over LAN; Bluetooth HFP is experimental and separate from Wi-Fi pairing.
+- Cellular call audio is not relayed — it always stays on the phone. (The experimental Bluetooth Hands-Free route was removed; it could not deliver Mac-side audio on Apple Silicon.)
 - Android receive depends on the foreground receiver service (and user granting notifications / optional battery exemption).
 - No TLS/mTLS/Noise — plain local HTTP, but payloads are app-layer encrypted (AES-256-GCM control actions, AES-256-CTR file contents) over signed requests. Transfer filenames/sizes and control responses are still cleartext.
 - Resumable/chunked transfers, folder sync, remote internet transfer, multi-device, and non-Android/non-macOS clients not implemented.

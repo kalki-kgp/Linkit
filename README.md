@@ -2,7 +2,7 @@
 
 **Drop files, text, and links between your Android phone and your Mac. Locally. Instantly. No cloud.**
 
-Linkit is a small, private device link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar. Clipboard text and links move across the same signed local channel. You can even place and control phone calls from your Mac, with optional Bluetooth call audio routing.
+Linkit is a small, private device link between one phone and one Mac. Pair once with a QR code. After that, sending a file is one tap — or one drag onto your menu bar. Clipboard text and links move across the same signed local channel. You can even place and control phone calls from your Mac (call audio stays on the phone).
 
 No accounts. No upload to a server. No 25 MB email limit. No "your file is too large for AirDrop." Just your phone and your Mac talking directly over your local network.
 
@@ -39,10 +39,10 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 - Turn on clipboard text sync from the Mac menu to push Mac clipboard changes to Android.
 
 **Phone calls from Mac**
-- **Call Number on Android...** — dial from the Mac; Android places the call (or opens the dialer if permission is missing).
+- **Call a Number…** — search your phone's contacts and recent calls (or type a number) and dial from the Mac; Android places the call (or opens the dialer if permission is missing).
 - **Answer**, **Decline**, and **Hang Up** when Android grants call-control permission.
 - Incoming calls can show a Mac prompt with caller number and contact name when Android grants call log / contacts access.
-- **Experimental:** pair over Bluetooth and route call audio to the Mac speaker/mic via Hands-Free (HFP). Cellular audio otherwise stays on the phone — normal apps cannot forward call audio over the LAN.
+- Call audio stays on the phone — normal apps cannot forward cellular call audio over the LAN.
 
 **Clipboard caveat:** Android 10+ limits clipboard reads to focused apps and input methods. Automatic Android → Mac clipboard sync only works while Linkit is open/focused; background copies from other Android apps need the Linkit share sheet or the explicit **Send Clipboard** button. Mac → Android clipboard sync can run from the Mac menu-bar app.
 
