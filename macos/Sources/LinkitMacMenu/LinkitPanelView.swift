@@ -1,7 +1,8 @@
 import SwiftUI
 
 private enum Brand {
-    static let amber = Color(red: 0.82, green: 0.42, blue: 0.12)
+    /// Primary accent — user-customizable in Settings → Appearance.
+    static var amber: Color { Preferences.shared.accent }
     static let green = Color(red: 0.36, green: 0.55, blue: 0.34)
     static let panelWidth: CGFloat = 320
 }
@@ -10,6 +11,8 @@ private enum Brand {
 /// the old flat `NSMenu`.
 struct LinkitPanelView: View {
     @ObservedObject var model: PanelViewModel
+    // Re-render the popover when the user changes the accent color.
+    @ObservedObject private var prefs = Preferences.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

@@ -53,7 +53,11 @@ final class Preferences: ObservableObject {
         static let notifyOnConnect = "pref.notifyOnConnect"
         static let listenPort = "pref.listenPort"
         static let dropFolderBookmark = "pref.dropFolderBookmark"
+        static let accentColor = "pref.accentColorHex"
     }
+
+    /// Default primary accent — the original amber the app shipped with.
+    static let defaultAccentHex = "#D16B1F"
 
     /// Whether Mac → Android clipboard text sync is running. Persisted so the
     /// choice survives relaunch.
@@ -63,6 +67,12 @@ final class Preferences: ObservableObject {
 
     @Published var appearance: LinkitAppearancePreference {
         didSet { defaults.set(appearance.rawValue, forKey: Key.appearance) }
+    }
+
+    /// Primary accent color for Linkit's own UI, stored as `#RRGGBB`. Read as a
+    /// SwiftUI `Color` via the `accent` extension in `AccentColor.swift`.
+    @Published var accentColorHex: String {
+        didSet { defaults.set(accentColorHex, forKey: Key.accentColor) }
     }
 
     @Published var menuBarIconStyle: LinkitMenuBarIconStyle {
@@ -108,9 +118,11 @@ final class Preferences: ObservableObject {
             Key.notifyOnTransfer: true,
             Key.notifyOnConnect: true,
             Key.listenPort: 0,
+            Key.accentColor: Preferences.defaultAccentHex,
         ])
         self.clipboardSyncEnabled = defaults.bool(forKey: Key.clipboardSync)
         self.appearance = LinkitAppearancePreference(rawValue: defaults.string(forKey: Key.appearance) ?? "") ?? .system
+        self.accentColorHex = defaults.string(forKey: Key.accentColor) ?? Preferences.defaultAccentHex
         self.menuBarIconStyle = LinkitMenuBarIconStyle(rawValue: defaults.string(forKey: Key.iconStyle) ?? "") ?? .automatic
         self.showBatteryInIcon = defaults.bool(forKey: Key.showBatteryInIcon)
         self.notifyOnTransferComplete = defaults.bool(forKey: Key.notifyOnTransfer)
