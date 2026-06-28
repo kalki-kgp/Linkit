@@ -142,6 +142,12 @@ struct LinkitPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(row.savedPath == nil)
+                .onDrag {
+                    guard let path = row.savedPath,
+                          let provider = NSItemProvider(contentsOf: URL(fileURLWithPath: path))
+                    else { return NSItemProvider() }
+                    return provider
+                }
             }
         }
     }
@@ -199,14 +205,18 @@ private struct DeviceAvatar: View {
     let connected: Bool
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(connected ? Brand.amber.opacity(0.16) : Color.secondary.opacity(0.14))
-            Image(systemName: name == nil ? "iphone.slash" : "iphone")
-                .font(.system(size: 17, weight: .regular))
-                .foregroundStyle(connected ? Brand.amber : Color.secondary)
-        }
-        .frame(width: 38, height: 38)
+        let tint: Color = connected ? Brand.amber : Color.secondary
+        RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .fill(LinearGradient(
+                colors: [tint, tint.opacity(0.6)],
+                startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: 38, height: 38)
+            .overlay(
+                Image(systemName: name == nil ? "iphone.slash" : "iphone")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+            )
+            .shadow(color: tint.opacity(connected ? 0.35 : 0), radius: 4, y: 1)
     }
 }
 

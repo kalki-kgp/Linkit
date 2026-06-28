@@ -119,6 +119,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// shows on the Mac when Android reports the call going active — even though the Mac, not
     /// the phone, started it.
     private var callInitiatedFromMac = false
+    /// Last phone state reported by Android, used to tell an outgoing call placed on the phone
+    /// (idle → active, no ringing) from an incoming call answered on the phone (ringing → active).
+    private var previousPhoneStateRaw = "idle"
+    /// Guards against firing the "call on phone" notification more than once per call session.
+    private var notifiedPhoneCallActive = false
     private var notificationCenter: UNUserNotificationCenter?
     private var appUpdater: MacAppUpdater?
     private var cancellables = Set<AnyCancellable>()
@@ -347,8 +352,12 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
         self.popover = popover
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // Make the popover its own key window immediately. Without this the backing
+        // vibrancy material renders in its washed-out "inactive" state until the
+        // first click inside the popover makes it key.
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     private func closePopover() {
@@ -719,7 +728,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let host = NSHostingController(rootView: SettingsView(model: settingsViewModel, prefs: prefs))
         let window = NSWindow(contentViewController: host)
         window.title = "Linkit Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.setContentSize(NSSize(width: 760, height: 500))
         window.delegate = self
         window.center()
@@ -1328,8 +1339,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         refreshPanel()
 
         let panel = ensureCallPanel()
+        let newState = state.state.lowercased()
 
-        switch state.state.lowercased() {
+        switch newState {
         case "ringing":
             showTransientIcon(.pairing, tooltip: "Incoming Android call")
             if !callDismissedByUser {
@@ -1337,6 +1349,12 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             }
         case "active":
             showTransientIcon(.connected, tooltip: "Android call active")
+            // A call that goes active without first ringing, and that the Mac didn't place,
+            // is a call started on the phone — let the user know on the Mac.
+            if previousPhoneStateRaw != "ringing", !callInitiatedFromMac, !notifiedPhoneCallActive {
+                postPhoneCallNotification(state: state)
+            }
+            notifiedPhoneCallActive = true
             if panel.isShown || callAnsweredFromMac || callInitiatedFromMac {
                 panel.present(state: state, mode: .active)
             }
@@ -1344,8 +1362,30 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             callDismissedByUser = false
             callAnsweredFromMac = false
             callInitiatedFromMac = false
+            notifiedPhoneCallActive = false
             panel.close()
         }
+        previousPhoneStateRaw = newState
+    }
+
+    private func postPhoneCallNotification(state: AndroidPhoneState) {
+        guard let notificationCenter else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Call on your phone"
+        let hasName = state.name?.isEmpty == false
+        let hasNumber = state.number?.isEmpty == false
+        if hasName, hasNumber {
+            content.body = "\(state.name!) · \(state.number!)"
+        } else if hasName {
+            content.body = state.name!
+        } else if hasNumber {
+            content.body = state.number!
+        } else {
+            content.body = "A call is active on your Android phone."
+        }
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "linkit.phonecall.\(UUID().uuidString)", content: content, trigger: nil)
+        notificationCenter.add(request, withCompletionHandler: nil)
     }
 
     private func ensureCallPanel() -> LinkitCallPanel {

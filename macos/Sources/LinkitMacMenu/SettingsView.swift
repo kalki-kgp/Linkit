@@ -17,19 +17,35 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Short caption shown under the page title in the detail header.
+    var subtitle: String {
+        switch self {
+        case .general: return "Manage Linkit's general settings."
+        case .appearance: return "Make Linkit feel like yours."
+        case .devices: return "Your paired Android device."
+        case .transfers: return "Where received files land and recent activity."
+        case .phone: return "Place and control calls from your Mac."
+        case .network: return "Listening address and port."
+        case .diagnostics: return "Status, reports, and updates."
+        case .about: return "About Linkit."
+        }
+    }
+
     var systemImage: String {
         switch self {
-        case .general: return "gearshape"
-        case .appearance: return "paintbrush"
+        case .general: return "gearshape.fill"
+        case .appearance: return "paintbrush.fill"
         case .devices: return "iphone"
         case .transfers: return "arrow.up.arrow.down"
-        case .phone: return "phone"
+        case .phone: return "phone.fill"
         case .network: return "network"
-        case .diagnostics: return "stethoscope"
-        case .about: return "info.circle"
+        case .diagnostics: return "waveform.path.ecg"
+        case .about: return "info.circle.fill"
         }
     }
 }
+
+// MARK: - Root
 
 struct SettingsView: View {
     @ObservedObject var model: SettingsViewModel
@@ -37,33 +53,305 @@ struct SettingsView: View {
     @State private var selection: SettingsSection = .general
 
     var body: some View {
-        NavigationSplitView {
-            List(SettingsSection.allCases, selection: $selection) { section in
-                Label(section.title, systemImage: section.systemImage)
-                    .tag(section)
-            }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 180, max: 220)
-        } detail: {
-            detail
+        HStack(spacing: 0) {
+            SettingsSidebar(selection: $selection, accent: prefs.accent)
+                .frame(width: 224)
+            Divider().opacity(0.35)
+            SettingsDetail(model: model, prefs: prefs, section: selection)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .navigationTitle(selection.title)
         }
-        .frame(minWidth: 700, minHeight: 460)
+        .frame(minWidth: 760, minHeight: 500)
+        .ignoresSafeArea(.all, edges: .top)
         .onAppear { model.onRefresh() }
+    }
+}
+
+// MARK: - Sidebar
+
+private struct SettingsSidebar: View {
+    @Binding var selection: SettingsSection
+    let accent: Color
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            VisualEffectBackground(material: .sidebar, blending: .behindWindow)
+
+            VStack(alignment: .leading, spacing: 0) {
+                brandHeader
+                ScrollView {
+                    VStack(spacing: 3) {
+                        ForEach(SettingsSection.allCases) { section in
+                            SidebarRow(
+                                section: section,
+                                accent: accent,
+                                isSelected: selection == section
+                            ) { selection = section }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var brandHeader: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [accent, accent.opacity(0.65)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 36, height: 36)
+                .overlay(
+                    Image(systemName: "link")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                )
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Linkit").font(.system(size: 15, weight: .bold))
+                Text("Secure. Simple. Effortless.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 40)
+        .padding(.bottom, 16)
+    }
+}
+
+private struct SidebarRow: View {
+    let section: SettingsSection
+    let accent: Color
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: section.systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isSelected ? .white : .secondary)
+                    .frame(width: 18)
+                Text(section.title)
+                    .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? .white : .primary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(LinearGradient(
+                            colors: [accent, accent.opacity(0.7)],
+                            startPoint: .topLeading, endPoint: .bottomTrailing))
+                } else if hovering {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+// MARK: - Detail
+
+private struct SettingsDetail: View {
+    @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
+    let section: SettingsSection
+
+    var body: some View {
+        ZStack {
+            VisualEffectBackground(material: .underWindowBackground, blending: .behindWindow)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(section.title).font(.system(size: 22, weight: .bold))
+                    Text(section.subtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 38)
+                .padding(.bottom, 18)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        content
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                footer
+            }
+        }
     }
 
     @ViewBuilder
-    private var detail: some View {
-        switch selection {
+    private var content: some View {
+        switch section {
         case .general: GeneralSettings(model: model, prefs: prefs)
         case .appearance: AppearanceSettings(prefs: prefs)
-        case .devices: DeviceSettings(model: model)
-        case .transfers: TransferSettings(model: model)
-        case .phone: PhoneSettings(model: model)
+        case .devices: DeviceSettings(model: model, prefs: prefs)
+        case .transfers: TransferSettings(model: model, prefs: prefs)
+        case .phone: PhoneSettings(model: model, prefs: prefs)
         case .network: NetworkSettings(model: model, prefs: prefs)
-        case .diagnostics: DiagnosticsSettings(model: model)
-        case .about: AboutSettings(model: model)
+        case .diagnostics: DiagnosticsSettings(model: model, prefs: prefs)
+        case .about: AboutSettings(model: model, prefs: prefs)
         }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "heart.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(prefs.accent)
+            Text("Thanks for using Linkit")
+                .font(.system(size: 11, weight: .medium))
+            Text("· Made with care for a seamless experience.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text("v\(model.version)")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 11)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) { Divider().opacity(0.4) }
+    }
+}
+
+// MARK: - Reusable building blocks
+
+/// Translucent material backing for the SwiftUI window — the "liquid glass" base.
+struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .underWindowBackground
+    var blending: NSVisualEffectView.BlendingMode = .behindWindow
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blending
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+        view.blendingMode = blending
+    }
+}
+
+/// An uppercase group label plus a translucent card holding the group's rows.
+private struct SettingsGroup<Content: View>: View {
+    let label: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(label.uppercased())
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .tracking(0.8)
+                .padding(.leading, 4)
+            VStack(spacing: 0) { content }
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08))
+                )
+        }
+    }
+}
+
+/// Accent-tinted rounded icon tile used at the leading edge of every card row.
+private struct IconTile: View {
+    let icon: String
+    let accent: Color
+    var size: CGFloat = 30
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(LinearGradient(
+                colors: [accent.opacity(0.95), accent.opacity(0.6)],
+                startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: size, height: size)
+            .overlay(
+                Image(systemName: icon)
+                    .font(.system(size: size * 0.42, weight: .semibold))
+                    .foregroundStyle(.white)
+            )
+    }
+}
+
+/// A card row with an icon tile, title/subtitle, and an arbitrary trailing control.
+private struct CardRow<Trailing: View>: View {
+    let icon: String
+    let title: String
+    var subtitle: String? = nil
+    let accent: Color
+    var enabled: Bool = true
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 12) {
+            IconTile(icon: icon, accent: accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13, weight: .medium))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            trailing
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .opacity(enabled ? 1 : 0.55)
+    }
+}
+
+/// A toggle row: `CardRow` with a switch tinted to the accent.
+private struct ToggleRow: View {
+    let icon: String
+    let title: String
+    var subtitle: String? = nil
+    let accent: Color
+    var enabled: Bool = true
+    @Binding var isOn: Bool
+
+    var body: some View {
+        CardRow(icon: icon, title: title, subtitle: subtitle, accent: accent, enabled: enabled) {
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(accent)
+                .disabled(!enabled)
+        }
+    }
+}
+
+private struct RowDivider: View {
+    var body: some View {
+        Divider().opacity(0.5).padding(.leading, 56)
     }
 }
 
@@ -74,39 +362,46 @@ private struct GeneralSettings: View {
     @ObservedObject var prefs: Preferences
 
     var body: some View {
-        Form {
-            Section("Startup") {
-                Toggle("Launch Linkit at login", isOn: Binding(
-                    get: { model.launchAtLogin },
-                    set: { model.onSetLaunchAtLogin($0) }
-                ))
-                .disabled(!model.launchAtLoginAvailable)
-                if !model.launchAtLoginAvailable {
-                    Text("Available when running the packaged Linkit.app.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        Group {
+            SettingsGroup(label: "Startup") {
+                ToggleRow(
+                    icon: "power",
+                    title: "Launch Linkit at login",
+                    subtitle: model.launchAtLoginAvailable
+                        ? "Automatically start Linkit when you log in to your Mac."
+                        : "Available when running the packaged Linkit.app.",
+                    accent: prefs.accent,
+                    enabled: model.launchAtLoginAvailable,
+                    isOn: Binding(
+                        get: { model.launchAtLogin },
+                        set: { model.onSetLaunchAtLogin($0) }
+                    )
+                )
             }
 
-            Section("Clipboard") {
-                Toggle("Sync clipboard text to Android", isOn: Binding(
-                    get: { model.clipboardSyncEnabled },
-                    set: { model.onSetClipboardSync($0) }
-                ))
-                Text("When on, text you copy on the Mac is pushed to the paired Android device. Android → Mac sync only works while the Android app is open (an OS privacy limit).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            SettingsGroup(label: "Clipboard") {
+                ToggleRow(
+                    icon: "doc.on.clipboard.fill",
+                    title: "Sync clipboard text to Android",
+                    subtitle: "Copy on your Mac, paste on the paired Android device. Android → Mac sync only works while the Android app is open (an OS privacy limit).",
+                    accent: prefs.accent,
+                    isOn: Binding(
+                        get: { model.clipboardSyncEnabled },
+                        set: { model.onSetClipboardSync($0) }
+                    )
+                )
             }
 
-            Section("Notifications") {
-                Toggle("Notify when a transfer is received", isOn: $prefs.notifyOnTransferComplete)
-                Text("Banners require the packaged Linkit.app and notification permission.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            SettingsGroup(label: "Notifications") {
+                ToggleRow(
+                    icon: "bell.badge.fill",
+                    title: "Notify when a transfer is received",
+                    subtitle: "Get notified when a device sends you a file. Banners require the packaged Linkit.app and notification permission.",
+                    accent: prefs.accent,
+                    isOn: $prefs.notifyOnTransferComplete
+                )
             }
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -128,53 +423,66 @@ private struct AppearanceSettings: View {
         return !LinkitAccent.presets.contains { $0.hex.uppercased() == current }
     }
 
+    private var currentName: String {
+        if isCustom { return "Custom (\(prefs.accentColorHex.uppercased()))" }
+        return LinkitAccent.presets.first { $0.hex.uppercased() == prefs.accentColorHex.uppercased() }?.name
+            ?? prefs.accentColorHex.uppercased()
+    }
+
     var body: some View {
-        Form {
-            Section("Accent color") {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5), spacing: 12) {
-                    ForEach(LinkitAccent.presets) { preset in
-                        SwatchButton(
-                            color: preset.color,
-                            isSelected: preset.hex.uppercased() == prefs.accentColorHex.uppercased(),
-                            action: { prefs.accentColorHex = preset.hex }
-                        )
-                        .help(preset.name)
+        Group {
+            SettingsGroup(label: "Accent color") {
+                VStack(alignment: .leading, spacing: 14) {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5), spacing: 12) {
+                        ForEach(LinkitAccent.presets) { preset in
+                            SwatchButton(
+                                color: preset.color,
+                                isSelected: preset.hex.uppercased() == prefs.accentColorHex.uppercased(),
+                                action: { prefs.accentColorHex = preset.hex }
+                            )
+                            .help(preset.name)
+                        }
+                    }
+                    Divider().opacity(0.5)
+                    ColorPicker(selection: customColor, supportsOpacity: false) {
+                        Text("Custom color").font(.system(size: 13, weight: .medium))
+                    }
+                    HStack {
+                        Text(currentName)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if prefs.accentColorHex.uppercased() != Preferences.defaultAccentHex.uppercased() {
+                            Button("Reset") { prefs.accentColorHex = Preferences.defaultAccentHex }
+                                .controlSize(.small)
+                        }
                     }
                 }
-                .padding(.vertical, 4)
-
-                ColorPicker("Custom color", selection: customColor, supportsOpacity: false)
-
-                HStack {
-                    Text(isCustom ? "Custom (\(prefs.accentColorHex.uppercased()))" : (LinkitAccent.presets.first { $0.hex.uppercased() == prefs.accentColorHex.uppercased() }?.name ?? prefs.accentColorHex.uppercased()))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if prefs.accentColorHex.uppercased() != Preferences.defaultAccentHex.uppercased() {
-                        Button("Reset") { prefs.accentColorHex = Preferences.defaultAccentHex }
-                            .controlSize(.small)
-                    }
-                }
+                .padding(14)
             }
 
-            Section("Preview") {
+            SettingsGroup(label: "Preview") {
                 AccentPreview(accent: prefs.accent)
+                    .padding(14)
             }
 
-            Section("Theme") {
-                Picker("Window theme", selection: $prefs.appearance) {
-                    ForEach(LinkitAppearancePreference.allCases) { option in
-                        Text(option.label).tag(option)
+            SettingsGroup(label: "Window theme") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("", selection: $prefs.appearance) {
+                        ForEach(LinkitAppearancePreference.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    Text("Applies to the menu-bar popover and this window. The menu-bar icon follows your system tint.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .pickerStyle(.segmented)
-                Text("Changes apply to the menu-bar popover and this Settings window. The menu-bar icon follows your system tint.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                .padding(14)
             }
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -208,9 +516,7 @@ private struct AccentPreview: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "link.circle.fill")
-                .font(.system(size: 30))
-                .foregroundStyle(accent)
+            IconTile(icon: "link", accent: accent, size: 34)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Connected to Pixel")
                     .font(.system(size: 13, weight: .medium))
@@ -224,7 +530,6 @@ private struct AccentPreview: View {
                 .padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(accent))
         }
-        .padding(.vertical, 4)
     }
 }
 
@@ -232,43 +537,45 @@ private struct AccentPreview: View {
 
 private struct DeviceSettings: View {
     @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
 
     var body: some View {
-        Form {
-            Section("Paired") {
+        Group {
+            SettingsGroup(label: "Paired") {
                 if model.devices.isEmpty {
-                    Text("No devices paired yet.")
-                        .foregroundStyle(.secondary)
+                    CardRow(icon: "iphone.slash", title: "No devices paired yet",
+                            subtitle: "Show the pairing QR below and scan it from the Linkit app.",
+                            accent: prefs.accent) { EmptyView() }
                 } else {
-                    ForEach(model.devices) { device in
-                        DeviceRowView(device: device, model: model)
+                    ForEach(Array(model.devices.enumerated()), id: \.element.id) { index, device in
+                        if index > 0 { RowDivider() }
+                        DeviceRowView(device: device, model: model, accent: prefs.accent)
                     }
                 }
             }
-            Section {
-                Button {
-                    model.onShowQR()
-                } label: {
-                    Label("Show Pairing QR", systemImage: "qrcode")
+
+            SettingsGroup(label: "Pairing") {
+                CardRow(icon: "qrcode", title: "Show Pairing QR",
+                        subtitle: "Scan from the Linkit app on your Android phone. Pairing is one-time and stays local.",
+                        accent: prefs.accent) {
+                    Button("Show QR") { model.onShowQR() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(prefs.accent)
+                        .controlSize(.small)
                 }
-            } footer: {
-                Text("Scan from the Linkit app on your Android phone. Pairing is one-time and stays local.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
     }
 }
 
 private struct DeviceRowView: View {
     let device: SettingsDeviceRow
     @ObservedObject var model: SettingsViewModel
+    let accent: Color
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "iphone")
-                .foregroundStyle(device.isConnected ? Color.accentColor : .secondary)
+        HStack(spacing: 12) {
+            IconTile(icon: "iphone", accent: device.isConnected ? accent : .gray)
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name).font(.system(size: 13, weight: .medium))
                 HStack(spacing: 6) {
@@ -276,16 +583,16 @@ private struct DeviceRowView: View {
                         .fill(device.isConnected ? Color.green : Color.secondary)
                         .frame(width: 6, height: 6)
                     Text(device.isConnected ? "Connected" : "Paired, offline")
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     if let battery = device.batteryPercent {
                         Text("· \(battery)%")
-                            .font(.caption)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            Spacer()
+            Spacer(minLength: 8)
             if device.isConnected {
                 Button("Disconnect") { model.onDisconnect(device.id) }
                     .controlSize(.small)
@@ -295,7 +602,8 @@ private struct DeviceRowView: View {
             }
             .controlSize(.small)
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }
 
@@ -303,56 +611,82 @@ private struct DeviceRowView: View {
 
 private struct TransferSettings: View {
     @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
 
     var body: some View {
-        Form {
-            Section("Drop folder") {
-                LabeledContent("Location") {
-                    Text(model.dropFolderPath)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                HStack {
-                    Button("Change…") { model.onChangeDropFolder() }
-                    if model.dropFolderIsCustom {
-                        Button("Reset to Default") { model.onResetDropFolder() }
+        Group {
+            SettingsGroup(label: "Drop folder") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        IconTile(icon: "folder.fill", accent: prefs.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Received files").font(.system(size: 13, weight: .medium))
+                            Text(model.dropFolderPath)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 8)
                     }
-                    Spacer()
-                    Button("Reveal") { model.onRevealDropFolder() }
-                    Button("Open") { model.onOpenDropFolder() }
+                    HStack {
+                        Button("Change…") { model.onChangeDropFolder() }
+                        if model.dropFolderIsCustom {
+                            Button("Reset") { model.onResetDropFolder() }
+                        }
+                        Spacer()
+                        Button("Reveal") { model.onRevealDropFolder() }
+                        Button("Open") { model.onOpenDropFolder() }
+                    }
+                    .controlSize(.small)
+                    Text("A new save location takes effect after Linkit relaunches.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
-                Text("A new save location takes effect after Linkit relaunches.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .padding(14)
             }
 
-            Section("Recent transfers") {
+            SettingsGroup(label: "Recent transfers") {
                 if model.recentTransfers.isEmpty {
-                    Text("No transfers yet.").foregroundStyle(.secondary)
+                    CardRow(icon: "tray", title: "No transfers yet",
+                            subtitle: "Files you receive will show up here.",
+                            accent: prefs.accent) { EmptyView() }
                 } else {
-                    ForEach(model.recentTransfers.prefix(10)) { row in
+                    ForEach(Array(model.recentTransfers.prefix(10).enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { RowDivider() }
                         Button {
                             if let path = row.savedPath { model.onOpenRecent(path) }
                         } label: {
-                            HStack {
-                                Text(row.filename).lineLimit(1).truncationMode(.middle)
-                                Spacer()
-                                Text(row.status).font(.caption).foregroundStyle(.secondary)
+                            CardRow(icon: "doc.fill", title: row.filename, subtitle: row.status,
+                                    accent: prefs.accent) {
+                                if row.savedPath != nil {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
                         }
                         .buttonStyle(.plain)
                         .disabled(row.savedPath == nil)
+                        .onDrag {
+                            guard let path = row.savedPath,
+                                  let provider = NSItemProvider(contentsOf: URL(fileURLWithPath: path))
+                            else { return NSItemProvider() }
+                            return provider
+                        }
                     }
                 }
             }
 
-            Section {
-                Button("Open Transfer Log") { model.onOpenLog() }
+            SettingsGroup(label: "Log") {
+                CardRow(icon: "doc.text.fill", title: "Transfer log",
+                        subtitle: "Detailed debug log of every transfer.",
+                        accent: prefs.accent) {
+                    Button("Open") { model.onOpenLog() }
+                        .controlSize(.small)
+                }
             }
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -360,18 +694,20 @@ private struct TransferSettings: View {
 
 private struct PhoneSettings: View {
     @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
 
     var body: some View {
-        Form {
-            Section("Phone control") {
-                LabeledContent("Status", value: model.phoneStatus)
-                Text("Place, answer, decline, and hang up Android calls from the Mac. Call audio stays on the phone.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        Group {
+            SettingsGroup(label: "Phone control") {
+                CardRow(icon: "phone.fill", title: "Call control",
+                        subtitle: "Place, answer, decline, and hang up Android calls from the Mac. Call audio stays on the phone.",
+                        accent: prefs.accent) {
+                    Text(model.phoneStatus)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -382,25 +718,47 @@ private struct NetworkSettings: View {
     @ObservedObject var prefs: Preferences
 
     var body: some View {
-        Form {
-            Section("Listening") {
-                LabeledContent("Address", value: "\(model.localIP):\(model.port)")
+        Group {
+            SettingsGroup(label: "Listening") {
+                CardRow(icon: "antenna.radiowaves.left.and.right", title: "Address",
+                        accent: prefs.accent) {
+                    Text("\(model.localIP):\(model.port)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
             }
-            Section("Port") {
-                TextField("Port", value: $prefs.listenPort, format: .number.grouping(.never))
-                    .frame(width: 120)
-                Text("Set to 0 to use the default (52718). Both devices must agree on the port; a change takes effect after Linkit relaunches.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+
+            SettingsGroup(label: "Port") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        IconTile(icon: "number", accent: prefs.accent)
+                        Text("Custom port").font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        TextField("Port", value: $prefs.listenPort, format: .number.grouping(.never))
+                            .frame(width: 110)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Text("Set to 0 to use the default (52718). Both devices must agree on the port; a change takes effect after Linkit relaunches.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
             }
+
             if model.canRelaunch {
-                Section {
-                    Button("Relaunch Linkit Now") { model.onRelaunch() }
+                SettingsGroup(label: "Apply") {
+                    CardRow(icon: "arrow.clockwise", title: "Relaunch Linkit",
+                            subtitle: "Restart now to apply a new port or drop folder.",
+                            accent: prefs.accent) {
+                        Button("Relaunch") { model.onRelaunch() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(prefs.accent)
+                            .controlSize(.small)
+                    }
                 }
             }
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -408,31 +766,69 @@ private struct NetworkSettings: View {
 
 private struct DiagnosticsSettings: View {
     @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
 
     var body: some View {
-        Form {
-            Section("Status") {
-                LabeledContent("Receiving on", value: "\(model.localIP):\(model.port)")
-                LabeledContent("Trusted devices", value: "\(model.trustedCount)")
-                LabeledContent("Drop folder") {
-                    Text(model.dropFolderPath).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                LabeledContent("Log file") {
-                    Text(model.logPath).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-            }
-            Section {
-                HStack {
-                    Button("Copy Diagnostics Report") { model.onCopyReport() }
-                    Button("Refresh") { model.onRefresh() }
+        Group {
+            SettingsGroup(label: "Status") {
+                VStack(spacing: 0) {
+                    DiagRow(label: "Receiving on", value: "\(model.localIP):\(model.port)", mono: true)
+                    RowDivider()
+                    DiagRow(label: "Trusted devices", value: "\(model.trustedCount)")
+                    RowDivider()
+                    DiagRow(label: "Drop folder", value: model.dropFolderPath, truncate: true)
+                    RowDivider()
+                    DiagRow(label: "Log file", value: model.logPath, truncate: true)
                 }
             }
-            Section("Updates") {
-                LabeledContent("Version", value: "\(model.version) (\(model.build))")
-                Button("Check for Updates…") { model.onCheckUpdates() }
+
+            SettingsGroup(label: "Report") {
+                CardRow(icon: "doc.on.doc.fill", title: "Diagnostics report",
+                        subtitle: "Copy a full status snapshot for issue reports.",
+                        accent: prefs.accent) {
+                    HStack(spacing: 8) {
+                        Button("Refresh") { model.onRefresh() }
+                            .controlSize(.small)
+                        Button("Copy") { model.onCopyReport() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(prefs.accent)
+                            .controlSize(.small)
+                    }
+                }
+            }
+
+            SettingsGroup(label: "Updates") {
+                CardRow(icon: "arrow.down.circle.fill", title: "Version \(model.version) (\(model.build))",
+                        subtitle: "Check GitHub Releases for a newer build.",
+                        accent: prefs.accent) {
+                    Button("Check…") { model.onCheckUpdates() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(prefs.accent)
+                        .controlSize(.small)
+                }
             }
         }
-        .formStyle(.grouped)
+    }
+}
+
+private struct DiagRow: View {
+    let label: String
+    let value: String
+    var mono: Bool = false
+    var truncate: Bool = false
+
+    var body: some View {
+        HStack {
+            Text(label).font(.system(size: 13))
+            Spacer(minLength: 16)
+            Text(value)
+                .font(.system(size: 12, design: mono ? .monospaced : .default))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(truncate ? .middle : .tail)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 }
 
@@ -440,12 +836,20 @@ private struct DiagnosticsSettings: View {
 
 private struct AboutSettings: View {
     @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "link.circle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(Color.accentColor)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [prefs.accent, prefs.accent.opacity(0.6)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 76, height: 76)
+                .overlay(
+                    Image(systemName: "link")
+                        .font(.system(size: 34, weight: .bold))
+                        .foregroundStyle(.white)
+                )
             Text("Linkit").font(.system(size: 22, weight: .semibold))
             Text("Version \(model.version) (\(model.build))")
                 .font(.caption)
@@ -457,8 +861,9 @@ private struct AboutSettings: View {
                 .frame(maxWidth: 360)
             Link("View on GitHub", destination: URL(string: "https://github.com/kalki-kgp/Linkit")!)
                 .font(.system(size: 12))
+                .tint(prefs.accent)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .frame(maxWidth: .infinity)
+        .padding(.top, 24)
     }
 }
