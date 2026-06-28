@@ -1,12 +1,13 @@
 import SwiftUI
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, devices, transfers, phone, network, diagnostics, about
+    case general, appearance, devices, transfers, phone, network, diagnostics, about
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "General"
+        case .appearance: return "Appearance"
         case .devices: return "Devices"
         case .transfers: return "Transfers"
         case .phone: return "Phone & Audio"
@@ -19,6 +20,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .general: return "gearshape"
+        case .appearance: return "paintbrush"
         case .devices: return "iphone"
         case .transfers: return "arrow.up.arrow.down"
         case .phone: return "phone"
@@ -54,6 +56,7 @@ struct SettingsView: View {
     private var detail: some View {
         switch selection {
         case .general: GeneralSettings(model: model, prefs: prefs)
+        case .appearance: AppearanceSettings(prefs: prefs)
         case .devices: DeviceSettings(model: model)
         case .transfers: TransferSettings(model: model)
         case .phone: PhoneSettings(model: model)
@@ -96,15 +99,6 @@ private struct GeneralSettings: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("Appearance") {
-                Picker("Theme", selection: $prefs.appearance) {
-                    ForEach(LinkitAppearancePreference.allCases) { option in
-                        Text(option.label).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-
             Section("Notifications") {
                 Toggle("Notify when a transfer is received", isOn: $prefs.notifyOnTransferComplete)
                 Text("Banners require the packaged Linkit.app and notification permission.")
@@ -113,6 +107,124 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Appearance
+
+private struct AppearanceSettings: View {
+    @ObservedObject var prefs: Preferences
+
+    /// Two-way bridge between the stored hex string and SwiftUI's `ColorPicker`.
+    private var customColor: Binding<Color> {
+        Binding(
+            get: { prefs.accent },
+            set: { prefs.accentColorHex = $0.toHexString() ?? Preferences.defaultAccentHex }
+        )
+    }
+
+    private var isCustom: Bool {
+        let current = prefs.accentColorHex.uppercased()
+        return !LinkitAccent.presets.contains { $0.hex.uppercased() == current }
+    }
+
+    var body: some View {
+        Form {
+            Section("Accent color") {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5), spacing: 12) {
+                    ForEach(LinkitAccent.presets) { preset in
+                        SwatchButton(
+                            color: preset.color,
+                            isSelected: preset.hex.uppercased() == prefs.accentColorHex.uppercased(),
+                            action: { prefs.accentColorHex = preset.hex }
+                        )
+                        .help(preset.name)
+                    }
+                }
+                .padding(.vertical, 4)
+
+                ColorPicker("Custom color", selection: customColor, supportsOpacity: false)
+
+                HStack {
+                    Text(isCustom ? "Custom (\(prefs.accentColorHex.uppercased()))" : (LinkitAccent.presets.first { $0.hex.uppercased() == prefs.accentColorHex.uppercased() }?.name ?? prefs.accentColorHex.uppercased()))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if prefs.accentColorHex.uppercased() != Preferences.defaultAccentHex.uppercased() {
+                        Button("Reset") { prefs.accentColorHex = Preferences.defaultAccentHex }
+                            .controlSize(.small)
+                    }
+                }
+            }
+
+            Section("Preview") {
+                AccentPreview(accent: prefs.accent)
+            }
+
+            Section("Theme") {
+                Picker("Window theme", selection: $prefs.appearance) {
+                    ForEach(LinkitAppearancePreference.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Changes apply to the menu-bar popover and this Settings window. The menu-bar icon follows your system tint.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct SwatchButton: View {
+    let color: Color
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Circle()
+                .fill(color)
+                .frame(height: 30)
+                .overlay(
+                    Circle().strokeBorder(Color.primary.opacity(isSelected ? 0.9 : 0.0), lineWidth: 2)
+                )
+                .overlay(
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .opacity(isSelected ? 1 : 0)
+                )
+                .padding(2)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct AccentPreview: View {
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "link.circle.fill")
+                .font(.system(size: 30))
+                .foregroundStyle(accent)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Connected to Pixel")
+                    .font(.system(size: 13, weight: .medium))
+                ProgressView(value: 0.6).tint(accent)
+            }
+            Spacer()
+            Text("Call")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(accent))
+        }
+        .padding(.vertical, 4)
     }
 }
 

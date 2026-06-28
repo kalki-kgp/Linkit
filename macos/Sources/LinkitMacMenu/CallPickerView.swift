@@ -2,7 +2,8 @@ import SwiftUI
 import LinkitMacCore
 
 private enum PickerBrand {
-    static let amber = Color(red: 0.82, green: 0.42, blue: 0.12)
+    /// Primary accent — user-customizable in Settings → Appearance.
+    static var amber: Color { Preferences.shared.accent }
     static let green = Color(red: 0.36, green: 0.55, blue: 0.34)
 }
 
@@ -105,6 +106,7 @@ final class CallPickerViewModel: ObservableObject {
 
 struct CallPickerView: View {
     @ObservedObject var model: CallPickerViewModel
+    @ObservedObject private var prefs = Preferences.shared
     @FocusState private var searchFocused: Bool
 
     var body: some View {
