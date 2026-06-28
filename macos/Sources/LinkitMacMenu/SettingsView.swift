@@ -253,22 +253,7 @@ private struct PhoneSettings: View {
         Form {
             Section("Phone control") {
                 LabeledContent("Status", value: model.phoneStatus)
-                Text("Place, answer, decline, and hang up Android calls from the Mac. Call audio stays on the phone unless you set up Bluetooth call audio below.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Section("Call audio (experimental)") {
-                LabeledContent("Status", value: model.callAudioStatus.isEmpty ? "Not set up" : model.callAudioStatus)
-                if model.callAudioConfigured {
-                    Button(model.callAudioOnMac ? "Move Call Audio to Phone" : "Move Call Audio to Mac") {
-                        model.onToggleCallAudioRoute()
-                    }
-                } else {
-                    Button("Set Up Call Audio…") { model.onSetupCallAudio() }
-                }
-                Text("Routes cellular call audio to the Mac over Bluetooth Hands-Free. Requires a classic Bluetooth pairing, separate from Linkit's Wi-Fi pairing.")
+                Text("Place, answer, decline, and hang up Android calls from the Mac. Call audio stays on the phone.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

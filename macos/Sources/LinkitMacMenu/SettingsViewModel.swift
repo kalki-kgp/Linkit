@@ -25,9 +25,6 @@ final class SettingsViewModel: ObservableObject {
     @Published var trustedCount = 0
     @Published var recentTransfers: [RecentTransferRow] = []
     @Published var phoneStatus = ""
-    @Published var callAudioStatus = ""
-    @Published var callAudioConfigured = false
-    @Published var callAudioOnMac = false
     @Published var version = ""
     @Published var build = ""
 
@@ -45,8 +42,6 @@ final class SettingsViewModel: ObservableObject {
     var canRelaunch = false
     var onOpenRecent: (String) -> Void = { _ in }
     var onOpenLog: () -> Void = {}
-    var onSetupCallAudio: () -> Void = {}
-    var onToggleCallAudioRoute: () -> Void = {}
     var onCheckUpdates: () -> Void = {}
     var onCopyReport: () -> Void = {}
     var onRefresh: () -> Void = {}

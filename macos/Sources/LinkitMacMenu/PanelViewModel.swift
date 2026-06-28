@@ -49,9 +49,6 @@ final class PanelViewModel: ObservableObject {
     @Published var hasAndroidTarget: Bool = false
     @Published var clipboardSyncEnabled: Bool = true
     @Published var phone = PanelPhoneState()
-    @Published var callAudioStatus: String = ""
-    @Published var callAudioConfigured: Bool = false
-    @Published var callAudioOnMac: Bool = false
     @Published var recentTransfers: [RecentTransferRow] = []
     @Published var activeTransfer: PanelTransfer? = nil
 
@@ -66,8 +63,6 @@ final class PanelViewModel: ObservableObject {
     var onAnswer: () -> Void = {}
     var onDecline: () -> Void = {}
     var onHangUp: () -> Void = {}
-    var onSetupCallAudio: () -> Void = {}
-    var onToggleCallAudioRoute: () -> Void = {}
     var onOpenDropFolder: () -> Void = {}
     var onOpenRecent: (String) -> Void = { _ in }
     var onCancelTransfer: () -> Void = {}
