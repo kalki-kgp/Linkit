@@ -248,7 +248,7 @@ struct CallPickerView: View {
 
     private var emptyTitle: String {
         if !model.query.isEmpty { return "No matches" }
-        if model.permissions?.contacts == false { return "No contacts available" }
+        if model.permissions?.contacts == false { return "Contacts not shared" }
         return "Nothing here yet"
     }
 
@@ -256,9 +256,9 @@ struct CallPickerView: View {
         if !model.query.isEmpty { return "Type a full number, then “Dial typed number”." }
         let perms = model.permissions
         if perms?.contacts == false && perms?.callLog == false {
-            return "Grant Contacts and Call log to Linkit on your phone to see names and recent calls — or just type a number."
+            return "On your phone, open Linkit and tap “Enable phone controls” to grant Contacts and Call log — then names and recent calls appear here. Or just type a number."
         }
-        if perms?.contacts == false { return "Grant Contacts to Linkit on your phone to see your address book." }
+        if perms?.contacts == false { return "On your phone, open Linkit and grant Contacts to see your address book. Or just type a number." }
         return "Your contacts and recent calls will appear here."
     }
 }

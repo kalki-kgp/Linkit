@@ -20,10 +20,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "LinkitMacMenu",
-            dependencies: ["LinkitMacCore"],
-            linkerSettings: [
-                .linkedFramework("IOBluetooth")
-            ]
+            dependencies: ["LinkitMacCore"]
         ),
         .testTarget(
             name: "LinkitMacCoreTests",

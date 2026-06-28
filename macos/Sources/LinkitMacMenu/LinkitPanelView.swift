@@ -26,7 +26,6 @@ struct LinkitPanelView: View {
                         quickActions
                         clipboardSyncRow
                         PhoneRow(model: model)
-                        CallAudioRow(model: model)
                         if !model.recentTransfers.isEmpty {
                             recentTransfers
                         }
@@ -305,37 +304,6 @@ private struct PhoneRow: View {
     }
 
     private var phoneTitle: String { model.phone.statusText }
-}
-
-// MARK: - Call audio row
-
-private struct CallAudioRow: View {
-    @ObservedObject var model: PanelViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "CALL AUDIO")
-            HStack(spacing: 8) {
-                Image(systemName: model.callAudioOnMac ? "headphones" : "speaker.wave.2")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                Text(model.callAudioStatus.isEmpty ? "Not set up" : model.callAudioStatus)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
-            }
-            if model.callAudioConfigured {
-                SmallButton(
-                    title: model.callAudioOnMac ? "Move Audio to Phone" : "Move Audio to Mac",
-                    tint: Brand.amber,
-                    action: model.onToggleCallAudioRoute
-                )
-            } else {
-                SmallButton(title: "Set Up Call Audio…", tint: Brand.amber, action: model.onSetupCallAudio)
-            }
-        }
-    }
 }
 
 // MARK: - Transfer strip
