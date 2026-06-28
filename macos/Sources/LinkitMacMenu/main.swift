@@ -23,6 +23,9 @@ private struct LinkitTransferPanelState {
     let direction: LinkitTransferPanelDirection
     let isActive: Bool
     let didFail: Bool
+    /// Local path of the received file, set only for completed Android→Mac transfers so the
+    /// notification can act as a drag source straight into Finder / other apps.
+    var savedPath: String? = nil
 }
 
 private struct AndroidPhoneState: Codable, Equatable {
@@ -1225,6 +1228,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     }
                 }
                 if status == "complete" {
+                    let savedPath = (notification.userInfo?[LinkitTransferNotification.savedPathKey] as? String)
+                        .flatMap { $0.isEmpty ? nil : $0 }
                     self?.showTransferPanel(
                         state: LinkitTransferPanelState(
                             title: filename ?? "Transfer complete",
@@ -1236,7 +1241,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                             etaSeconds: 0,
                             direction: .androidToMac,
                             isActive: false,
-                            didFail: false
+                            didFail: false,
+                            savedPath: savedPath
                         )
                     )
                     self?.showTransientIcon(.success, tooltip: "Transfer complete")
@@ -1549,12 +1555,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let panel = transferPanel ?? LinkitTransferPanel()
         transferPanel = panel
         panel.onCancel = { [weak self] in self?.cancelCurrentTransfer() }
-        panel.update(state: state)
-        if let button = statusItem?.button {
-            panel.show(relativeTo: button)
-        } else {
-            panel.showCentered()
-        }
+        panel.show(state: state)
         if !state.isActive {
             panel.closeAfterDelay(5)
         }
@@ -1964,51 +1965,135 @@ private func formatCallDuration(_ seconds: TimeInterval) -> String {
     return String(format: "%02d:%02d", total / 60, total % 60)
 }
 
+/// Transparent overlay that turns a received-file notification into a drag source. When
+/// `fileURL` is set it begins a copy drag of that file (icon follows the cursor) so the user
+/// can drop it straight into Finder or another app; when nil it ignores hit-testing entirely
+/// so underlying controls (e.g. the Cancel button) keep working.
+private final class DraggableFileView: NSView, NSDraggingSource {
+    var fileURL: URL? {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        fileURL == nil ? nil : super.hitTest(point)
+    }
+
+    override func resetCursorRects() {
+        if fileURL != nil {
+            addCursorRect(bounds, cursor: .openHand)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let url = fileURL else { return }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        let size = NSSize(width: 56, height: 56)
+        icon.size = size
+        let location = convert(event.locationInWindow, from: nil)
+        let frame = NSRect(x: location.x - size.width / 2, y: location.y - size.height / 2, width: size.width, height: size.height)
+        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+        item.setDraggingFrame(frame, contents: icon)
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        [.copy]
+    }
+}
+
+/// A floating notification panel for transfer progress / completion. Uses the same
+/// free-floating `NSPanel` approach as `LinkitCallPanel` (status-bar window level,
+/// joins all spaces and floats over full-screen apps) so it always appears pinned to the
+/// top-right of the active screen — consistent whether or not another app owns the menu bar.
 private final class LinkitTransferPanel {
-    private let popover: NSPopover
+    private let panel: NSPanel
     private let content: LinkitTransferPanelView
     private var closeWorkItem: DispatchWorkItem?
+    private var isShown = false
+    private let panelSize = NSSize(width: 340, height: 150)
+
     var onCancel: (() -> Void)? {
         get { content.onCancel }
         set { content.onCancel = newValue }
     }
 
     init() {
-        content = LinkitTransferPanelView(frame: NSRect(origin: .zero, size: NSSize(width: 340, height: 150)))
-        let controller = NSViewController()
-        controller.view = content
-
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.contentViewController = controller
+        content = LinkitTransferPanelView(frame: NSRect(origin: .zero, size: panelSize))
+        panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: panelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.contentView = content
+        content.onClose = { [weak self] in self?.dismiss() }
     }
 
-    func update(state: LinkitTransferPanelState) {
+    /// Manual dismissal (the close button); cancels any pending auto-dismiss first.
+    func dismiss() {
+        closeWorkItem?.cancel()
+        close()
+    }
+
+    func show(state: LinkitTransferPanelState) {
         closeWorkItem?.cancel()
         content.transferState = state
-        popover.contentSize = content.preferredSize(maxWidth: NSScreen.main?.visibleFrame.width ?? 380)
-    }
+        guard let screen = NSScreen.main else { return }
+        let margin: CGFloat = 16
+        let targetFrame = NSRect(
+            x: screen.visibleFrame.maxX - panelSize.width - margin,
+            y: screen.visibleFrame.maxY - panelSize.height - margin,
+            width: panelSize.width,
+            height: panelSize.height
+        )
 
-    func show(relativeTo button: NSStatusBarButton) {
-        if popover.isShown {
-            popover.contentSize = content.preferredSize(maxWidth: button.window?.screen?.visibleFrame.width ?? 380)
+        if isShown {
+            panel.setFrame(targetFrame, display: true)
             return
         }
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-    }
 
-    func showCentered() {
-        NSApp.activate(ignoringOtherApps: true)
+        var startFrame = targetFrame
+        startFrame.origin.x += 40
+        panel.alphaValue = 0
+        panel.setFrame(startFrame, display: false)
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.28
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.panel.animator().setFrame(targetFrame, display: true)
+            self.panel.animator().alphaValue = 1
+        }
+        isShown = true
     }
 
     func closeAfterDelay(_ delay: TimeInterval) {
         closeWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.popover.performClose(nil)
-        }
+        let workItem = DispatchWorkItem { [weak self] in self?.close() }
         closeWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func close() {
+        guard isShown else { return }
+        var endFrame = panel.frame
+        endFrame.origin.x += 24
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.panel.animator().alphaValue = 0
+            self.panel.animator().setFrame(endFrame, display: true)
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            self.panel.orderOut(nil)
+            self.isShown = false
+            self.panel.alphaValue = 1
+        })
     }
 }
 
@@ -2022,7 +2107,10 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
     private let percentLabel = NSTextField(labelWithString: "")
     private let progressBar = NSProgressIndicator()
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let closeButton = NSButton()
+    private let dragOverlay = DraggableFileView()
     var onCancel: (() -> Void)?
+    var onClose: (() -> Void)?
 
     var transferState: LinkitTransferPanelState = LinkitTransferPanelState(
         title: "No active transfer",
@@ -2049,13 +2137,8 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         setup()
     }
 
-    func preferredSize(maxWidth: CGFloat) -> NSSize {
-        let width = min(340, max(280, maxWidth - 48))
-        return NSSize(width: width, height: 150)
-    }
-
     private func setup() {
-        material = .popover
+        material = .hudWindow
         blendingMode = .behindWindow
         self.state = .active
         wantsLayer = true
@@ -2104,8 +2187,20 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         cancelButton.target = self
         cancelButton.action = #selector(cancelPressed)
 
-        [titleLabel, cardView].forEach(addSubview)
+        closeButton.bezelStyle = .regularSquare
+        closeButton.isBordered = false
+        closeButton.imagePosition = .imageOnly
+        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Dismiss")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.toolTip = "Dismiss"
+        closeButton.target = self
+        closeButton.action = #selector(closePressed)
+
+        [titleLabel, cardView, closeButton].forEach(addSubview)
         [iconView, transferTitle, transferDetail, transferStats, percentLabel, progressBar, cancelButton].forEach(cardView.addSubview)
+        // Topmost so it can intercept drags; transparent to hit-testing unless a file is set.
+        cardView.addSubview(dragOverlay)
         updateContent()
     }
 
@@ -2113,6 +2208,7 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         super.layout()
         let padding: CGFloat = 14
         titleLabel.frame = NSRect(x: padding, y: bounds.height - 32, width: bounds.width - padding * 2, height: 20)
+        closeButton.frame = NSRect(x: bounds.width - 30, y: bounds.height - 30, width: 18, height: 18)
 
         let cardHeight: CGFloat = 96
         cardView.frame = NSRect(x: padding, y: 14, width: bounds.width - padding * 2, height: cardHeight)
@@ -2123,14 +2219,30 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
         transferStats.frame = NSRect(x: 66, y: cardHeight - 73, width: cardView.bounds.width - 142, height: 13)
         cancelButton.frame = NSRect(x: cardView.bounds.width - 66, y: 28, width: 50, height: 24)
         progressBar.frame = NSRect(x: 66, y: 13, width: cardView.bounds.width - 82, height: 5)
+        dragOverlay.frame = cardView.bounds
     }
 
     private func updateContent() {
         cardView.layer?.borderColor = accentColor.withAlphaComponent(transferState.isActive ? 0.9 : 0.45).cgColor
-        iconView.layer?.backgroundColor = accentColor.cgColor
-        iconView.image = NSImage(systemSymbolName: transferState.direction == .androidToMac ? "arrow.down" : "arrow.up", accessibilityDescription: nil)
+
+        // A completed Android→Mac file can be dragged straight out of the notification.
+        let draggableURL: URL? = (!transferState.isActive && !transferState.didFail)
+            ? transferState.savedPath.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+            : nil
+        dragOverlay.fileURL = draggableURL
+        window?.invalidateCursorRects(for: dragOverlay)
+
+        if let url = draggableURL {
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            icon.size = NSSize(width: 40, height: 40)
+            iconView.image = icon
+            iconView.layer?.backgroundColor = NSColor.clear.cgColor
+        } else {
+            iconView.layer?.backgroundColor = accentColor.cgColor
+            iconView.image = NSImage(systemSymbolName: transferState.direction == .androidToMac ? "arrow.down" : "arrow.up", accessibilityDescription: nil)
+        }
         transferTitle.stringValue = transferState.title
-        transferDetail.stringValue = transferState.detail
+        transferDetail.stringValue = draggableURL != nil ? "\(transferState.detail) · drag to save anywhere" : transferState.detail
         transferStats.stringValue = transferStatsText()
         percentLabel.stringValue = transferState.progress.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
         cancelButton.isHidden = !transferState.isActive
@@ -2146,6 +2258,10 @@ private final class LinkitTransferPanelView: NSVisualEffectView {
 
     @objc private func cancelPressed() {
         onCancel?()
+    }
+
+    @objc private func closePressed() {
+        onClose?()
     }
 
     private func transferStatsText() -> String {
