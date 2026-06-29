@@ -108,9 +108,11 @@ class NotificationMirrorService : NotificationListenerService() {
 /** Helpers for the OS notification-access grant that [NotificationMirrorService] depends on. */
 object NotificationAccess {
     fun isGranted(context: Context): Boolean {
+        // "enabled_notification_listeners" — Settings.Secure exposes this only as a @hide
+        // constant, so the literal is the supported way to read it from the public SDK.
         val enabled = Settings.Secure.getString(
             context.contentResolver,
-            Settings.Secure.ENABLED_NOTIFICATION_LISTENERS
+            "enabled_notification_listeners"
         ) ?: return false
         val component = ComponentName(context, NotificationMirrorService::class.java)
         return enabled.split(':').any {
