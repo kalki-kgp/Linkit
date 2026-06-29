@@ -3,4 +3,7 @@
     <cache-path
         name="updates"
         path="updates/" />
+    <external-files-path
+        name="linkit_drop"
+        path="Download/Linkit Drop/" />
 </paths>

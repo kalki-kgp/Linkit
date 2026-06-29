@@ -21,7 +21,8 @@ data class TransferHistoryEntry(
     val completedAt: Long,
     val status: String,
     val savedPath: String?,
-    val error: String?
+    val error: String?,
+    val contentUri: String? = null
 ) {
     companion object {
         const val DIRECTION_SENT = "sent"
@@ -97,6 +98,7 @@ class TransferHistoryStore private constructor(context: Context) {
         .put("status", entry.status)
         .put("savedPath", entry.savedPath ?: JSONObject.NULL)
         .put("error", entry.error ?: JSONObject.NULL)
+        .put("contentUri", entry.contentUri ?: JSONObject.NULL)
 
     private fun fromJson(json: JSONObject): TransferHistoryEntry = TransferHistoryEntry(
         id = json.getString("id"),
@@ -107,7 +109,8 @@ class TransferHistoryStore private constructor(context: Context) {
         completedAt = json.getLong("completedAt"),
         status = json.getString("status"),
         savedPath = json.nullableString("savedPath"),
-        error = json.nullableString("error")
+        error = json.nullableString("error"),
+        contentUri = json.nullableString("contentUri")
     )
 
     private fun JSONObject.nullableString(name: String): String? {

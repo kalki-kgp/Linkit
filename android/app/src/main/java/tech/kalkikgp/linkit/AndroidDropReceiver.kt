@@ -12,6 +12,7 @@ import android.os.PowerManager
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -410,7 +411,8 @@ class AndroidDropReceiver(
                 completedAt = System.currentTimeMillis(),
                 status = status,
                 savedPath = session.savedPath,
-                error = session.error
+                error = session.error,
+                contentUri = session.contentUri
             )
         )
     }
@@ -433,6 +435,7 @@ class AndroidDropReceiver(
                 values.clear()
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
+                session.contentUri = uri.toString()
                 return "Downloads/Linkit Drop/${session.safeName}"
             } catch (error: Exception) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -443,6 +446,9 @@ class AndroidDropReceiver(
         val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Linkit Drop").apply { mkdirs() }
         val target = collisionFile(dir, session.safeName)
         session.tempFile.copyTo(target, overwrite = false)
+        session.contentUri = runCatching {
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target).toString()
+        }.getOrNull()
         return target.absolutePath
     }
 
@@ -744,6 +750,7 @@ private data class DropSession(
     var bytesReceived: Long = 0,
     var serverSha256: String? = null,
     var savedPath: String? = null,
+    var contentUri: String? = null,
     var error: String? = null,
     var finalizeResponse: JSONObject? = null
 )

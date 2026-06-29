@@ -2041,6 +2041,74 @@ private final class DraggableFileView: NSView, NSDraggingSource {
     }
 }
 
+/// SwiftUI wrapper that turns a list row into a real file drag source. SwiftUI's `.onDrag`
+/// doesn't fire inside a `Button` (and is flaky inside a transient popover), so we drop down
+/// to the same AppKit `NSDraggingSource` approach the transfer panel uses. A click that
+/// doesn't move counts as a tap and calls `onOpen`; a click that drags begins a copy drag.
+struct FileDragOverlay: NSViewRepresentable {
+    let url: URL?
+    let onOpen: () -> Void
+
+    func makeNSView(context: Context) -> FileDragRowView {
+        let view = FileDragRowView()
+        view.fileURL = url
+        view.onOpen = onOpen
+        return view
+    }
+
+    func updateNSView(_ view: FileDragRowView, context: Context) {
+        view.fileURL = url
+        view.onOpen = onOpen
+    }
+}
+
+final class FileDragRowView: NSView, NSDraggingSource {
+    var fileURL: URL?
+    var onOpen: (() -> Void)?
+    private var mouseDownPoint: NSPoint?
+    private var didDrag = false
+
+    // Pass clicks through when there's no file (disabled row); otherwise own the row so we
+    // can tell a tap from a drag.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        fileURL == nil ? nil : super.hitTest(point)
+    }
+
+    override func resetCursorRects() {
+        if fileURL != nil { addCursorRect(bounds, cursor: .openHand) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = event.locationInWindow
+        didDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let url = fileURL, let start = mouseDownPoint, !didDrag else { return }
+        let current = event.locationInWindow
+        if abs(current.x - start.x) < 4, abs(current.y - start.y) < 4 { return }
+        didDrag = true
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        let size = NSSize(width: 48, height: 48)
+        icon.size = size
+        let location = convert(event.locationInWindow, from: nil)
+        let frame = NSRect(x: location.x - size.width / 2, y: location.y - size.height / 2, width: size.width, height: size.height)
+        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+        item.setDraggingFrame(frame, contents: icon)
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if !didDrag { onOpen?() }
+        didDrag = false
+        mouseDownPoint = nil
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        [.copy]
+    }
+}
+
 /// A floating notification panel for transfer progress / completion. Uses the same
 /// free-floating `NSPanel` approach as `LinkitCallPanel` (status-bar window level,
 /// joins all spaces and floats over full-screen apps) so it always appears pinned to the

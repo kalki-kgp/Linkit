@@ -122,32 +122,24 @@ struct LinkitPanelView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
             ForEach(model.recentTransfers.prefix(5)) { row in
-                Button {
+                let fileURL = row.savedPath.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+                HStack(spacing: 8) {
+                    Image(systemName: row.direction == .outgoing ? "arrow.up.circle" : "arrow.down.circle")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                    Text(row.filename)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Text(row.status)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+                .overlay(FileDragOverlay(url: fileURL) {
                     if let path = row.savedPath { model.onOpenRecent(path) }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: row.direction == .outgoing ? "arrow.up.circle" : "arrow.down.circle")
-                            .foregroundStyle(.secondary)
-                            .font(.system(size: 12))
-                        Text(row.filename)
-                            .font(.system(size: 12))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 4)
-                        Text(row.status)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(row.savedPath == nil)
-                .onDrag {
-                    guard let path = row.savedPath,
-                          let provider = NSItemProvider(contentsOf: URL(fileURLWithPath: path))
-                    else { return NSItemProvider() }
-                    return provider
-                }
+                })
             }
         }
     }

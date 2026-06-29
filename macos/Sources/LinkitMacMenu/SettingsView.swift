@@ -654,26 +654,19 @@ private struct TransferSettings: View {
                 } else {
                     ForEach(Array(model.recentTransfers.prefix(10).enumerated()), id: \.element.id) { index, row in
                         if index > 0 { RowDivider() }
-                        Button {
-                            if let path = row.savedPath { model.onOpenRecent(path) }
-                        } label: {
-                            CardRow(icon: "doc.fill", title: row.filename, subtitle: row.status,
-                                    accent: prefs.accent) {
-                                if row.savedPath != nil {
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(.tertiary)
-                                }
+                        let fileURL = row.savedPath.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+                        CardRow(icon: "doc.fill", title: row.filename, subtitle: row.status,
+                                accent: prefs.accent) {
+                            if row.savedPath != nil {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
                             }
                         }
-                        .buttonStyle(.plain)
-                        .disabled(row.savedPath == nil)
-                        .onDrag {
-                            guard let path = row.savedPath,
-                                  let provider = NSItemProvider(contentsOf: URL(fileURLWithPath: path))
-                            else { return NSItemProvider() }
-                            return provider
-                        }
+                        .contentShape(Rectangle())
+                        .overlay(FileDragOverlay(url: fileURL) {
+                            if let path = row.savedPath { model.onOpenRecent(path) }
+                        })
                     }
                 }
             }

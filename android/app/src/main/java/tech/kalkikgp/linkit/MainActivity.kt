@@ -5,9 +5,11 @@ import android.content.ClipboardManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.widget.Toast
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -1800,9 +1802,15 @@ private fun RecentActivity(entries: List<TransferHistoryEntry>, onClear: () -> U
 private fun ActivityRow(entry: TransferHistoryEntry) {
     val isSent = entry.direction == TransferHistoryEntry.DIRECTION_SENT
     val accent = if (isSent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+    val context = LocalContext.current
+    val openableUri = entry.contentUri
+        ?.takeIf { entry.direction == TransferHistoryEntry.DIRECTION_RECEIVED && entry.status == TransferHistoryEntry.STATUS_COMPLETE }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .let { base ->
+                if (openableUri != null) base.clickable { openReceivedFile(context, openableUri) } else base
+            }
             .padding(horizontal = 14.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1855,6 +1863,20 @@ private fun ActivityRow(entry: TransferHistoryEntry) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+private fun openReceivedFile(context: Context, uriString: String) {
+    val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
+    val mimeType = context.contentResolver.getType(uri) ?: "*/*"
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mimeType)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val opened = runCatching { context.startActivity(intent); true }.getOrDefault(false)
+    if (!opened) {
+        Toast.makeText(context, "No app can open this file", Toast.LENGTH_SHORT).show()
     }
 }
 
