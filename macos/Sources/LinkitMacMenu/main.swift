@@ -137,6 +137,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var currentPhoneState: AndroidPhoneState?
     private var callPanel: LinkitCallPanel?
     private var notificationBannerManager: LinkitNotificationBannerManager?
+    private var notificationHistory: [MirroredNotificationRow] = []
+    private let notificationHistoryLimit = 10
     private var callDismissedByUser = false
     private var callAnsweredFromMac = false
     /// Set when we place a call from the Mac (via the call picker) so the call-status panel
@@ -829,6 +831,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 direction: .unknown
             )
         }
+        settingsViewModel.recentNotifications = notificationHistory
         settingsViewModel.phoneStatus = panelPhoneState().statusText
         settingsViewModel.version = appVersionString()
         settingsViewModel.build = appBuildString()
@@ -1362,6 +1365,19 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
               let notification = try? JSONDecoder().decode(AndroidNotification.self, from: data)
         else { return }
         ensureNotificationBannerManager().present(notification)
+
+        let row = MirroredNotificationRow(
+            id: UUID().uuidString,
+            title: notification.bannerTitle,
+            body: notification.bannerSubtitle ?? "",
+            appName: notification.appName ?? "",
+            receivedAt: Date()
+        )
+        notificationHistory.insert(row, at: 0)
+        if notificationHistory.count > notificationHistoryLimit {
+            notificationHistory.removeLast(notificationHistory.count - notificationHistoryLimit)
+        }
+        settingsViewModel.recentNotifications = notificationHistory
     }
 
     private func ensureNotificationBannerManager() -> LinkitNotificationBannerManager {
@@ -2051,7 +2067,7 @@ private func formatCallDuration(_ seconds: TimeInterval) -> String {
 /// stacks several downward, re-flowing the stack as banners come and go.
 private final class LinkitNotificationBannerManager {
     private var banners: [LinkitNotificationBanner] = []
-    private let bannerSize = NSSize(width: 360, height: 96)
+    private let bannerSize = NSSize(width: 360, height: 100)
     private let margin: CGFloat = 16
     private let spacing: CGFloat = 10
     private let maxVisible = 4
@@ -2153,7 +2169,7 @@ private final class LinkitNotificationBanner {
 
     func startTimer() {
         timer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
             self?.onDismiss?()
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -2287,13 +2303,28 @@ private final class LinkitNotificationBannerView: NSVisualEffectView {
 
         let textX: CGFloat = 60
         let textWidth = card.width - textX - 34
+        let titleHeight: CGFloat = 18
+        let sourceHeight: CGFloat = 13
 
-        titleLabel.frame = NSRect(x: textX, y: cardHeight - 30, width: textWidth, height: 18)
-        if !bodyLabel.isHidden {
-            bodyLabel.frame = NSRect(x: textX, y: sourceLabel.isHidden ? 12 : 26, width: textWidth, height: 32)
-        }
-        if !sourceLabel.isHidden {
-            sourceLabel.frame = NSRect(x: textX, y: 9, width: textWidth, height: 13)
+        switch (bodyLabel.isHidden, sourceLabel.isHidden) {
+        case (true, true):
+            // Title only — center it vertically.
+            titleLabel.frame = NSRect(x: textX, y: (cardHeight - titleHeight) / 2, width: textWidth, height: titleHeight)
+        case (false, true):
+            // Title + body, no source.
+            titleLabel.frame = NSRect(x: textX, y: cardHeight - 6 - titleHeight, width: textWidth, height: titleHeight)
+            bodyLabel.frame = NSRect(x: textX, y: 8, width: textWidth, height: cardHeight - titleHeight - 18)
+        case (true, false):
+            // Title + source, no body.
+            titleLabel.frame = NSRect(x: textX, y: cardHeight / 2, width: textWidth, height: titleHeight)
+            sourceLabel.frame = NSRect(x: textX, y: cardHeight / 2 - sourceHeight - 2, width: textWidth, height: sourceHeight)
+        case (false, false):
+            // Title + body + source, stacked top to bottom without overlap.
+            titleLabel.frame = NSRect(x: textX, y: cardHeight - 6 - titleHeight, width: textWidth, height: titleHeight)
+            sourceLabel.frame = NSRect(x: textX, y: 6, width: textWidth, height: sourceHeight)
+            let bodyBottom = 6 + sourceHeight + 4
+            let bodyTop = cardHeight - 6 - titleHeight - 2
+            bodyLabel.frame = NSRect(x: textX, y: bodyBottom, width: textWidth, height: bodyTop - bodyBottom)
         }
     }
 

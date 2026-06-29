@@ -56,6 +56,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
@@ -2061,6 +2062,7 @@ private fun SettingsScreen(
 
         val context = LocalContext.current
         var accessGranted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
+        var showAccessHelp by remember { mutableStateOf(false) }
         val lifecycleOwner = LocalLifecycleOwner.current
         DisposableEffect(lifecycleOwner) {
             val observer = LifecycleEventObserver { _, event ->
@@ -2071,24 +2073,42 @@ private fun SettingsScreen(
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
-        SettingsSectionLabel("Notifications")
+        SettingsSectionLabel("Advanced")
         SettingsCard {
             SettingsToggleRow(
                 title = "Mirror phone notifications to Mac",
-                subtitle = "Notifications that arrive on your phone briefly appear on the Mac. Needs notification access.",
+                subtitle = "Notifications that arrive on your phone briefly appear on the Mac. Needs notification access — a one-time Android setup.",
                 checked = settings.notificationMirrorEnabled,
                 enabled = true,
-                onCheckedChange = { onSetNotificationMirror(it) }
+                onCheckedChange = { enabled ->
+                    onSetNotificationMirror(enabled)
+                    if (enabled && !accessGranted) showAccessHelp = true
+                }
             )
-            if (settings.notificationMirrorEnabled && !accessGranted) {
+            if (settings.notificationMirrorEnabled) {
                 SettingsRowDivider()
-                SettingsActionRow(
-                    title = "Grant notification access",
-                    onClick = { runCatching { context.startActivity(NotificationAccess.settingsIntent()) } }
-                )
+                if (accessGranted) {
+                    SettingsInfoRow(label = "Notification access", value = "Allowed")
+                } else {
+                    SettingsActionRow(
+                        title = "Set up notification access",
+                        subtitle = "Mirroring stays off until access is allowed.",
+                        onClick = { showAccessHelp = true }
+                    )
+                }
             }
         }
         Spacer(modifier = Modifier.height(20.dp))
+
+        if (showAccessHelp) {
+            NotificationAccessDialog(
+                onOpenSettings = {
+                    showAccessHelp = false
+                    runCatching { context.startActivity(NotificationAccess.settingsIntent()) }
+                },
+                onDismiss = { showAccessHelp = false }
+            )
+        }
 
         SettingsSectionLabel("Transfers")
         SettingsCard {
@@ -2287,6 +2307,66 @@ private fun SettingsToggleRow(
                 checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
                 checkedTrackColor = MaterialTheme.colorScheme.primary
             )
+        )
+    }
+}
+
+@Composable
+private fun NotificationAccessDialog(
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "Allow notification access",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Android guards this permission, so it takes a few taps the first time:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                NotificationAccessStep(1, "Tap “Open settings” below.")
+                NotificationAccessStep(2, "Turn on “Allow notification access” for Linkit.")
+                NotificationAccessStep(
+                    3,
+                    "If the switch is greyed out, tap the ⋮ menu (top-right) → “Allow restricted settings”, then turn it on."
+                )
+                Text(
+                    "Linkit only forwards notification title and text to your paired Mac, over the local network.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onOpenSettings) { Text("Open settings") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Later") }
+        }
+    )
+}
+
+@Composable
+private fun NotificationAccessStep(number: Int, text: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            "$number.",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }

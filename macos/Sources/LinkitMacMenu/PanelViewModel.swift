@@ -15,6 +15,15 @@ enum RecentTransferDirection {
     case unknown
 }
 
+/// A mirrored Android notification kept for the Settings → Notifications history list.
+struct MirroredNotificationRow: Identifiable {
+    let id: String
+    let title: String
+    let body: String
+    let appName: String
+    let receivedAt: Date
+}
+
 /// How the phone-control row should present itself in the panel.
 struct PanelPhoneState {
     var statusText: String = "Waiting for Android permission"
