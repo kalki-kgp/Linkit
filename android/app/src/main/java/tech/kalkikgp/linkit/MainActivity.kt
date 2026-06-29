@@ -2092,7 +2092,7 @@ private fun SettingsScreen(
                 } else {
                     SettingsActionRow(
                         title = "Set up notification access",
-                        subtitle = "Mirroring stays off until access is allowed.",
+                        subtitle = "Mirroring won't work until access is granted.",
                         onClick = { showAccessHelp = true }
                     )
                 }

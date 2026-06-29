@@ -2057,7 +2057,7 @@ private func formatCallDuration(_ seconds: TimeInterval) -> String {
 
 /// Shows mirrored Android notifications as transient banners pinned to the top-right of the
 /// active screen — the same free-floating `NSPanel` style as `LinkitCallPanel`. Each banner
-/// auto-dismisses after 5 seconds (or immediately when the user taps its ✕), and the manager
+/// auto-dismisses after 10 seconds (or immediately when the user taps its ✕), and the manager
 /// stacks several downward, re-flowing the stack as banners come and go.
 private final class LinkitNotificationBannerManager {
     private var banners: [LinkitNotificationBanner] = []

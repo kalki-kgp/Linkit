@@ -110,7 +110,7 @@ object NotificationAccess {
     fun isGranted(context: Context): Boolean {
         val enabled = Settings.Secure.getString(
             context.contentResolver,
-            "enabled_notification_listeners"
+            Settings.Secure.ENABLED_NOTIFICATION_LISTENERS
         ) ?: return false
         val component = ComponentName(context, NotificationMirrorService::class.java)
         return enabled.split(':').any {
