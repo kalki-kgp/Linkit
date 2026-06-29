@@ -70,6 +70,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +87,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.journeyapps.barcodescanner.ScanContract
@@ -811,6 +815,13 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(status = "Clipboard sync on", error = null) }
     }
 
+    fun setNotificationMirrorEnabled(enabled: Boolean) {
+        preferences.setNotificationMirrorEnabled(enabled)
+        _uiState.update {
+            it.copy(status = if (enabled) "Notification mirroring on" else "Notification mirroring off")
+        }
+    }
+
     private fun startClipboardSync() {
         if (clipboardListener != null) return
         val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
@@ -1112,6 +1123,7 @@ private fun LinkitScreen(
                     onForget = { showSettings = false; viewModel.forgetMac() },
                     onClearHistory = viewModel::clearHistory,
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
+                    onSetNotificationMirror = viewModel::setNotificationMirrorEnabled,
                     onSetAppearance = viewModel::setAppearance,
                     onCheckUpdate = viewModel::checkForAndroidUpdate,
                     onInstallUpdate = viewModel::installAndroidUpdate
@@ -1998,6 +2010,7 @@ private fun SettingsScreen(
     onForget: () -> Unit,
     onClearHistory: () -> Unit,
     onToggleClipboardSync: () -> Unit,
+    onSetNotificationMirror: (Boolean) -> Unit,
     onSetAppearance: (AppearancePreference) -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit
@@ -2043,6 +2056,37 @@ private fun SettingsScreen(
                 enabled = state.isConnectedToMac || state.clipboardSyncEnabled,
                 onCheckedChange = { onToggleClipboardSync() }
             )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+
+        val context = LocalContext.current
+        var accessGranted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    accessGranted = NotificationAccess.isGranted(context)
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+        SettingsSectionLabel("Notifications")
+        SettingsCard {
+            SettingsToggleRow(
+                title = "Mirror phone notifications to Mac",
+                subtitle = "Notifications that arrive on your phone briefly appear on the Mac. Needs notification access.",
+                checked = settings.notificationMirrorEnabled,
+                enabled = true,
+                onCheckedChange = { onSetNotificationMirror(it) }
+            )
+            if (settings.notificationMirrorEnabled && !accessGranted) {
+                SettingsRowDivider()
+                SettingsActionRow(
+                    title = "Grant notification access",
+                    onClick = { runCatching { context.startActivity(NotificationAccess.settingsIntent()) } }
+                )
+            }
         }
         Spacer(modifier = Modifier.height(20.dp))
 

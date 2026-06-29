@@ -65,6 +65,29 @@ private struct AndroidPhoneState: Codable, Equatable {
     }
 }
 
+private struct AndroidNotification: Codable {
+    let appName: String?
+    let title: String?
+    let text: String?
+
+    var bannerTitle: String {
+        if let title, !title.isEmpty { return title }
+        if let appName, !appName.isEmpty { return appName }
+        return "Notification"
+    }
+
+    var bannerSubtitle: String? {
+        let body = text?.isEmpty == false ? text : nil
+        return body
+    }
+
+    var bannerSource: String? {
+        guard let appName, !appName.isEmpty else { return nil }
+        // When the title already came from the app there's no separate source line worth showing.
+        return appName
+    }
+}
+
 private enum LinkitCallPanelMode {
     case ringing
     case active
@@ -113,6 +136,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var lastConnectedSignature: String = ""
     private var currentPhoneState: AndroidPhoneState?
     private var callPanel: LinkitCallPanel?
+    private var notificationBannerManager: LinkitNotificationBannerManager?
     private var callDismissedByUser = false
     private var callAnsweredFromMac = false
     /// Set when we place a call from the Mac (via the call picker) so the call-status panel
@@ -1326,9 +1350,25 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             showTransientIcon(.success, tooltip: "Opened link")
         case "phone_state":
             handleAndroidPhoneState(text)
+        case "notification":
+            handleAndroidNotification(text)
         default:
             break
         }
+    }
+
+    private func handleAndroidNotification(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let notification = try? JSONDecoder().decode(AndroidNotification.self, from: data)
+        else { return }
+        ensureNotificationBannerManager().present(notification)
+    }
+
+    private func ensureNotificationBannerManager() -> LinkitNotificationBannerManager {
+        if let notificationBannerManager { return notificationBannerManager }
+        let manager = LinkitNotificationBannerManager()
+        notificationBannerManager = manager
+        return manager
     }
 
     private func handleAndroidPhoneState(_ text: String) {
@@ -2003,6 +2043,263 @@ private final class LinkitCallPanelView: NSVisualEffectView {
 private func formatCallDuration(_ seconds: TimeInterval) -> String {
     let total = Int(max(0, seconds.rounded()))
     return String(format: "%02d:%02d", total / 60, total % 60)
+}
+
+/// Shows mirrored Android notifications as transient banners pinned to the top-right of the
+/// active screen — the same free-floating `NSPanel` style as `LinkitCallPanel`. Each banner
+/// auto-dismisses after 5 seconds (or immediately when the user taps its ✕), and the manager
+/// stacks several downward, re-flowing the stack as banners come and go.
+private final class LinkitNotificationBannerManager {
+    private var banners: [LinkitNotificationBanner] = []
+    private let bannerSize = NSSize(width: 360, height: 96)
+    private let margin: CGFloat = 16
+    private let spacing: CGFloat = 10
+    private let maxVisible = 4
+
+    func present(_ notification: AndroidNotification) {
+        let banner = LinkitNotificationBanner(size: bannerSize)
+        banner.configure(notification)
+        banner.onDismiss = { [weak self, weak banner] in
+            guard let self, let banner else { return }
+            self.remove(banner)
+        }
+        if let screen = NSScreen.main {
+            let origin = NSPoint(
+                x: screen.visibleFrame.maxX - bannerSize.width - margin,
+                y: screen.visibleFrame.maxY - bannerSize.height - margin
+            )
+            banner.prepareForDisplay(at: origin)
+        }
+        banners.insert(banner, at: 0)
+        while banners.count > maxVisible {
+            let overflow = banners.removeLast()
+            overflow.dismiss()
+        }
+        layout()
+        banner.startTimer()
+    }
+
+    private func remove(_ banner: LinkitNotificationBanner) {
+        guard let index = banners.firstIndex(where: { $0 === banner }) else { return }
+        banners.remove(at: index)
+        banner.dismiss()
+        layout()
+    }
+
+    private func layout() {
+        guard let screen = NSScreen.main else { return }
+        let x = screen.visibleFrame.maxX - bannerSize.width - margin
+        var y = screen.visibleFrame.maxY - bannerSize.height - margin
+        for banner in banners {
+            banner.move(to: NSPoint(x: x, y: y), animated: true)
+            y -= (bannerSize.height + spacing)
+        }
+    }
+}
+
+private final class LinkitNotificationBanner {
+    private let panel: NSPanel
+    private let contentView: LinkitNotificationBannerView
+    private var timer: Timer?
+    private var isClosing = false
+
+    var onDismiss: (() -> Void)?
+
+    init(size: NSSize) {
+        contentView = LinkitNotificationBannerView(frame: NSRect(origin: .zero, size: size))
+        panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.contentView = contentView
+        contentView.onDismiss = { [weak self] in self?.onDismiss?() }
+    }
+
+    func configure(_ notification: AndroidNotification) {
+        contentView.update(notification)
+    }
+
+    func prepareForDisplay(at origin: NSPoint) {
+        var start = NSRect(origin: origin, size: panel.frame.size)
+        start.origin.x += 40
+        panel.alphaValue = 0
+        panel.setFrame(start, display: false)
+        panel.orderFrontRegardless()
+    }
+
+    func move(to origin: NSPoint, animated: Bool) {
+        guard !isClosing else { return }
+        let target = NSRect(origin: origin, size: panel.frame.size)
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.26
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.panel.animator().setFrame(target, display: true)
+                self.panel.animator().alphaValue = 1
+            }
+        } else {
+            panel.setFrame(target, display: true)
+            panel.alphaValue = 1
+        }
+    }
+
+    func startTimer() {
+        timer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            self?.onDismiss?()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func dismiss() {
+        timer?.invalidate()
+        timer = nil
+        guard !isClosing else { return }
+        isClosing = true
+        var end = panel.frame
+        end.origin.x += 24
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.panel.animator().alphaValue = 0
+            self.panel.animator().setFrame(end, display: true)
+        }, completionHandler: { [weak self] in
+            self?.panel.orderOut(nil)
+        })
+    }
+}
+
+private final class LinkitNotificationBannerView: NSVisualEffectView {
+    private let cardView = NSView()
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let bodyLabel = NSTextField(labelWithString: "")
+    private let sourceLabel = NSTextField(labelWithString: "")
+    private let dismissButton = NSButton()
+
+    var onDismiss: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    func update(_ notification: AndroidNotification) {
+        titleLabel.stringValue = notification.bannerTitle
+
+        if let body = notification.bannerSubtitle, !body.isEmpty {
+            bodyLabel.stringValue = body
+            bodyLabel.isHidden = false
+        } else {
+            bodyLabel.stringValue = ""
+            bodyLabel.isHidden = true
+        }
+
+        if let source = notification.bannerSource, source != titleLabel.stringValue {
+            sourceLabel.stringValue = source
+            sourceLabel.isHidden = false
+        } else {
+            sourceLabel.stringValue = ""
+            sourceLabel.isHidden = true
+        }
+        needsLayout = true
+    }
+
+    private func setup() {
+        material = .hudWindow
+        blendingMode = .behindWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 18
+        layer?.masksToBounds = true
+
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 14
+        cardView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.36).cgColor
+        cardView.layer?.borderWidth = 1
+        cardView.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.4).cgColor
+
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        iconView.image = NSImage(systemSymbolName: "bell.fill", accessibilityDescription: nil)
+        iconView.contentTintColor = .white
+        iconView.imageAlignment = .alignCenter
+        iconView.wantsLayer = true
+        iconView.layer?.cornerRadius = 18
+        iconView.layer?.masksToBounds = true
+        iconView.layer?.backgroundColor = NSColor.systemBlue.cgColor
+
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.maximumNumberOfLines = 1
+
+        bodyLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        bodyLabel.textColor = .secondaryLabelColor
+        bodyLabel.lineBreakMode = .byTruncatingTail
+        bodyLabel.usesSingleLineMode = false
+        bodyLabel.cell?.wraps = true
+        bodyLabel.cell?.isScrollable = false
+        bodyLabel.maximumNumberOfLines = 2
+
+        sourceLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
+        sourceLabel.textColor = .tertiaryLabelColor
+        sourceLabel.lineBreakMode = .byTruncatingTail
+        sourceLabel.maximumNumberOfLines = 1
+
+        dismissButton.bezelStyle = .regularSquare
+        dismissButton.isBordered = false
+        dismissButton.wantsLayer = true
+        dismissButton.layer?.cornerRadius = 11
+        dismissButton.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.22).cgColor
+        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        dismissButton.imagePosition = .imageOnly
+        dismissButton.contentTintColor = .secondaryLabelColor
+        dismissButton.target = self
+        dismissButton.action = #selector(dismissPressed)
+
+        addSubview(cardView)
+        [iconView, titleLabel, bodyLabel, sourceLabel, dismissButton].forEach(cardView.addSubview)
+    }
+
+    override func layout() {
+        super.layout()
+        let padding: CGFloat = 10
+        cardView.frame = NSRect(x: padding, y: padding, width: bounds.width - padding * 2, height: bounds.height - padding * 2)
+        let card = cardView.bounds
+        let cardHeight = card.height
+
+        iconView.frame = NSRect(x: 14, y: (cardHeight - 36) / 2, width: 36, height: 36)
+        dismissButton.frame = NSRect(x: card.width - 32, y: cardHeight - 30, width: 22, height: 22)
+
+        let textX: CGFloat = 60
+        let textWidth = card.width - textX - 34
+
+        titleLabel.frame = NSRect(x: textX, y: cardHeight - 30, width: textWidth, height: 18)
+        if !bodyLabel.isHidden {
+            bodyLabel.frame = NSRect(x: textX, y: sourceLabel.isHidden ? 12 : 26, width: textWidth, height: 32)
+        }
+        if !sourceLabel.isHidden {
+            sourceLabel.frame = NSRect(x: textX, y: 9, width: textWidth, height: 13)
+        }
+    }
+
+    @objc private func dismissPressed() {
+        onDismiss?()
+    }
 }
 
 /// Transparent overlay that turns a received-file notification into a drag source. When

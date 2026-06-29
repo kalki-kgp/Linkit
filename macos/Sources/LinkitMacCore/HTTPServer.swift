@@ -351,7 +351,7 @@ final class HTTPServer {
                     port: port,
                     publicKey: identity.publicKey,
                     serviceType: "_linkit._tcp.local.",
-                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url", "phone_state", "call_audio"],
+                    capabilities: ["receive_files", "stream_sha256", "session_integrity", "signed_controls", "pairing", "bonjour", "identity_proof", "text_actions", "clipboard_text", "open_url", "phone_state", "call_audio", "notification_mirror"],
                     bluetoothAddress: bluetoothAddressProvider()
                 )
             )
@@ -564,7 +564,7 @@ final class HTTPServer {
 
     private func handleAction(_ action: LinkitActionRequest, senderDeviceId: String?) throws -> LinkitActionResponse {
         let normalizedType = action.type.lowercased()
-        guard ["clipboard", "text", "open_url", "phone_state"].contains(normalizedType) else {
+        guard ["clipboard", "text", "open_url", "phone_state", "notification"].contains(normalizedType) else {
             throw HTTPFailure.badRequest("unsupported_action", "Action type is not supported")
         }
         guard !action.text.isEmpty, action.text.utf8.count <= 128 * 1024 else {
@@ -577,6 +577,9 @@ final class HTTPServer {
         }
         if normalizedType == "phone_state" {
             try validatePhoneStatePayload(action.text)
+        }
+        if normalizedType == "notification" {
+            try validateNotificationPayload(action.text)
         }
         NotificationCenter.default.post(
             name: .linkitActionReceived,
@@ -604,6 +607,28 @@ final class HTTPServer {
         }
         if let name = object["name"] as? String, name.utf8.count > 256 {
             throw HTTPFailure.badRequest("invalid_phone_state", "Phone state name is too long")
+        }
+    }
+
+    private func validateNotificationPayload(_ text: String) throws {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw HTTPFailure.badRequest("invalid_notification", "Notification payload is invalid")
+        }
+        let title = (object["title"] as? String) ?? ""
+        let body = (object["text"] as? String) ?? ""
+        guard !title.isEmpty || !body.isEmpty else {
+            throw HTTPFailure.badRequest("invalid_notification", "Notification needs a title or text")
+        }
+        if let appName = object["appName"] as? String, appName.utf8.count > 256 {
+            throw HTTPFailure.badRequest("invalid_notification", "Notification app name is too long")
+        }
+        if title.utf8.count > 512 {
+            throw HTTPFailure.badRequest("invalid_notification", "Notification title is too long")
+        }
+        if body.utf8.count > 4096 {
+            throw HTTPFailure.badRequest("invalid_notification", "Notification text is too long")
         }
     }
 
