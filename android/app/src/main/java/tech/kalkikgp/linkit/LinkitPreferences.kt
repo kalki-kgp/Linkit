@@ -15,7 +15,8 @@ enum class AppearancePreference(val label: String) {
 /** Persisted, user-facing preferences mirrored from the Mac Settings surface. */
 data class LinkitSettings(
     val appearance: AppearancePreference = AppearancePreference.SYSTEM,
-    val clipboardSyncEnabled: Boolean = true
+    val clipboardSyncEnabled: Boolean = true,
+    val notificationMirrorEnabled: Boolean = false
 )
 
 /**
@@ -36,7 +37,8 @@ class LinkitPreferences private constructor(context: Context) {
                 prefs.getString(KEY_APPEARANCE, null) ?: AppearancePreference.SYSTEM.name
             )
         }.getOrDefault(AppearancePreference.SYSTEM),
-        clipboardSyncEnabled = prefs.getBoolean(KEY_CLIPBOARD_SYNC, true)
+        clipboardSyncEnabled = prefs.getBoolean(KEY_CLIPBOARD_SYNC, true),
+        notificationMirrorEnabled = prefs.getBoolean(KEY_NOTIFICATION_MIRROR, false)
     )
 
     fun setAppearance(value: AppearancePreference) {
@@ -49,9 +51,15 @@ class LinkitPreferences private constructor(context: Context) {
         _settings.update { it.copy(clipboardSyncEnabled = enabled) }
     }
 
+    fun setNotificationMirrorEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATION_MIRROR, enabled).apply()
+        _settings.update { it.copy(notificationMirrorEnabled = enabled) }
+    }
+
     companion object {
         private const val KEY_APPEARANCE = "appearance"
         private const val KEY_CLIPBOARD_SYNC = "clipboard_sync_enabled"
+        private const val KEY_NOTIFICATION_MIRROR = "notification_mirror_enabled"
 
         @Volatile private var instance: LinkitPreferences? = null
 

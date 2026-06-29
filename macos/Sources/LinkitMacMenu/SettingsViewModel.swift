@@ -24,6 +24,7 @@ final class SettingsViewModel: ObservableObject {
     @Published var logPath = ""
     @Published var trustedCount = 0
     @Published var recentTransfers: [RecentTransferRow] = []
+    @Published var recentNotifications: [MirroredNotificationRow] = []
     @Published var phoneStatus = ""
     @Published var version = ""
     @Published var build = ""

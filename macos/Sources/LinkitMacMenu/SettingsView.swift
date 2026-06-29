@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, appearance, devices, transfers, phone, network, diagnostics, about
+    case general, appearance, devices, transfers, phone, notifications, network, diagnostics, about
     var id: String { rawValue }
 
     var title: String {
@@ -11,6 +11,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .devices: return "Devices"
         case .transfers: return "Transfers"
         case .phone: return "Phone & Audio"
+        case .notifications: return "Notifications"
         case .network: return "Network"
         case .diagnostics: return "Diagnostics"
         case .about: return "About"
@@ -25,6 +26,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .devices: return "Your paired Android device."
         case .transfers: return "Where received files land and recent activity."
         case .phone: return "Place and control calls from your Mac."
+        case .notifications: return "Notifications mirrored from your phone."
         case .network: return "Listening address and port."
         case .diagnostics: return "Status, reports, and updates."
         case .about: return "About Linkit."
@@ -38,6 +40,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .devices: return "iphone"
         case .transfers: return "arrow.up.arrow.down"
         case .phone: return "phone.fill"
+        case .notifications: return "bell.fill"
         case .network: return "network"
         case .diagnostics: return "waveform.path.ecg"
         case .about: return "info.circle.fill"
@@ -204,6 +207,7 @@ private struct SettingsDetail: View {
         case .devices: DeviceSettings(model: model, prefs: prefs)
         case .transfers: TransferSettings(model: model, prefs: prefs)
         case .phone: PhoneSettings(model: model, prefs: prefs)
+        case .notifications: NotificationSettings(model: model, prefs: prefs)
         case .network: NetworkSettings(model: model, prefs: prefs)
         case .diagnostics: DiagnosticsSettings(model: model, prefs: prefs)
         case .about: AboutSettings(model: model, prefs: prefs)
@@ -701,6 +705,54 @@ private struct PhoneSettings: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Notifications
+
+private struct NotificationSettings: View {
+    @ObservedObject var model: SettingsViewModel
+    @ObservedObject var prefs: Preferences
+
+    var body: some View {
+        Group {
+            SettingsGroup(label: "Recent notifications") {
+                if model.recentNotifications.isEmpty {
+                    CardRow(icon: "bell.slash", title: "No notifications yet",
+                            subtitle: "Notifications mirrored from your phone will show up here. Enable mirroring in the Linkit Android app.",
+                            accent: prefs.accent) { EmptyView() }
+                } else {
+                    ForEach(Array(model.recentNotifications.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { RowDivider() }
+                        CardRow(icon: "bell.fill",
+                                title: row.title,
+                                subtitle: notificationSubtitle(row),
+                                accent: prefs.accent) {
+                            Text(relativeTime(row.receivedAt))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func notificationSubtitle(_ row: MirroredNotificationRow) -> String {
+        let hasBody = !row.body.isEmpty
+        let hasApp = !row.appName.isEmpty && row.appName != row.title
+        switch (hasBody, hasApp) {
+        case (true, true): return "\(row.body)\n\(row.appName)"
+        case (true, false): return row.body
+        case (false, true): return row.appName
+        case (false, false): return ""
+        }
+    }
+
+    private func relativeTime(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

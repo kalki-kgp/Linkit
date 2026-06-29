@@ -56,6 +56,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
@@ -70,6 +71,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +88,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.journeyapps.barcodescanner.ScanContract
@@ -811,6 +816,13 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(status = "Clipboard sync on", error = null) }
     }
 
+    fun setNotificationMirrorEnabled(enabled: Boolean) {
+        preferences.setNotificationMirrorEnabled(enabled)
+        _uiState.update {
+            it.copy(status = if (enabled) "Notification mirroring on" else "Notification mirroring off")
+        }
+    }
+
     private fun startClipboardSync() {
         if (clipboardListener != null) return
         val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
@@ -1112,6 +1124,7 @@ private fun LinkitScreen(
                     onForget = { showSettings = false; viewModel.forgetMac() },
                     onClearHistory = viewModel::clearHistory,
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
+                    onSetNotificationMirror = viewModel::setNotificationMirrorEnabled,
                     onSetAppearance = viewModel::setAppearance,
                     onCheckUpdate = viewModel::checkForAndroidUpdate,
                     onInstallUpdate = viewModel::installAndroidUpdate
@@ -1998,6 +2011,7 @@ private fun SettingsScreen(
     onForget: () -> Unit,
     onClearHistory: () -> Unit,
     onToggleClipboardSync: () -> Unit,
+    onSetNotificationMirror: (Boolean) -> Unit,
     onSetAppearance: (AppearancePreference) -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit
@@ -2045,6 +2059,56 @@ private fun SettingsScreen(
             )
         }
         Spacer(modifier = Modifier.height(20.dp))
+
+        val context = LocalContext.current
+        var accessGranted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
+        var showAccessHelp by remember { mutableStateOf(false) }
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    accessGranted = NotificationAccess.isGranted(context)
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+        SettingsSectionLabel("Advanced")
+        SettingsCard {
+            SettingsToggleRow(
+                title = "Mirror phone notifications to Mac",
+                subtitle = "Notifications that arrive on your phone briefly appear on the Mac. Needs notification access — a one-time Android setup.",
+                checked = settings.notificationMirrorEnabled,
+                enabled = true,
+                onCheckedChange = { enabled ->
+                    onSetNotificationMirror(enabled)
+                    if (enabled && !accessGranted) showAccessHelp = true
+                }
+            )
+            if (settings.notificationMirrorEnabled) {
+                SettingsRowDivider()
+                if (accessGranted) {
+                    SettingsInfoRow(label = "Notification access", value = "Allowed")
+                } else {
+                    SettingsActionRow(
+                        title = "Set up notification access",
+                        subtitle = "Mirroring won't work until access is granted.",
+                        onClick = { showAccessHelp = true }
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+
+        if (showAccessHelp) {
+            NotificationAccessDialog(
+                onOpenSettings = {
+                    showAccessHelp = false
+                    runCatching { context.startActivity(NotificationAccess.settingsIntent()) }
+                },
+                onDismiss = { showAccessHelp = false }
+            )
+        }
 
         SettingsSectionLabel("Transfers")
         SettingsCard {
@@ -2243,6 +2307,66 @@ private fun SettingsToggleRow(
                 checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
                 checkedTrackColor = MaterialTheme.colorScheme.primary
             )
+        )
+    }
+}
+
+@Composable
+private fun NotificationAccessDialog(
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "Allow notification access",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Android guards this permission, so it takes a few taps the first time:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                NotificationAccessStep(1, "Tap “Open settings” below.")
+                NotificationAccessStep(2, "Turn on “Allow notification access” for Linkit.")
+                NotificationAccessStep(
+                    3,
+                    "If the switch is greyed out, tap the ⋮ menu (top-right) → “Allow restricted settings”, then turn it on."
+                )
+                Text(
+                    "Linkit only forwards notification title and text to your paired Mac, over the local network.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onOpenSettings) { Text("Open settings") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Later") }
+        }
+    )
+}
+
+@Composable
+private fun NotificationAccessStep(number: Int, text: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            "$number.",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }

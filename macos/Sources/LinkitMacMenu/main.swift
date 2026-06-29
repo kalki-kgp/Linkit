@@ -65,6 +65,22 @@ private struct AndroidPhoneState: Codable, Equatable {
     }
 }
 
+private struct AndroidNotification: Codable {
+    let appName: String?
+    let title: String?
+    let text: String?
+
+    var bannerTitle: String {
+        if let title, !title.isEmpty { return title }
+        if let appName, !appName.isEmpty { return appName }
+        return "Notification"
+    }
+
+    var bannerSubtitle: String? {
+        text?.isEmpty == false ? text : nil
+    }
+}
+
 private enum LinkitCallPanelMode {
     case ringing
     case active
@@ -113,6 +129,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var lastConnectedSignature: String = ""
     private var currentPhoneState: AndroidPhoneState?
     private var callPanel: LinkitCallPanel?
+    private var notificationBannerManager: LinkitNotificationBannerManager?
+    private var notificationHistory: [MirroredNotificationRow] = []
+    private let notificationHistoryLimit = 10
     private var callDismissedByUser = false
     private var callAnsweredFromMac = false
     /// Set when we place a call from the Mac (via the call picker) so the call-status panel
@@ -805,6 +824,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 direction: .unknown
             )
         }
+        settingsViewModel.recentNotifications = notificationHistory
         settingsViewModel.phoneStatus = panelPhoneState().statusText
         settingsViewModel.version = appVersionString()
         settingsViewModel.build = appBuildString()
@@ -1326,9 +1346,38 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             showTransientIcon(.success, tooltip: "Opened link")
         case "phone_state":
             handleAndroidPhoneState(text)
+        case "notification":
+            handleAndroidNotification(text)
         default:
             break
         }
+    }
+
+    private func handleAndroidNotification(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let notification = try? JSONDecoder().decode(AndroidNotification.self, from: data)
+        else { return }
+        ensureNotificationBannerManager().present(notification)
+
+        let row = MirroredNotificationRow(
+            id: UUID().uuidString,
+            title: notification.bannerTitle,
+            body: notification.bannerSubtitle ?? "",
+            appName: notification.appName ?? "",
+            receivedAt: Date()
+        )
+        notificationHistory.insert(row, at: 0)
+        if notificationHistory.count > notificationHistoryLimit {
+            notificationHistory.removeLast(notificationHistory.count - notificationHistoryLimit)
+        }
+        settingsViewModel.recentNotifications = notificationHistory
+    }
+
+    private func ensureNotificationBannerManager() -> LinkitNotificationBannerManager {
+        if let notificationBannerManager { return notificationBannerManager }
+        let manager = LinkitNotificationBannerManager()
+        notificationBannerManager = manager
+        return manager
     }
 
     private func handleAndroidPhoneState(_ text: String) {
@@ -1708,7 +1757,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
 private final class LinkitCallPanel {
     private let panel: NSPanel
-    private let contentView: LinkitCallPanelView
+    private let model = CallPanelModel()
     private var durationTimer: Timer?
     private var callStartedAt: Date?
     private(set) var isShown = false
@@ -1718,10 +1767,9 @@ private final class LinkitCallPanel {
     var onHangup: (() -> Void)?
     var onDismiss: (() -> Void)?
 
-    private let panelSize = NSSize(width: 340, height: 140)
+    private let panelSize = NSSize(width: 320, height: 128)
 
     init() {
-        contentView = LinkitCallPanelView(frame: NSRect(origin: .zero, size: panelSize))
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -1735,18 +1783,15 @@ private final class LinkitCallPanel {
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.contentView = contentView
 
-        contentView.onAnswer = { [weak self] in self?.onAnswer?() }
-        contentView.onDecline = { [weak self] in
-            self?.onDecline?()
-            self?.close()
-        }
-        contentView.onHangup = { [weak self] in self?.onHangup?() }
-        contentView.onDismiss = { [weak self] in
-            self?.onDismiss?()
-            self?.close()
-        }
+        let content = CallPanelContent(
+            model: model,
+            onAnswer: { [weak self] in self?.onAnswer?() },
+            onDecline: { [weak self] in self?.onDecline?(); self?.close() },
+            onHangup: { [weak self] in self?.onHangup?() },
+            onDismiss: { [weak self] in self?.onDismiss?(); self?.close() }
+        )
+        panel.contentView = LinkitGlassHostView(rootView: content)
     }
 
     func present(
@@ -1762,12 +1807,17 @@ private final class LinkitCallPanel {
             stopDurationTimer()
             callStartedAt = nil
         }
-        contentView.update(
-            state: state,
-            mode: mode,
-            duration: activeDuration
-        )
+        model.accent = Preferences.shared.accent
+        model.mode = mode
+        model.title = state.callPanelTitle
+        model.canAnswer = state.canAnswer != false
+        model.canEnd = state.canEnd != false
+        model.statusText = callStatusLine(mode: mode, duration: activeDuration)
         showIfNeeded()
+    }
+
+    private func callStatusLine(mode: LinkitCallPanelMode, duration: TimeInterval) -> String {
+        mode == .ringing ? "Incoming call" : formatCallDuration(duration)
     }
 
     func close() {
@@ -1833,7 +1883,7 @@ private final class LinkitCallPanel {
         durationTimer?.invalidate()
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self, self.isShown else { return }
-            self.contentView.updateDuration(self.activeDuration)
+            self.model.statusText = self.callStatusLine(mode: self.model.mode, duration: self.activeDuration)
         }
         RunLoop.main.add(timer, forMode: .common)
         durationTimer = timer
@@ -1845,164 +1895,456 @@ private final class LinkitCallPanel {
     }
 }
 
-private final class LinkitCallPanelView: NSVisualEffectView {
-    private let cardView = NSView()
-    private let iconView = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let subtitleLabel = NSTextField(labelWithString: "")
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let dismissButton = NSButton()
-    private let declineButton = NSButton()
-    private let answerButton = NSButton()
-    private let hangupButton = NSButton()
+// MARK: - Floating glass host (shared chrome for call + notification panels)
 
-    var onAnswer: (() -> Void)?
-    var onDecline: (() -> Void)?
-    var onHangup: (() -> Void)?
-    var onDismiss: (() -> Void)?
+/// The Linkit "soft green" used for call affordances, matching the popover's `Brand.green`.
+private let linkitCallGreen = Color(red: 0.36, green: 0.55, blue: 0.34)
 
-    private var currentMode: LinkitCallPanelMode = .ringing
+/// Hosts a SwiftUI view inside a frosted, rounded card so the free-floating call and
+/// notification panels share the menu-bar app's look (continuous corners, material blur,
+/// accent gradients) instead of hand-drawn AppKit chrome.
+private final class LinkitGlassHostView<Content: View>: NSVisualEffectView {
+    private let hosting: NSHostingView<Content>
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    func update(
-        state: AndroidPhoneState,
-        mode: LinkitCallPanelMode,
-        duration: TimeInterval
-    ) {
-        currentMode = mode
-        titleLabel.stringValue = state.callPanelTitle
-        subtitleLabel.stringValue = state.callPanelSubtitle
-        updateStatusLine(duration: duration)
-
-        let accent: NSColor = mode == .ringing ? .systemGreen : .systemBlue
-        cardView.layer?.borderColor = accent.withAlphaComponent(0.55).cgColor
-        iconView.layer?.backgroundColor = accent.cgColor
-        iconView.image = NSImage(
-            systemSymbolName: mode == .ringing ? "phone.arrow.down.left.fill" : "phone.fill",
-            accessibilityDescription: nil
-        )
-
-        dismissButton.isHidden = mode != .ringing
-        declineButton.isHidden = mode != .ringing
-        answerButton.isHidden = mode != .ringing
-        hangupButton.isHidden = mode != .active
-
-        declineButton.isEnabled = state.canEnd != false
-        answerButton.isEnabled = state.canAnswer != false
-        hangupButton.isEnabled = state.canEnd != false
-
-        needsLayout = true
-    }
-
-    func updateDuration(_ duration: TimeInterval) {
-        guard currentMode == .active else { return }
-        updateStatusLine(duration: duration)
-    }
-
-    private func updateStatusLine(duration: TimeInterval) {
-        switch currentMode {
-        case .ringing:
-            statusLabel.stringValue = "Incoming call..."
-        case .active:
-            statusLabel.stringValue = formatCallDuration(duration)
-        }
-    }
-
-    private func setup() {
-        material = .hudWindow
+    init(rootView: Content) {
+        hosting = NSHostingView(rootView: rootView)
+        super.init(frame: .zero)
+        material = .popover
         blendingMode = .behindWindow
         state = .active
         wantsLayer = true
-        layer?.cornerRadius = 18
+        layer?.cornerRadius = 16
+        layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
 
-        cardView.wantsLayer = true
-        cardView.layer?.cornerRadius = 14
-        cardView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.36).cgColor
-        cardView.layer?.borderWidth = 1
-
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 19, weight: .semibold)
-        iconView.contentTintColor = .white
-        iconView.wantsLayer = true
-        iconView.layer?.cornerRadius = 20
-        iconView.layer?.masksToBounds = true
-
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.maximumNumberOfLines = 1
-
-        subtitleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.lineBreakMode = .byTruncatingMiddle
-        subtitleLabel.maximumNumberOfLines = 1
-
-        statusLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        statusLabel.textColor = .secondaryLabelColor
-
-        configureIconButton(dismissButton, symbol: "xmark", color: .secondaryLabelColor.withAlphaComponent(0.35), size: 22, action: #selector(dismissPressed))
-        configureIconButton(declineButton, symbol: "phone.down.fill", color: .systemRed, size: 36, action: #selector(declinePressed))
-        configureIconButton(answerButton, symbol: "phone.fill", color: .systemGreen, size: 36, action: #selector(answerPressed))
-        configureIconButton(hangupButton, symbol: "phone.down.fill", color: .systemRed, size: 36, action: #selector(hangupPressed))
-
-        addSubview(cardView)
-        [iconView, titleLabel, subtitleLabel, statusLabel, dismissButton, declineButton, answerButton, hangupButton]
-            .forEach(cardView.addSubview)
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
     }
 
-    private func configureIconButton(_ button: NSButton, symbol: String, color: NSColor, size: CGFloat, action: Selector) {
-        button.bezelStyle = .regularSquare
-        button.isBordered = false
-        button.wantsLayer = true
-        button.layer?.cornerRadius = size / 2
-        button.layer?.backgroundColor = color.cgColor
-        let pointSize: CGFloat = symbol == "xmark" ? 10 : 15
-        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config)
-        button.imagePosition = .imageOnly
-        button.contentTintColor = symbol == "xmark" ? .secondaryLabelColor : .white
-        button.target = self
-        button.action = action
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    var rootView: Content {
+        get { hosting.rootView }
+        set { hosting.rootView = newValue }
+    }
+}
+
+/// A round ✕ glyph button used to dismiss a floating panel.
+private struct CloseGlyph: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(Color.primary.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Call panel content
+
+private final class CallPanelModel: ObservableObject {
+    @Published var title = ""
+    @Published var statusText = ""
+    @Published var mode: LinkitCallPanelMode = .ringing
+    @Published var canAnswer = true
+    @Published var canEnd = true
+    @Published var accent: Color = Preferences.shared.accent
+}
+
+private struct CallPanelContent: View {
+    @ObservedObject var model: CallPanelModel
+    let onAnswer: () -> Void
+    let onDecline: () -> Void
+    let onHangup: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                avatar
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.title.isEmpty ? "Android call" : model.title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    Text(model.statusText)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(model.mode == .ringing ? linkitCallGreen : Color.secondary)
+                }
+                Spacer(minLength: 4)
+                if model.mode == .ringing {
+                    CloseGlyph(action: onDismiss)
+                }
+            }
+            actionButtons
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    override func layout() {
-        super.layout()
-        let padding: CGFloat = 10
-        cardView.frame = NSRect(x: padding, y: padding, width: bounds.width - padding * 2, height: bounds.height - padding * 2)
-        let card = cardView.bounds
-        let cardHeight = card.height
-
-        iconView.frame = NSRect(x: 14, y: cardHeight - 54, width: 40, height: 40)
-        dismissButton.frame = NSRect(x: card.width - 30, y: cardHeight - 30, width: 22, height: 22)
-
-        let textX: CGFloat = 66
-        let textWidth = card.width - textX - 36
-        titleLabel.frame = NSRect(x: textX, y: cardHeight - 34, width: textWidth, height: 18)
-        subtitleLabel.frame = NSRect(x: textX, y: cardHeight - 52, width: textWidth, height: 15)
-        statusLabel.frame = NSRect(x: textX, y: cardHeight - 68, width: textWidth, height: 14)
-
-        declineButton.frame = NSRect(x: card.width - 96, y: 14, width: 36, height: 36)
-        answerButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
-        hangupButton.frame = NSRect(x: card.width - 52, y: 14, width: 36, height: 36)
+    private var avatar: some View {
+        let ringing = model.mode == .ringing
+        let tint = ringing ? linkitCallGreen : model.accent
+        return RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(LinearGradient(colors: [tint, tint.opacity(0.6)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: 42, height: 42)
+            .overlay(
+                Image(systemName: ringing ? "phone.arrow.down.left.fill" : "phone.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+            )
+            .shadow(color: tint.opacity(0.35), radius: 5, y: 1)
     }
 
-    @objc private func answerPressed() { onAnswer?() }
-    @objc private func declinePressed() { onDecline?() }
-    @objc private func hangupPressed() { onHangup?() }
-    @objc private func dismissPressed() { onDismiss?() }
+    @ViewBuilder
+    private var actionButtons: some View {
+        HStack(spacing: 10) {
+            if model.mode == .ringing {
+                CallActionButton(title: "Decline", icon: "phone.down.fill", tint: .red,
+                                 enabled: model.canEnd, action: onDecline)
+                CallActionButton(title: "Answer", icon: "phone.fill", tint: linkitCallGreen,
+                                 enabled: model.canAnswer, action: onAnswer)
+            } else {
+                CallActionButton(title: "Hang Up", icon: "phone.down.fill", tint: .red,
+                                 enabled: model.canEnd, action: onHangup)
+            }
+        }
+    }
+}
+
+private struct CallActionButton: View {
+    let title: String
+    let icon: String
+    let tint: Color
+    var enabled: Bool = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 12.5, weight: .semibold))
+                Text(title).font(.system(size: 13, weight: .semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .foregroundStyle(.white)
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(tint))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
 }
 
 private func formatCallDuration(_ seconds: TimeInterval) -> String {
     let total = Int(max(0, seconds.rounded()))
     return String(format: "%02d:%02d", total / 60, total % 60)
+}
+
+/// Shows mirrored Android notifications as transient banners pinned to the top-right of the
+/// active screen — the same free-floating `NSPanel` style as `LinkitCallPanel`. Each banner
+/// auto-dismisses after 10 seconds (or immediately when the user taps its ✕), and the manager
+/// stacks several downward, re-flowing the stack as banners come and go.
+private final class LinkitNotificationBannerManager {
+    private var banners: [LinkitNotificationBanner] = []
+    private let bannerWidth: CGFloat = 360
+    private let margin: CGFloat = 16
+    private let spacing: CGFloat = 10
+    private let maxVisible = 4
+
+    func present(_ notification: AndroidNotification) {
+        let banner = LinkitNotificationBanner(width: bannerWidth)
+        banner.configure(notification)
+        banner.onDismiss = { [weak self, weak banner] in
+            guard let self, let banner else { return }
+            self.remove(banner)
+        }
+        banner.onLayoutChanged = { [weak self] in self?.layout() }
+        if let screen = NSScreen.main {
+            let origin = NSPoint(
+                x: screen.visibleFrame.maxX - bannerWidth - margin,
+                y: screen.visibleFrame.maxY - banner.height - margin
+            )
+            banner.prepareForDisplay(at: origin)
+        }
+        banners.insert(banner, at: 0)
+        while banners.count > maxVisible {
+            let overflow = banners.removeLast()
+            overflow.dismiss()
+        }
+        layout()
+        banner.startTimer()
+    }
+
+    private func remove(_ banner: LinkitNotificationBanner) {
+        guard let index = banners.firstIndex(where: { $0 === banner }) else { return }
+        banners.remove(at: index)
+        banner.dismiss()
+        layout()
+    }
+
+    /// Re-flow the stack from the top, honoring each banner's own (possibly expanded) height.
+    private func layout() {
+        guard let screen = NSScreen.main else { return }
+        let x = screen.visibleFrame.maxX - bannerWidth - margin
+        var topEdge = screen.visibleFrame.maxY - margin
+        for banner in banners {
+            let originY = topEdge - banner.height
+            banner.move(to: NSPoint(x: x, y: originY), animated: true)
+            topEdge = originY - spacing
+        }
+    }
+}
+
+private final class LinkitNotificationBanner {
+    private let panel: NSPanel
+    private let hostView: LinkitGlassHostView<NotificationBannerContent>
+    private let width: CGFloat
+    private var timer: Timer?
+    private var isClosing = false
+
+    // Content + presentation state.
+    private var title = ""
+    private var bodyText = ""
+    private var appName = ""
+    private var canExpand = false
+    private var expanded = false
+
+    private(set) var height: CGFloat = 100
+
+    var onDismiss: (() -> Void)?
+    var onLayoutChanged: (() -> Void)?
+
+    init(width: CGFloat) {
+        self.width = width
+        let placeholder = NotificationBannerContent(
+            title: "", message: "", appName: "", accent: Preferences.shared.accent,
+            expanded: false, canExpand: false, onInteract: {}, onClose: {}
+        )
+        hostView = LinkitGlassHostView(rootView: placeholder)
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.contentView = hostView
+    }
+
+    func configure(_ notification: AndroidNotification) {
+        title = notification.bannerTitle
+        bodyText = notification.bannerSubtitle ?? ""
+        appName = notification.appName ?? ""
+        canExpand = !bodyText.isEmpty && fullBodyHeight() > collapsedBodyHeight() + 1
+        expanded = false
+        height = computeHeight()
+        resizePanelToHeight()
+        refreshContent()
+    }
+
+    private func refreshContent() {
+        hostView.rootView = NotificationBannerContent(
+            title: title,
+            message: bodyText,
+            appName: appName,
+            accent: Preferences.shared.accent,
+            expanded: expanded,
+            canExpand: canExpand,
+            onInteract: { [weak self] in self?.handleInteract() },
+            onClose: { [weak self] in self?.onDismiss?() }
+        )
+    }
+
+    /// Any click on the banner pins it open (cancels auto-dismiss) and toggles the expanded
+    /// view when there's more content to reveal.
+    private func handleInteract() {
+        cancelTimer()
+        guard canExpand else { return }
+        expanded.toggle()
+        height = computeHeight()
+        resizePanelToHeight()
+        refreshContent()
+        onLayoutChanged?()
+    }
+
+    private func resizePanelToHeight() {
+        let origin = panel.frame.origin
+        panel.setFrame(NSRect(x: origin.x, y: origin.y, width: width, height: height), display: false)
+    }
+
+    // MARK: Height measurement
+
+    // Matches the SwiftUI text column: full width minus padding, icon, gaps, and the ✕ column.
+    // Measured a hair narrower than the real column so the estimate never under-counts lines.
+    private var bodyWidth: CGFloat { width - 114 }
+    private let bodyLineHeight: CGFloat = 16
+
+    private func fullBodyHeight() -> CGFloat {
+        guard !bodyText.isEmpty else { return 0 }
+        let font = NSFont.systemFont(ofSize: 12)
+        let rect = (bodyText as NSString).boundingRect(
+            with: NSSize(width: bodyWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        return ceil(rect.height)
+    }
+
+    private func collapsedBodyHeight() -> CGFloat {
+        bodyText.isEmpty ? 0 : min(fullBodyHeight(), bodyLineHeight * 2)
+    }
+
+    private func computeHeight() -> CGFloat {
+        let titleHeight: CGFloat = 18
+        let sourceVisible = !appName.isEmpty && appName != title
+        let footerHeight: CGFloat = (sourceVisible || canExpand) ? 15 : 0
+        let body = expanded ? min(fullBodyHeight(), bodyLineHeight * 14) : collapsedBodyHeight()
+        var h: CGFloat = 14 + titleHeight + 14
+        if body > 0 { h += 4 + body + 4 }
+        if footerHeight > 0 { h += 3 + footerHeight }
+        return max(h, 72)
+    }
+
+    func prepareForDisplay(at origin: NSPoint) {
+        var start = NSRect(origin: origin, size: NSSize(width: width, height: height))
+        start.origin.x += 40
+        panel.alphaValue = 0
+        panel.setFrame(start, display: false)
+        panel.orderFrontRegardless()
+    }
+
+    func move(to origin: NSPoint, animated: Bool) {
+        guard !isClosing else { return }
+        let target = NSRect(origin: origin, size: NSSize(width: width, height: height))
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.26
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.panel.animator().setFrame(target, display: true)
+                self.panel.animator().alphaValue = 1
+            }
+        } else {
+            panel.setFrame(target, display: true)
+            panel.alphaValue = 1
+        }
+    }
+
+    func startTimer() {
+        timer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
+            self?.onDismiss?()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func cancelTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func dismiss() {
+        cancelTimer()
+        guard !isClosing else { return }
+        isClosing = true
+        var end = panel.frame
+        end.origin.x += 24
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.panel.animator().alphaValue = 0
+            self.panel.animator().setFrame(end, display: true)
+        }, completionHandler: { [weak self] in
+            self?.panel.orderOut(nil)
+        })
+    }
+}
+
+private struct NotificationBannerContent: View {
+    let title: String
+    let message: String
+    let appName: String
+    let accent: Color
+    let expanded: Bool
+    let canExpand: Bool
+    let onInteract: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(LinearGradient(colors: [accent, accent.opacity(0.6)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 38, height: 38)
+                .overlay(
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+                .shadow(color: accent.opacity(0.35), radius: 4, y: 1)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .lineLimit(1)
+                if !message.isEmpty {
+                    Text(message)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(expanded ? nil : 2)
+                        .multilineTextAlignment(.leading)
+                }
+                if showSource || canExpand {
+                    HStack(spacing: 5) {
+                        if showSource {
+                            Text(appName)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        if canExpand {
+                            HStack(spacing: 3) {
+                                Text(expanded ? "Show less" : "Show more")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundStyle(accent)
+                        }
+                    }
+                }
+            }
+
+            CloseGlyph(action: onClose)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .onTapGesture { onInteract() }
+    }
+
+    private var showSource: Bool { !appName.isEmpty && appName != title }
 }
 
 /// Transparent overlay that turns a received-file notification into a drag source. When
