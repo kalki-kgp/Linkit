@@ -16,7 +16,9 @@ enum class AppearancePreference(val label: String) {
 data class LinkitSettings(
     val appearance: AppearancePreference = AppearancePreference.SYSTEM,
     val clipboardSyncEnabled: Boolean = true,
-    val notificationMirrorEnabled: Boolean = false
+    val notificationMirrorEnabled: Boolean = false,
+    /** Primary accent color as `#RRGGBB`, matching the Mac's `Preferences.accentColorHex`. */
+    val accentColorHex: String = LinkitAccents.DEFAULT_HEX
 )
 
 /**
@@ -38,7 +40,8 @@ class LinkitPreferences private constructor(context: Context) {
             )
         }.getOrDefault(AppearancePreference.SYSTEM),
         clipboardSyncEnabled = prefs.getBoolean(KEY_CLIPBOARD_SYNC, true),
-        notificationMirrorEnabled = prefs.getBoolean(KEY_NOTIFICATION_MIRROR, false)
+        notificationMirrorEnabled = prefs.getBoolean(KEY_NOTIFICATION_MIRROR, false),
+        accentColorHex = prefs.getString(KEY_ACCENT_COLOR, null) ?: LinkitAccents.DEFAULT_HEX
     )
 
     fun setAppearance(value: AppearancePreference) {
@@ -56,10 +59,17 @@ class LinkitPreferences private constructor(context: Context) {
         _settings.update { it.copy(notificationMirrorEnabled = enabled) }
     }
 
+    fun setAccentColorHex(hex: String) {
+        val normalized = LinkitAccents.normalize(hex)
+        prefs.edit().putString(KEY_ACCENT_COLOR, normalized).apply()
+        _settings.update { it.copy(accentColorHex = normalized) }
+    }
+
     companion object {
         private const val KEY_APPEARANCE = "appearance"
         private const val KEY_CLIPBOARD_SYNC = "clipboard_sync_enabled"
         private const val KEY_NOTIFICATION_MIRROR = "notification_mirror_enabled"
+        private const val KEY_ACCENT_COLOR = "accent_color_hex"
 
         @Volatile private var instance: LinkitPreferences? = null
 
