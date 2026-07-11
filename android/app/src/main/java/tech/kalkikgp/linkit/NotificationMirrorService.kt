@@ -10,6 +10,8 @@ import android.service.notification.StatusBarNotification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -34,6 +36,26 @@ class NotificationMirrorService : NotificationListenerService() {
         super.onCreate()
         identityStore = IdentityStore(applicationContext)
         preferences = LinkitPreferences.get(applicationContext)
+    }
+
+    // The OS binds/unbinds this listener on its own schedule. After a phone reboot (or an app
+    // update) it frequently does NOT rebind even though the user's grant persists in
+    // Settings.Secure — which is exactly the "mirroring silently stopped after I restarted"
+    // failure. Tracking the real bind state (rather than trusting the permission toggle) lets
+    // the UI show "on, but not receiving" and lets us force a rebind.
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        NotificationMirrorState.setConnected(true)
+        DebugTelemetry.recordEvent("notif", "listener connected")
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        NotificationMirrorState.setConnected(false)
+        DebugTelemetry.recordEvent("notif", "listener disconnected; requesting rebind")
+        runCatching {
+            requestRebind(ComponentName(applicationContext, NotificationMirrorService::class.java))
+        }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -105,8 +127,47 @@ class NotificationMirrorService : NotificationListenerService() {
     }
 }
 
+/**
+ * Process-scoped, live bind state for [NotificationMirrorService]. Unlike the permission grant
+ * (which persists across reboots even when the OS has not rebound the listener), this reflects
+ * whether the listener is *actually* connected and able to receive notifications right now.
+ */
+object NotificationMirrorState {
+    // Exposed as a flow so the UI can recompute feature health the moment the listener binds
+    // (e.g. after a forced rebind) instead of waiting for the next resume/presence tick.
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> = _connected
+
+    val listenerConnected: Boolean get() = _connected.value
+
+    @Volatile
+    var lastConnectedAtMillis: Long = 0L
+        private set
+
+    fun setConnected(connected: Boolean) {
+        if (connected) lastConnectedAtMillis = System.currentTimeMillis()
+        _connected.value = connected
+    }
+}
+
 /** Helpers for the OS notification-access grant that [NotificationMirrorService] depends on. */
 object NotificationAccess {
+    /**
+     * Ask the OS to rebind the listener when the user has granted access but the service is not
+     * currently connected — the canonical recovery for a listener the system dropped after a
+     * reboot/update. No-op when access isn't granted or the listener is already live.
+     */
+    fun ensureListenerBound(context: Context) {
+        if (!isGranted(context)) return
+        if (NotificationMirrorState.listenerConnected) return
+        runCatching {
+            NotificationListenerService.requestRebind(
+                ComponentName(context.applicationContext, NotificationMirrorService::class.java)
+            )
+            DebugTelemetry.recordEvent("notif", "requested listener rebind (granted but not connected)")
+        }
+    }
+
     fun isGranted(context: Context): Boolean {
         // "enabled_notification_listeners" — Settings.Secure exposes this only as a @hide
         // constant, so the literal is the supported way to read it from the public SDK.

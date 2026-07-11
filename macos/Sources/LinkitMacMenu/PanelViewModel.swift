@@ -60,6 +60,8 @@ final class PanelViewModel: ObservableObject {
     @Published var phone = PanelPhoneState()
     @Published var recentTransfers: [RecentTransferRow] = []
     @Published var activeTransfer: PanelTransfer? = nil
+    /// Count of features the connected phone reports as needing attention (broken / permission).
+    @Published var peerAttentionCount: Int = 0
 
     // MARK: Actions (wired by the delegate)
     var onSendFile: () -> Void = {}

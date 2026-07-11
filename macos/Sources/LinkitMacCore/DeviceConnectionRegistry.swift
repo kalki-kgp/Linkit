@@ -9,6 +9,8 @@ public struct ConnectedDevice: Equatable {
     public let batteryPercent: Int?
     public let connectedAt: String
     public let lastSeenAt: String
+    /// The connected peer's self-reported feature health (empty until it reports).
+    public let features: [FeatureStatus]
 }
 
 final class DeviceConnectionRegistry {
@@ -20,6 +22,7 @@ final class DeviceConnectionRegistry {
         host: String,
         receivePort: UInt16,
         batteryPercent: Int?,
+        features: [FeatureStatus]? = nil,
         now: Date = Date()
     ) -> ConnectedDevice {
         lock.lock()
@@ -34,7 +37,8 @@ final class DeviceConnectionRegistry {
             receivePort: receivePort,
             batteryPercent: normalizedBatteryPercent(batteryPercent) ?? previous?.batteryPercent,
             connectedAt: connectedAt,
-            lastSeenAt: now.iso8601()
+            lastSeenAt: now.iso8601(),
+            features: features ?? previous?.features ?? []
         )
         connections[device.deviceId] = connected
         lock.unlock()
@@ -57,7 +61,7 @@ final class DeviceConnectionRegistry {
         return connections[id]
     }
 
-    func refreshStatus(deviceId: String, batteryPercent: Int?, now: Date = Date()) -> ConnectedDevice? {
+    func refreshStatus(deviceId: String, batteryPercent: Int?, features: [FeatureStatus]? = nil, now: Date = Date()) -> ConnectedDevice? {
         lock.lock()
         guard let existing = connections[deviceId] else {
             lock.unlock()
@@ -71,7 +75,8 @@ final class DeviceConnectionRegistry {
             receivePort: existing.receivePort,
             batteryPercent: normalizedBatteryPercent(batteryPercent) ?? existing.batteryPercent,
             connectedAt: existing.connectedAt,
-            lastSeenAt: now.iso8601()
+            lastSeenAt: now.iso8601(),
+            features: features ?? existing.features
         )
         connections[deviceId] = refreshed
         lock.unlock()

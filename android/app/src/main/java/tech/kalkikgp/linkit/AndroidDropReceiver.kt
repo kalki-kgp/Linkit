@@ -626,6 +626,7 @@ class AndroidDropReceiver(
 
     private fun deviceStatusJson(): JSONObject {
         val identity = identityStore.identity()
+        val settings = LinkitPreferences.get(context).settings.value
         val json = JSONObject()
             .put("protocolVersion", 1)
             .put("deviceId", identity.deviceId)
@@ -633,6 +634,7 @@ class AndroidDropReceiver(
             .put("platform", "android")
             .put("status", "connected")
             .put("receivePort", PORT)
+            .put("features", AndroidFeatureStatus.local(context, settings).toJsonArray())
         BatteryStatus.percent(context)?.let { json.put("batteryPercent", it) }
         return json
     }

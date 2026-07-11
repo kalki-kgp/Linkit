@@ -26,6 +26,9 @@ struct LinkitPanelView: View {
                         if let transfer = model.activeTransfer {
                             TransferStrip(transfer: transfer, onCancel: model.onCancelTransfer)
                         }
+                        if model.peerAttentionCount > 0 {
+                            PhoneAttentionRow(count: model.peerAttentionCount, onOpenSettings: model.onOpenSettings)
+                        }
                         quickActions
                         clipboardSyncRow
                         PhoneRow(model: model)
@@ -309,6 +312,39 @@ private struct PhoneRow: View {
     }
 
     private var phoneTitle: String { model.phone.statusText }
+}
+
+// MARK: - Phone attention row
+
+private struct PhoneAttentionRow: View {
+    let count: Int
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        Button(action: onOpenSettings) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(red: 0.9, green: 0.5, blue: 0.15))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(count == 1 ? "1 phone feature needs attention" : "\(count) phone features need attention")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Open Settings → Diagnostics for details")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(11)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(red: 0.9, green: 0.5, blue: 0.15).opacity(0.1)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 // MARK: - Transfer strip

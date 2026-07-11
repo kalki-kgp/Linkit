@@ -144,6 +144,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Guards against firing the "call on phone" notification more than once per call session.
     private var notifiedPhoneCallActive = false
     private var notificationCenter: UNUserNotificationCenter?
+    /// Cached macOS notification authorization; the system API is async, but the feature-status
+    /// provider (called off-main from the HTTP server) needs a synchronous read.
+    private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
     private var appUpdater: MacAppUpdater?
     private var cancellables = Set<AnyCancellable>()
 
@@ -153,7 +156,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         appUpdater = try? MacAppUpdater()
         do {
             let receiver = try LinkitReceiverApp(
-                configuration: makeReceiverConfiguration()
+                configuration: makeReceiverConfiguration(),
+                localFeaturesProvider: { [weak self] in self?.macFeatureStatuses() ?? [] }
             )
             self.app = receiver
             setupMenu()
@@ -281,6 +285,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         panelViewModel.batteryPercent = androidTargets.first?.batteryPercent
         panelViewModel.isConnected = !androidTargets.isEmpty
         panelViewModel.hasAndroidTarget = !androidTargets.isEmpty
+        panelViewModel.peerAttentionCount = androidTargets.first?.features.filter { $0.state == .attention }.count ?? 0
         panelViewModel.clipboardSyncEnabled = clipboardSyncEnabled
         panelViewModel.phone = panelPhoneState()
         panelViewModel.recentTransfers = app.recentTransfers(limit: 8).enumerated().map { index, entry in
@@ -825,6 +830,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             )
         }
         settingsViewModel.recentNotifications = notificationHistory
+        settingsViewModel.peerFeatures = connected
+            .first(where: { $0.platform.lowercased() == "android" })?.features ?? []
         settingsViewModel.phoneStatus = panelPhoneState().statusText
         settingsViewModel.version = appVersionString()
         settingsViewModel.build = appBuildString()
@@ -1560,7 +1567,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let center = UNUserNotificationCenter.current()
         notificationCenter = center
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        center.requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
+            self?.refreshNotificationAuthorization()
+        }
+        refreshNotificationAuthorization()
         let reveal = UNNotificationAction(identifier: "linkit.reveal", title: "Show in Finder", options: [])
         let open = UNNotificationAction(identifier: "linkit.open", title: "Open", options: [.foreground])
         let category = UNNotificationCategory(identifier: "linkit.receive", actions: [open, reveal], intentIdentifiers: [], options: [])
@@ -1569,6 +1579,79 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private var isRunningFromAppBundle: Bool {
         Bundle.main.bundleURL.pathExtension == "app"
+    }
+
+    private func refreshNotificationAuthorization() {
+        guard let notificationCenter else { return }
+        notificationCenter.getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async { self?.notificationAuthorization = settings.authorizationStatus }
+        }
+    }
+
+    /// This Mac's self-reported feature health, shared with the paired Android phone so both apps
+    /// render the same two-sided status snapshot. Called off-main from the HTTP server, so it only
+    /// reads thread-safe values (UserDefaults-backed prefs, SMAppService status, a cached auth flag).
+    func macFeatureStatuses() -> [FeatureStatus] {
+        var features: [FeatureStatus] = []
+
+        // Snapshot once: the HTTP server calls this off-main while Settings can toggle the pref on
+        // the main thread, so reading it twice could split into an `on` state with an `off` detail.
+        let clipboardEnabled = clipboardSyncEnabled
+        features.append(FeatureStatus(
+            id: MacFeatureID.clipboardSync,
+            title: "Clipboard sync",
+            state: clipboardEnabled ? .on : .off,
+            detail: clipboardEnabled
+                ? "Copying Mac clipboard text to your phone."
+                : "Turn on to copy Mac clipboard text to your phone."
+        ))
+
+        let bundled = isRunningFromAppBundle
+        features.append(FeatureStatus(
+            id: MacFeatureID.launchAtLogin,
+            title: "Launch at login",
+            state: !bundled ? .unsupported : (isLaunchAtLoginEnabled ? .on : .off),
+            detail: !bundled
+                ? "Available when running the packaged Linkit.app."
+                : (isLaunchAtLoginEnabled ? "Linkit starts when you log in." : "Turn on to start Linkit when you log in.")
+        ))
+
+        let notifState: FeatureState
+        let notifDetail: String
+        if !bundled {
+            notifState = .unsupported
+            notifDetail = "Banners require the packaged Linkit.app."
+        } else if !prefs.notifyOnTransferComplete {
+            notifState = .off
+            notifDetail = "Turn on transfer notifications in Settings → General."
+        } else {
+            switch notificationAuthorization {
+            case .authorized, .provisional, .ephemeral:
+                notifState = .on
+                notifDetail = "Notifying you when a file arrives."
+            case .denied:
+                notifState = .attention
+                notifDetail = "Allow Linkit notifications in System Settings › Notifications."
+            default:
+                notifState = .attention
+                notifDetail = "Grant notification permission to see transfer banners."
+            }
+        }
+        features.append(FeatureStatus(
+            id: MacFeatureID.transferNotifications,
+            title: "Transfer notifications",
+            state: notifState,
+            detail: notifDetail
+        ))
+
+        features.append(FeatureStatus(
+            id: MacFeatureID.receiver,
+            title: "Receiver",
+            state: .on,
+            detail: "Listening for phone connections on the local network."
+        ))
+
+        return features
     }
 
     private func postReceivedNotification(userInfo: [AnyHashable: Any]?) {

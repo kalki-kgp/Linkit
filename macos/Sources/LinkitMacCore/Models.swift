@@ -203,6 +203,9 @@ public struct TransferHistoryEntry: Codable, Equatable {
 public struct DeviceUpdateRequest: Codable {
     public let receivePort: UInt16
     public let batteryPercent: Int?
+    /// The registering device's self-reported feature health (Android → Mac). Optional for
+    /// backward compatibility with peers that predate the feature-status exchange.
+    public let features: [FeatureStatus]?
 }
 
 public struct DeviceConnectionResponse: Codable, Equatable {
@@ -215,6 +218,8 @@ public struct DeviceConnectionResponse: Codable, Equatable {
     public let batteryPercent: Int?
     public let connectedAt: String?
     public let lastSeenAt: String?
+    /// This Mac's self-reported feature health (Mac → Android), returned to the registering peer.
+    public let features: [FeatureStatus]?
 }
 
 public struct AndroidDeviceStatusResponse: Codable, Equatable {
@@ -225,6 +230,8 @@ public struct AndroidDeviceStatusResponse: Codable, Equatable {
     public let status: String
     public let receivePort: UInt16?
     public let batteryPercent: Int?
+    /// The Android device's self-reported feature health, refreshed on each Mac presence sweep.
+    public let features: [FeatureStatus]?
 }
 
 public struct PhonebookContact: Codable, Equatable, Identifiable {

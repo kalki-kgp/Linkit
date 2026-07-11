@@ -1,4 +1,5 @@
 import SwiftUI
+import LinkitMacCore
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case general, appearance, devices, transfers, phone, notifications, network, diagnostics, about
@@ -815,6 +816,19 @@ private struct DiagnosticsSettings: View {
 
     var body: some View {
         Group {
+            SettingsGroup(label: "Phone status") {
+                if model.peerFeatures.isEmpty {
+                    CardRow(icon: "iphone.slash", title: "No phone status yet",
+                            subtitle: "Connect your paired phone to see which of its features are active.",
+                            accent: prefs.accent) { EmptyView() }
+                } else {
+                    ForEach(Array(model.peerFeatures.enumerated()), id: \.element.id) { index, feature in
+                        if index > 0 { RowDivider() }
+                        FeatureStatusRowView(feature: feature)
+                    }
+                }
+            }
+
             SettingsGroup(label: "Status") {
                 VStack(spacing: 0) {
                     DiagRow(label: "Receiving on", value: "\(model.localIP):\(model.port)", mono: true)
@@ -852,6 +866,38 @@ private struct DiagnosticsSettings: View {
                         .controlSize(.small)
                 }
             }
+        }
+    }
+}
+
+/// One phone-reported feature: a colored state dot, title, and detail.
+struct FeatureStatusRowView: View {
+    let feature: FeatureStatus
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(feature.title).font(.system(size: 13, weight: .medium))
+                Text(feature.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+
+    private var dotColor: Color {
+        switch feature.state {
+        case .on: return Color(red: 0.36, green: 0.7, blue: 0.4)
+        case .attention: return Color(red: 0.9, green: 0.5, blue: 0.15)
+        case .off: return .secondary
+        case .unsupported: return Color.secondary.opacity(0.4)
         }
     }
 }

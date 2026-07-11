@@ -1,4 +1,5 @@
 import Foundation
+import LinkitMacCore
 
 struct SettingsDeviceRow: Identifiable {
     let id: String
@@ -26,6 +27,8 @@ final class SettingsViewModel: ObservableObject {
     @Published var recentTransfers: [RecentTransferRow] = []
     @Published var recentNotifications: [MirroredNotificationRow] = []
     @Published var phoneStatus = ""
+    /// The connected phone's self-reported feature health, mirrored from the status exchange.
+    @Published var peerFeatures: [FeatureStatus] = []
     @Published var version = ""
     @Published var build = ""
 
