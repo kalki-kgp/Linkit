@@ -64,9 +64,7 @@ import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ContentPaste
-import androidx.compose.material.icons.rounded.Contrast
 import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -79,7 +77,6 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.UploadFile
@@ -119,6 +116,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -1137,11 +1142,28 @@ private fun Intent.streamUris(): List<Uri> {
 }
 
 /* ------------------------------------------------------------------------- *
- * UI · Linkit · macrostructure: Device-Hero + Action Grid + Activity
- *   genre: modern-minimal · theme: warm paper light / charcoal dark
- *   accent: amber #D16A1F (light) / #E89F4D (dark)
- *   motion: status-pulse, transfer-bar slide-up, button-press scale
+ * UI · Linkit · macrostructure: bottom-nav shell (Home · Activity · Settings)
+ *   Home = control surface, Activity = transfers, Settings = hub → detail.
+ *   The bottom bar is the always-visible "map" — Android's answer to the Mac
+ *   Settings sidebar. Each Settings category drills into a focused detail
+ *   screen instead of one long scroll.
+ *   theme: warm paper light / charcoal dark · accent-driven primary
  * ------------------------------------------------------------------------- */
+
+/** Top-level destinations shown in the bottom navigation bar. */
+private enum class TopTab { HOME, ACTIVITY, SETTINGS }
+
+/** The Settings tab is a hub that pushes one of these focused detail screens. */
+private enum class SettingsRoute { HUB, DEVICE, CLIPBOARD, NOTIFICATIONS, PHONE, APPEARANCE, BACKGROUND, UPDATES, ABOUT }
+
+/** Where the "needs attention" banner and each broken feature deep-link to. */
+private fun settingsRouteForFeature(id: String): SettingsRoute = when (id) {
+    AndroidFeatureStatus.ID_NOTIFICATION_MIRROR -> SettingsRoute.NOTIFICATIONS
+    AndroidFeatureStatus.ID_PHONE_CONTROL -> SettingsRoute.PHONE
+    AndroidFeatureStatus.ID_BATTERY -> SettingsRoute.BACKGROUND
+    AndroidFeatureStatus.ID_CLIPBOARD_SYNC -> SettingsRoute.CLIPBOARD
+    else -> SettingsRoute.DEVICE
+}
 
 @Composable
 private fun LinkitScreen(
@@ -1152,7 +1174,9 @@ private fun LinkitScreen(
     val history by viewModel.historyEntries.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var showSettings by remember { mutableStateOf(false) }
+
+    var topTab by rememberSaveable { mutableStateOf(TopTab.HOME) }
+    var settingsRoute by rememberSaveable { mutableStateOf(SettingsRoute.HUB) }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
@@ -1181,35 +1205,71 @@ private fun LinkitScreen(
         )
     }
 
+    val openSettingsDetail: (SettingsRoute) -> Unit = { route ->
+        settingsRoute = route
+        topTab = TopTab.SETTINGS
+    }
+
+    // Sending is cancelable with Back, and always wins over navigation.
     BackHandler(enabled = state.isSending) { viewModel.cancelActive() }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
+    if (state.trustedMac == null) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
+                WelcomeScreen(isPairing = state.isPairing, error = state.error, onPair = launchQrScanner)
+            }
+        }
+        return
+    }
+
+    // Back walks the hierarchy: detail → hub, then any tab → Home, then exit.
+    BackHandler(enabled = !state.isSending && (topTab != TopTab.HOME || settingsRoute != SettingsRoute.HUB)) {
+        when {
+            topTab == TopTab.SETTINGS && settingsRoute != SettingsRoute.HUB -> settingsRoute = SettingsRoute.HUB
+            topTab != TopTab.HOME -> topTab = TopTab.HOME
+        }
+    }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            LinkitBottomBar(
+                current = topTab,
+                onSelect = { tab ->
+                    // Tapping the Settings tab always returns to the hub.
+                    if (tab == TopTab.SETTINGS) settingsRoute = SettingsRoute.HUB
+                    topTab = tab
+                }
+            )
+        }
+    ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .systemBarsPadding()
+                .padding(innerPadding)
         ) {
-            if (state.trustedMac == null) {
-                WelcomeScreen(
-                    isPairing = state.isPairing,
-                    error = state.error,
-                    onPair = launchQrScanner
+            when (topTab) {
+                TopTab.HOME -> HomeTab(
+                    state = state,
+                    onPickFile = { filePicker.launch(arrayOf("*/*")) },
+                    onSendClipboard = viewModel::sendClipboardTextToMac,
+                    onOpenLink = viewModel::openClipboardLinkOnMac,
+                    onToggleClipboardSync = viewModel::toggleClipboardSync,
+                    onReconnect = viewModel::discoverAndReconnect,
+                    onOpenPhone = { openSettingsDetail(SettingsRoute.PHONE) },
+                    onOpenAttention = { openSettingsDetail(SettingsRoute.DEVICE) }
                 )
-            } else if (showSettings) {
-                BackHandler { showSettings = false }
-                SettingsScreen(
+                TopTab.ACTIVITY -> ActivityTab(history = history, onClear = viewModel::clearHistory)
+                TopTab.SETTINGS -> SettingsTab(
+                    route = settingsRoute,
                     state = state,
                     settings = settings,
-                    history = history,
-                    onBack = { showSettings = false },
+                    onOpenDetail = { settingsRoute = it },
+                    onBackToHub = { settingsRoute = SettingsRoute.HUB },
                     onReconnect = { viewModel.discoverAndReconnect() },
                     onDisconnect = viewModel::disconnectMac,
                     onRePair = launchQrScanner,
-                    onForget = { showSettings = false; viewModel.forgetMac() },
-                    onClearHistory = viewModel::clearHistory,
+                    onForget = { topTab = TopTab.HOME; settingsRoute = SettingsRoute.HUB; viewModel.forgetMac() },
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
                     onSetNotificationMirror = viewModel::setNotificationMirrorEnabled,
                     onSetAppearance = viewModel::setAppearance,
@@ -1218,19 +1278,6 @@ private fun LinkitScreen(
                     onReconnectNotificationListener = viewModel::reconnectNotificationListener,
                     onEnablePhoneControls = onEnablePhoneControls,
                     onSetAccent = viewModel::setAccentColor
-                )
-            } else {
-                HomeScreen(
-                    state = state,
-                    history = history,
-                    onPickFile = { filePicker.launch(arrayOf("*/*")) },
-                    onSendClipboard = viewModel::sendClipboardTextToMac,
-                    onOpenLink = viewModel::openClipboardLinkOnMac,
-                    onToggleClipboardSync = viewModel::toggleClipboardSync,
-                    onReconnect = viewModel::discoverAndReconnect,
-                    onClearHistory = viewModel::clearHistory,
-                    onEnablePhoneControls = onEnablePhoneControls,
-                    onOpenSettings = { showSettings = true }
                 )
             }
 
@@ -1244,6 +1291,36 @@ private fun LinkitScreen(
             ) {
                 TransferBar(state = state, onCancel = viewModel::cancelActive)
             }
+        }
+    }
+}
+
+/** The persistent bottom navigation — the app's always-visible map. */
+@Composable
+private fun LinkitBottomBar(current: TopTab, onSelect: (TopTab) -> Unit) {
+    NavigationBar(
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp
+    ) {
+        val items = listOf(
+            Triple(TopTab.HOME, Icons.Rounded.Home, "Home"),
+            Triple(TopTab.ACTIVITY, Icons.Rounded.SwapVert, "Activity"),
+            Triple(TopTab.SETTINGS, Icons.Rounded.Settings, "Settings")
+        )
+        items.forEach { (tab, icon, label) ->
+            NavigationBarItem(
+                selected = current == tab,
+                onClick = { onSelect(tab) },
+                icon = { Icon(icon, contentDescription = label, modifier = Modifier.size(22.dp)) },
+                label = { Text(label, fontSize = 11.sp, fontWeight = FontWeight.Medium) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = MaterialTheme.colorScheme.onPrimary,
+                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                    indicatorColor = MaterialTheme.colorScheme.primary,
+                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            )
         }
     }
 }
@@ -1326,17 +1403,15 @@ private fun WelcomeScreen(
 }
 
 @Composable
-private fun HomeScreen(
+private fun HomeTab(
     state: LinkitUiState,
-    history: List<TransferHistoryEntry>,
     onPickFile: () -> Unit,
     onSendClipboard: () -> Unit,
     onOpenLink: () -> Unit,
     onToggleClipboardSync: () -> Unit,
     onReconnect: () -> Unit,
-    onClearHistory: () -> Unit,
-    onEnablePhoneControls: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenPhone: () -> Unit,
+    onOpenAttention: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1345,13 +1420,13 @@ private fun HomeScreen(
             .padding(horizontal = 20.dp)
             .padding(bottom = if (state.isSending) 120.dp else 24.dp)
     ) {
-        TopBar(onOpenSettings = onOpenSettings)
+        HomeWordmark()
         Spacer(modifier = Modifier.height(4.dp))
         DeviceCard(state = state, onReconnect = onReconnect)
         val attention = state.featuresNeedingAttention
         if (attention.isNotEmpty()) {
             Spacer(modifier = Modifier.height(12.dp))
-            FeatureAttentionBanner(features = attention, onOpen = onOpenSettings)
+            FeatureAttentionBanner(features = attention, onOpen = onOpenAttention)
         }
         Spacer(modifier = Modifier.height(20.dp))
         ActionGrid(
@@ -1366,20 +1441,14 @@ private fun HomeScreen(
             Spacer(modifier = Modifier.height(16.dp))
             ErrorBanner(it)
         }
-        Spacer(modifier = Modifier.height(28.dp))
-        PhoneControlsSection(
-            status = state.phoneControlStatus,
-            onEnable = onEnablePhoneControls
-        )
-        Spacer(modifier = Modifier.height(28.dp))
-        NotificationsGroup()
-        Spacer(modifier = Modifier.height(28.dp))
-        RecentActivity(entries = history, onClear = onClearHistory)
+        Spacer(modifier = Modifier.height(20.dp))
+        HomePhoneRow(status = state.phoneControlStatus, onOpen = onOpenPhone)
     }
 }
 
+/** The "Linkit" wordmark with the hidden 7-tap debug entry point. */
 @Composable
-private fun TopBar(onOpenSettings: () -> Unit) {
+private fun HomeWordmark() {
     val context = LocalContext.current
     var tapCount by remember { mutableStateOf(0) }
     var lastTapMillis by remember { mutableStateOf(0L) }
@@ -1387,7 +1456,6 @@ private fun TopBar(onOpenSettings: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 14.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -1405,14 +1473,57 @@ private fun TopBar(onOpenSettings: () -> Unit) {
                 }
             }
         )
-        IconButton(onClick = onOpenSettings) {
-            Icon(
-                imageVector = Icons.Rounded.Settings,
-                contentDescription = "Settings",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(22.dp)
-            )
+    }
+}
+
+/** Compact phone-control status on Home; taps through to Settings → Phone. */
+@Composable
+private fun HomePhoneRow(status: PhoneControlPermissionStatus, onOpen: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val allGranted = status.canWatchCalls && status.canPlaceDirectCalls &&
+        status.canControlCalls && status.canSeeNumbers && status.canResolveContacts
+    SettingsGroupCard(label = "Phone") {
+        LinkitCardRow(
+            icon = Icons.Rounded.Call,
+            title = "Call mirroring",
+            subtitle = if (allGranted) "Control your calls from the Mac." else "Some permissions are needed.",
+            accent = accent,
+            onClick = onOpen
+        ) {
+            if (allGranted) {
+                Text(
+                    "On",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            } else {
+                RowChevron()
+            }
         }
+    }
+}
+
+@Composable
+private fun ActivityTab(history: List<TransferHistoryEntry>, onClear: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(top = 8.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        LinkitLargeHeader(title = "Activity", subtitle = "Files sent and received between your devices.")
+        SettingsGroupCard(label = "Received files") {
+            LinkitCardRow(
+                icon = Icons.Rounded.Download,
+                title = "Save location",
+                subtitle = "Downloads/Linkit Drop",
+                accent = MaterialTheme.colorScheme.primary
+            ) {}
+        }
+        RecentActivity(entries = history, onClear = onClear)
     }
 }
 
@@ -1693,12 +1804,6 @@ private fun PhoneControlsSection(
 @Composable
 private fun UpdateSection(state: LinkitUiState, onCheck: () -> Unit, onInstall: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            "Updates",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onBackground
-        )
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2077,17 +2182,23 @@ private fun ErrorBanner(message: String) {
  *   grouped, Android-Settings-style sections mirroring the Mac Settings window
  * ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- *
+ * UI · Settings · hub → detail
+ *   The Settings tab shows a short hub of categories; each drills into a
+ *   focused detail screen (mirrors the Mac Settings sidebar sections).
+ * ------------------------------------------------------------------------- */
+
 @Composable
-private fun SettingsScreen(
+private fun SettingsTab(
+    route: SettingsRoute,
     state: LinkitUiState,
     settings: LinkitSettings,
-    history: List<TransferHistoryEntry>,
-    onBack: () -> Unit,
+    onOpenDetail: (SettingsRoute) -> Unit,
+    onBackToHub: () -> Unit,
     onReconnect: () -> Unit,
     onDisconnect: () -> Unit,
     onRePair: () -> Unit,
     onForget: () -> Unit,
-    onClearHistory: () -> Unit,
     onToggleClipboardSync: () -> Unit,
     onSetNotificationMirror: (Boolean) -> Unit,
     onSetAppearance: (AppearancePreference) -> Unit,
@@ -2097,8 +2208,113 @@ private fun SettingsScreen(
     onEnablePhoneControls: () -> Unit,
     onSetAccent: (String) -> Unit
 ) {
-    val context = LocalContext.current
-    val accent = LinkitAccents.color(settings.accentColorHex)
+    when (route) {
+        SettingsRoute.HUB -> SettingsHub(state = state, onOpenDetail = onOpenDetail)
+        SettingsRoute.DEVICE -> DeviceDetail(
+            state = state,
+            onBack = onBackToHub,
+            onReconnect = onReconnect,
+            onDisconnect = onDisconnect,
+            onRePair = onRePair,
+            onForget = onForget,
+            onReconnectNotificationListener = onReconnectNotificationListener,
+            onEnablePhoneControls = onEnablePhoneControls
+        )
+        SettingsRoute.CLIPBOARD -> ClipboardDetail(state, onBackToHub, onToggleClipboardSync)
+        SettingsRoute.NOTIFICATIONS -> NotificationsDetail(settings, onBackToHub, onSetNotificationMirror)
+        SettingsRoute.PHONE -> PhoneDetail(state, onBackToHub, onEnablePhoneControls)
+        SettingsRoute.APPEARANCE -> AppearanceDetail(settings, onBackToHub, onSetAppearance, onSetAccent)
+        SettingsRoute.BACKGROUND -> BackgroundDetail(onBackToHub)
+        SettingsRoute.UPDATES -> UpdatesDetail(state, onBackToHub, onCheckUpdate, onInstallUpdate)
+        SettingsRoute.ABOUT -> AboutDetail(state, onBackToHub)
+    }
+}
+
+/** The Settings hub: a short, scannable list of categories that drill in. */
+@Composable
+private fun SettingsHub(state: LinkitUiState, onOpenDetail: (SettingsRoute) -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val attention = state.featuresNeedingAttention.size
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(top = 8.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        LinkitLargeHeader(title = "Settings", subtitle = "Manage your Linkit connection and preferences.")
+
+        SettingsGroupCard(label = "Connection") {
+            HubRow(
+                icon = Icons.Rounded.Devices,
+                title = "Device",
+                subtitle = if (state.isConnectedToMac) "Connected · ${state.trustedMac?.deviceName ?: "Mac"}" else "Paired, offline",
+                accent = accent,
+                badge = attention,
+                onClick = { onOpenDetail(SettingsRoute.DEVICE) }
+            )
+        }
+
+        SettingsGroupCard(label = "Features") {
+            HubRow(Icons.Rounded.ContentPaste, "Clipboard", "Sync copied text between devices.", accent) { onOpenDetail(SettingsRoute.CLIPBOARD) }
+            LinkitRowDivider()
+            HubRow(Icons.Rounded.Notifications, "Notifications", "Mirror phone notifications to the Mac.", accent) { onOpenDetail(SettingsRoute.NOTIFICATIONS) }
+            LinkitRowDivider()
+            HubRow(Icons.Rounded.Call, "Phone", "Call control permissions and caller ID.", accent) { onOpenDetail(SettingsRoute.PHONE) }
+        }
+
+        SettingsGroupCard(label = "App") {
+            HubRow(Icons.Rounded.Palette, "Appearance", "Accent color and light or dark theme.", accent) { onOpenDetail(SettingsRoute.APPEARANCE) }
+            LinkitRowDivider()
+            HubRow(Icons.Rounded.Bolt, "Background & battery", "Keep Linkit reachable while the screen is off.", accent) { onOpenDetail(SettingsRoute.BACKGROUND) }
+            LinkitRowDivider()
+            HubRow(Icons.Rounded.Download, "Updates", "Check for a newer Linkit build.", accent) { onOpenDetail(SettingsRoute.UPDATES) }
+            LinkitRowDivider()
+            HubRow(Icons.Rounded.Info, "About", "Version and source code.", accent) { onOpenDetail(SettingsRoute.ABOUT) }
+        }
+    }
+}
+
+/** A hub category row: icon tile, title, one-line summary, optional badge, chevron. */
+@Composable
+private fun HubRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    accent: Color,
+    badge: Int = 0,
+    onClick: () -> Unit
+) {
+    LinkitCardRow(icon = icon, title = title, subtitle = subtitle, accent = accent, onClick = onClick) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (badge > 0) {
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.error),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("$badge", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onError)
+                }
+            }
+            RowChevron()
+        }
+    }
+}
+
+/** Shared chrome for a Settings detail screen: back arrow, large header, content. */
+@Composable
+private fun SettingsDetailScaffold(
+    title: String,
+    subtitle: String,
+    onBack: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2107,31 +2323,39 @@ private fun SettingsScreen(
             .padding(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
-        SettingsTopBar(onBack = onBack)
-
-        SettingsGroupCard(label = "Feature status") {
-            FeatureStatusList(
-                phoneName = "This phone",
-                features = state.localFeatures,
-                onResolve = { feature ->
-                    resolveFeatureAction(
-                        context = context,
-                        feature = feature,
-                        onReconnectNotificationListener = onReconnectNotificationListener,
-                        onEnablePhoneControls = onEnablePhoneControls
-                    )
-                }
-            )
-            if (state.macFeatures.isNotEmpty()) {
-                LinkitRowDivider()
-                FeatureStatusList(
-                    phoneName = state.trustedMac?.deviceName ?: "Your Mac",
-                    features = state.macFeatures,
-                    onResolve = null
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp).size(36.dp)) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "Back",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp)
                 )
             }
+            LinkitLargeHeader(title = title, subtitle = subtitle)
         }
+        content()
+    }
+}
 
+@Composable
+private fun DeviceDetail(
+    state: LinkitUiState,
+    onBack: () -> Unit,
+    onReconnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onRePair: () -> Unit,
+    onForget: () -> Unit,
+    onReconnectNotificationListener: () -> Unit,
+    onEnablePhoneControls: () -> Unit
+) {
+    val context = LocalContext.current
+    val accent = MaterialTheme.colorScheme.primary
+    SettingsDetailScaffold(
+        title = "Device",
+        subtitle = "Your paired Mac and cross-device feature health.",
+        onBack = onBack
+    ) {
         SettingsGroupCard(label = "Connection") {
             val mac = state.trustedMac
             LinkitCardRow(
@@ -2160,7 +2384,40 @@ private fun SettingsScreen(
             }
         }
 
-        SettingsGroupCard(label = "Clipboard") {
+        SettingsGroupCard(label = "Feature status") {
+            FeatureStatusList(
+                phoneName = "This phone",
+                features = state.localFeatures,
+                onResolve = { feature ->
+                    resolveFeatureAction(
+                        context = context,
+                        feature = feature,
+                        onReconnectNotificationListener = onReconnectNotificationListener,
+                        onEnablePhoneControls = onEnablePhoneControls
+                    )
+                }
+            )
+            if (state.macFeatures.isNotEmpty()) {
+                LinkitRowDivider()
+                FeatureStatusList(
+                    phoneName = state.trustedMac?.deviceName ?: "Your Mac",
+                    features = state.macFeatures,
+                    onResolve = null
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClipboardDetail(state: LinkitUiState, onBack: () -> Unit, onToggleClipboardSync: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    SettingsDetailScaffold(
+        title = "Clipboard",
+        subtitle = "Share copied text between your Mac and phone.",
+        onBack = onBack
+    ) {
+        SettingsGroupCard(label = "Sync") {
             LinkitToggleRow(
                 icon = Icons.Rounded.ContentPaste,
                 title = "Sync clipboard to Mac",
@@ -2171,20 +2428,33 @@ private fun SettingsScreen(
                 onCheckedChange = { onToggleClipboardSync() }
             )
         }
+    }
+}
 
-        var accessGranted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
-        var showAccessHelp by remember { mutableStateOf(false) }
-        val lifecycleOwner = LocalLifecycleOwner.current
-        DisposableEffect(lifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) {
-                    accessGranted = NotificationAccess.isGranted(context)
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+@Composable
+private fun NotificationsDetail(
+    settings: LinkitSettings,
+    onBack: () -> Unit,
+    onSetNotificationMirror: (Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    val accent = MaterialTheme.colorScheme.primary
+    var accessGranted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
+    var showAccessHelp by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) accessGranted = NotificationAccess.isGranted(context)
         }
-        SettingsGroupCard(label = "Notifications") {
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    SettingsDetailScaffold(
+        title = "Notifications",
+        subtitle = "Mirror phone notifications to your Mac.",
+        onBack = onBack
+    ) {
+        SettingsGroupCard(label = "Mirroring") {
             LinkitToggleRow(
                 icon = Icons.Rounded.Notifications,
                 title = "Mirror phone notifications to Mac",
@@ -2208,70 +2478,139 @@ private fun SettingsScreen(
             }
         }
 
-        if (showAccessHelp) {
-            NotificationAccessDialog(
-                onOpenSettings = {
-                    showAccessHelp = false
-                    runCatching { context.startActivity(NotificationAccess.settingsIntent()) }
-                },
-                onDismiss = { showAccessHelp = false }
-            )
-        }
-
-        SettingsGroupCard(label = "Transfers") {
+        SettingsGroupCard(label = "System") {
             LinkitCardRow(
-                icon = Icons.Rounded.Download,
-                title = "Received files",
-                subtitle = "Downloads/Linkit Drop",
-                accent = accent
-            ) {}
-            LinkitRowDivider()
-            LinkitCardRow(
-                icon = Icons.Rounded.DeleteSweep,
-                title = "Clear recent activity",
+                icon = Icons.Rounded.Notifications,
+                title = "Linkit notification settings",
+                subtitle = "Open Android's notification settings for Linkit.",
                 accent = accent,
-                enabled = history.isNotEmpty(),
-                onClick = onClearHistory
-            ) { if (history.isNotEmpty()) RowChevron() }
+                onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        )
+                    }
+                }
+            ) { RowChevron() }
         }
+    }
 
+    if (showAccessHelp) {
+        NotificationAccessDialog(
+            onOpenSettings = {
+                showAccessHelp = false
+                runCatching { context.startActivity(NotificationAccess.settingsIntent()) }
+            },
+            onDismiss = { showAccessHelp = false }
+        )
+    }
+}
+
+@Composable
+private fun PhoneDetail(state: LinkitUiState, onBack: () -> Unit, onEnablePhoneControls: () -> Unit) {
+    SettingsDetailScaffold(
+        title = "Phone",
+        subtitle = "Place and control Android calls from your Mac.",
+        onBack = onBack
+    ) {
+        PhoneControlsSection(status = state.phoneControlStatus, onEnable = onEnablePhoneControls)
+    }
+}
+
+@Composable
+private fun AppearanceDetail(
+    settings: LinkitSettings,
+    onBack: () -> Unit,
+    onSetAppearance: (AppearancePreference) -> Unit,
+    onSetAccent: (String) -> Unit
+) {
+    SettingsDetailScaffold(
+        title = "Appearance",
+        subtitle = "Make Linkit feel like yours.",
+        onBack = onBack
+    ) {
         SettingsGroupCard(label = "Accent color") {
             AccentColorPicker(currentHex = settings.accentColorHex, onSelect = onSetAccent)
         }
-
         SettingsGroupCard(label = "Theme") {
             Box(modifier = Modifier.padding(14.dp)) {
                 AppearanceSelector(current = settings.appearance, onSelect = onSetAppearance)
             }
         }
-
-        UpdateSection(
-            state = state,
-            onCheck = onCheckUpdate,
-            onInstall = onInstallUpdate
-        )
-
-        AboutCard(version = state.currentAndroidVersion)
-
-        LinkitFooter(version = "v${state.currentAndroidVersion}", accent = accent)
     }
 }
 
 @Composable
-private fun SettingsTopBar(onBack: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        IconButton(
-            onClick = onBack,
-            modifier = Modifier.padding(top = 4.dp).size(36.dp)
-        ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                contentDescription = "Back",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(22.dp)
-            )
+private fun BackgroundDetail(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val accent = MaterialTheme.colorScheme.primary
+    val powerManager = context.getSystemService(PowerManager::class.java)
+    var ignoringBattery by remember {
+        mutableStateOf(powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true)
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                ignoringBattery = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
+            }
         }
-        LinkitLargeHeader(title = "Settings", subtitle = "Manage your Linkit connection and preferences.")
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    SettingsDetailScaffold(
+        title = "Background & battery",
+        subtitle = "Keep the Mac able to reach this phone while the screen is off.",
+        onBack = onBack
+    ) {
+        SettingsGroupCard(label = "Background activity") {
+            LinkitCardRow(
+                icon = Icons.Rounded.Bolt,
+                title = "Background activity",
+                subtitle = if (ignoringBattery) {
+                    "Allowed — Linkit keeps receiving while the screen is off."
+                } else {
+                    "Restricted — allow so the Mac can reach this phone in the background."
+                },
+                accent = accent,
+                enabled = !ignoringBattery,
+                onClick = {
+                    runCatching {
+                        @Suppress("BatteryLife")
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    }
+                }
+            ) { if (!ignoringBattery) RowChevron() }
+        }
+    }
+}
+
+@Composable
+private fun UpdatesDetail(state: LinkitUiState, onBack: () -> Unit, onCheck: () -> Unit, onInstall: () -> Unit) {
+    SettingsDetailScaffold(
+        title = "Updates",
+        subtitle = "Keep Linkit up to date.",
+        onBack = onBack
+    ) {
+        UpdateSection(state = state, onCheck = onCheck, onInstall = onInstall)
+    }
+}
+
+@Composable
+private fun AboutDetail(state: LinkitUiState, onBack: () -> Unit) {
+    SettingsDetailScaffold(
+        title = "About",
+        subtitle = "About Linkit.",
+        onBack = onBack
+    ) {
+        AboutCard(version = state.currentAndroidVersion)
+        LinkitFooter(version = "v${state.currentAndroidVersion}", accent = MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -2547,53 +2886,6 @@ private fun resolveFeatureAction(
         }
         AndroidFeatureStatus.ID_RECEIVER -> LinkitReceiverService.start(context)
         else -> Unit
-    }
-}
-
-@Composable
-private fun NotificationsGroup() {
-    val context = LocalContext.current
-    val accent = MaterialTheme.colorScheme.primary
-    val powerManager = context.getSystemService(PowerManager::class.java)
-    val ignoringBattery = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
-    SettingsGroupCard(label = "Notifications & background") {
-        LinkitCardRow(
-            icon = Icons.Rounded.Bolt,
-            title = "Background activity",
-            subtitle = if (ignoringBattery) {
-                "Allowed — Linkit keeps receiving while the screen is off."
-            } else {
-                "Restricted — allow so the Mac can reach this phone in the background."
-            },
-            accent = accent,
-            enabled = !ignoringBattery,
-            onClick = {
-                runCatching {
-                    @Suppress("BatteryLife")
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                    )
-                }
-            }
-        ) { if (!ignoringBattery) RowChevron() }
-        LinkitRowDivider()
-        LinkitCardRow(
-            icon = Icons.Rounded.Notifications,
-            title = "Notification settings",
-            subtitle = "Open Android's notification settings for Linkit.",
-            accent = accent,
-            onClick = {
-                runCatching {
-                    context.startActivity(
-                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    )
-                }
-            }
-        ) { RowChevron() }
     }
 }
 
