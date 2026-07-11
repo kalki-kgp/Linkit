@@ -1400,6 +1400,7 @@ private fun HomeTab(
     onEnablePhoneControls: () -> Unit
 ) {
     val context = LocalContext.current
+    var resolveTarget by remember { mutableStateOf<FeatureStatus?>(null) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1410,31 +1411,6 @@ private fun HomeTab(
         HomeWordmark()
         Spacer(modifier = Modifier.height(4.dp))
         DeviceCard(state = state, onReconnect = onReconnect)
-        Spacer(modifier = Modifier.height(20.dp))
-        // Feature health lives on Home so a broken feature is visible — and fixable —
-        // without digging into Settings. Attention rows show a red dot and a "Fix" action.
-        SettingsGroupCard(label = "Feature status") {
-            FeatureStatusList(
-                phoneName = "This phone",
-                features = state.localFeatures,
-                onResolve = { feature ->
-                    resolveFeatureAction(
-                        context = context,
-                        feature = feature,
-                        onReconnectNotificationListener = onReconnectNotificationListener,
-                        onEnablePhoneControls = onEnablePhoneControls
-                    )
-                }
-            )
-            if (state.macFeatures.isNotEmpty()) {
-                LinkitRowDivider()
-                FeatureStatusList(
-                    phoneName = state.trustedMac?.deviceName ?: "Your Mac",
-                    features = state.macFeatures,
-                    onResolve = null
-                )
-            }
-        }
         Spacer(modifier = Modifier.height(20.dp))
         ActionGrid(
             enabled = state.isConnectedToMac,
@@ -1448,7 +1424,101 @@ private fun HomeTab(
             Spacer(modifier = Modifier.height(16.dp))
             ErrorBanner(it)
         }
+        Spacer(modifier = Modifier.height(28.dp))
+        // Compact feature health, kept at the bottom so Home stays uncluttered.
+        // A feature with a problem shows a red dot + chevron; tapping opens a dialog
+        // that explains how to resolve it.
+        HomeFeatureStatus(features = state.localFeatures, onResolve = { resolveTarget = it })
     }
+
+    resolveTarget?.let { feature ->
+        FeatureResolveDialog(
+            feature = feature,
+            onFix = {
+                resolveFeatureAction(
+                    context = context,
+                    feature = feature,
+                    onReconnectNotificationListener = onReconnectNotificationListener,
+                    onEnablePhoneControls = onEnablePhoneControls
+                )
+                resolveTarget = null
+            },
+            onDismiss = { resolveTarget = null }
+        )
+    }
+}
+
+/** Compact feature-health list: title + status dot, red chevron only when broken. */
+@Composable
+private fun HomeFeatureStatus(features: List<FeatureStatus>, onResolve: (FeatureStatus) -> Unit) {
+    SettingsGroupCard(label = "Feature status") {
+        features.forEachIndexed { index, feature ->
+            if (index > 0) LinkitRowDivider()
+            HomeFeatureRow(feature = feature, onResolve = onResolve)
+        }
+    }
+}
+
+@Composable
+private fun HomeFeatureRow(feature: FeatureStatus, onResolve: (FeatureStatus) -> Unit) {
+    val attention = feature.state == FeatureState.ATTENTION
+    val dotColor = when (feature.state) {
+        FeatureState.ON -> MaterialTheme.colorScheme.tertiary
+        FeatureState.ATTENTION -> MaterialTheme.colorScheme.error
+        FeatureState.OFF -> MaterialTheme.colorScheme.outline
+        FeatureState.UNSUPPORTED -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    val base = Modifier.fillMaxWidth()
+    val row = if (attention) base.clickable { onResolve(feature) } else base
+    Row(
+        modifier = row.padding(horizontal = 16.dp, vertical = 13.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+        Text(
+            feature.title,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (attention) {
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = "Resolve",
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+/** Explains what a broken feature needs and offers a single Fix action. */
+@Composable
+private fun FeatureResolveDialog(feature: FeatureStatus, onFix: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(feature.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        },
+        text = {
+            Text(
+                feature.detail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        confirmButton = { TextButton(onClick = onFix) { Text("Fix") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
 }
 
 /** The "Linkit" wordmark with the hidden 7-tap debug entry point. */
@@ -2689,75 +2759,6 @@ private fun AccentSwatch(
                 contentDescription = null,
                 tint = Color.White,
                 modifier = Modifier.size(18.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun FeatureStatusList(
-    phoneName: String,
-    features: List<FeatureStatus>,
-    onResolve: ((FeatureStatus) -> Unit)?
-) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            phoneName,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 16.dp, top = 14.dp, bottom = 4.dp)
-        )
-        features.forEachIndexed { index, feature ->
-            FeatureStatusRow(feature = feature, onResolve = onResolve)
-        }
-    }
-}
-
-@Composable
-private fun FeatureStatusRow(
-    feature: FeatureStatus,
-    onResolve: ((FeatureStatus) -> Unit)?
-) {
-    val dotColor = when (feature.state) {
-        FeatureState.ON -> MaterialTheme.colorScheme.tertiary
-        FeatureState.ATTENTION -> MaterialTheme.colorScheme.error
-        FeatureState.OFF -> MaterialTheme.colorScheme.outline
-        FeatureState.UNSUPPORTED -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-    }
-    val actionable = feature.state == FeatureState.ATTENTION && onResolve != null
-    val base = Modifier.fillMaxWidth()
-    val interactive = if (actionable) base.clickable { onResolve?.invoke(feature) } else base
-    Row(
-        modifier = interactive.padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(9.dp)
-                .clip(CircleShape)
-                .background(dotColor)
-        )
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                feature.title,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                feature.detail,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (actionable) {
-            Text(
-                "Fix",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary
             )
         }
     }
