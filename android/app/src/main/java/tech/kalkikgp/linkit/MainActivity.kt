@@ -57,9 +57,37 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.Contrast
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Devices
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.LaptopMac
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.LinkOff
+import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.QrCodeScanner
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Smartphone
+import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
@@ -82,6 +110,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -89,6 +118,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -1376,10 +1406,11 @@ private fun TopBar(onOpenSettings: () -> Unit) {
             }
         )
         IconButton(onClick = onOpenSettings) {
-            Text(
-                "⚙",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            Icon(
+                imageVector = Icons.Rounded.Settings,
+                contentDescription = "Settings",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp)
             )
         }
     }
@@ -1391,27 +1422,27 @@ private fun DeviceCard(state: LinkitUiState, onReconnect: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(MaterialTheme.colorScheme.surface)
             .border(
                 BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                RoundedCornerShape(22.dp)
+                RoundedCornerShape(20.dp)
             )
-            .padding(20.dp),
+            .padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             DeviceAvatar(name = mac.deviceName, connected = state.isConnectedToMac)
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 Text(
                     mac.deviceName,
-                    style = MaterialTheme.typography.titleLarge,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -1448,19 +1479,21 @@ private fun DeviceCard(state: LinkitUiState, onReconnect: () -> Unit) {
 @Composable
 private fun DeviceAvatar(name: String, connected: Boolean) {
     val accent = MaterialTheme.colorScheme.primary
-    Box(modifier = Modifier.size(56.dp)) {
+    Box(modifier = Modifier.size(52.dp)) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(15.dp))
                 .background(if (connected) accentGradient(accent) else accentGradient(MaterialTheme.colorScheme.outline)),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                name.firstInitial(),
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White
+            // The paired peer is a Mac — mirror the Mac app, which shows this phone with an
+            // iPhone glyph on the same accent-gradient tile.
+            Icon(
+                imageVector = Icons.Rounded.LaptopMac,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(26.dp)
             )
         }
         if (connected) {
@@ -1550,9 +1583,9 @@ private fun ActionGrid(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            QuickActionTile(glyph = "📄", title = "Send File", enabled = enabled, onClick = onPickFile, modifier = Modifier.weight(1f))
-            QuickActionTile(glyph = "📋", title = "Clipboard", enabled = enabled, onClick = onSendClipboard, modifier = Modifier.weight(1f))
-            QuickActionTile(glyph = "🔗", title = "Open Link", enabled = enabled, onClick = onOpenLink, modifier = Modifier.weight(1f))
+            QuickActionTile(icon = Icons.Rounded.UploadFile, title = "Send File", enabled = enabled, onClick = onPickFile, modifier = Modifier.weight(1f))
+            QuickActionTile(icon = Icons.Rounded.ContentPaste, title = "Clipboard", enabled = enabled, onClick = onSendClipboard, modifier = Modifier.weight(1f))
+            QuickActionTile(icon = Icons.Rounded.Link, title = "Open Link", enabled = enabled, onClick = onOpenLink, modifier = Modifier.weight(1f))
         }
         Column(
             modifier = Modifier
@@ -1562,7 +1595,7 @@ private fun ActionGrid(
                 .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), RoundedCornerShape(16.dp))
         ) {
             LinkitToggleRow(
-                glyph = "🔁",
+                icon = Icons.Rounded.Sync,
                 title = "Clipboard Sync",
                 subtitle = "Copy on Mac → paste on Android, and vice-versa while Linkit is open.",
                 accent = accent,
@@ -1576,29 +1609,35 @@ private fun ActionGrid(
 
 @Composable
 private fun QuickActionTile(
-    glyph: String,
+    icon: ImageVector,
     title: String,
     enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val base = modifier
-        .heightIn(min = 74.dp)
+        .heightIn(min = 78.dp)
         .clip(RoundedCornerShape(14.dp))
         .background(MaterialTheme.colorScheme.surface)
         .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), RoundedCornerShape(14.dp))
     val interactive = if (enabled) base.clickable(onClick = onClick) else base
+    val contentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.4f)
     Column(
-        modifier = interactive.padding(vertical = 12.dp),
+        modifier = interactive.padding(vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text(glyph, style = MaterialTheme.typography.titleLarge)
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = contentColor,
+            modifier = Modifier.size(22.dp)
+        )
         Text(
             title,
-            style = MaterialTheme.typography.labelLarge,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.45f)
+            color = contentColor
         )
     }
 }
@@ -1617,14 +1656,14 @@ private fun PhoneControlsSection(
         !status.canResolveContacts
     SettingsGroupCard(label = "Phone") {
         LinkitCardRow(
-            glyph = "☎️",
+            icon = Icons.Rounded.Call,
             title = "Call controls",
             subtitle = status.summary,
             accent = accent
         ) {}
         LinkitRowDivider()
         LinkitCardRow(
-            glyph = "🎚️",
+            icon = Icons.Rounded.Tune,
             title = "Caller ID & controls",
             subtitle = buildString {
                 append("Incoming: ")
@@ -1646,7 +1685,7 @@ private fun PhoneControlsSection(
         ) {}
         if (needsPermission) {
             LinkitRowDivider()
-            LinkitCardRow(glyph = "🔓", title = "Enable phone controls", accent = accent, onClick = onEnable) { Chevron() }
+            LinkitCardRow(icon = Icons.Rounded.LockOpen, title = "Enable phone controls", accent = accent, onClick = onEnable) { RowChevron() }
         }
     }
 }
@@ -1751,17 +1790,19 @@ private fun RecentActivity(entries: List<TransferHistoryEntry>, onClear: () -> U
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "Recent",
-                style = MaterialTheme.typography.titleMedium,
+                "RECENT",
+                fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onBackground
+                letterSpacing = 0.9.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 6.dp)
             )
             if (entries.isNotEmpty()) {
                 TextButton(onClick = onClear) {
                     Text(
                         "Clear",
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             }
@@ -2001,11 +2042,7 @@ private fun FeatureAttentionBanner(features: List<FeatureStatus>, onOpen: () -> 
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Text(
-            "›",
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-        )
+        RowChevron()
     }
 }
 
@@ -2020,20 +2057,12 @@ private fun ErrorBanner(message: String) {
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.Top
     ) {
-        Box(
-            modifier = Modifier
-                .size(20.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.error),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                "!",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onError
-            )
-        }
+        Icon(
+            imageVector = Icons.Rounded.ErrorOutline,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(20.dp)
+        )
         Text(
             message,
             style = MaterialTheme.typography.bodyMedium,
@@ -2106,7 +2135,7 @@ private fun SettingsScreen(
         SettingsGroupCard(label = "Connection") {
             val mac = state.trustedMac
             LinkitCardRow(
-                glyph = "🔗",
+                icon = Icons.Rounded.Devices,
                 title = mac?.deviceName ?: "Mac",
                 subtitle = "${state.macIp}:${state.port}",
                 accent = accent
@@ -2119,21 +2148,21 @@ private fun SettingsScreen(
             }
             LinkitRowDivider()
             if (state.isConnectedToMac) {
-                LinkitCardRow(glyph = "⏻", title = "Disconnect", accent = accent, onClick = onDisconnect) { Chevron() }
+                LinkitCardRow(icon = Icons.Rounded.LinkOff, title = "Disconnect", accent = accent, onClick = onDisconnect) { RowChevron() }
             } else {
-                LinkitCardRow(glyph = "↻", title = "Reconnect", accent = accent, onClick = onReconnect) { Chevron() }
+                LinkitCardRow(icon = Icons.Rounded.Refresh, title = "Reconnect", accent = accent, onClick = onReconnect) { RowChevron() }
             }
             LinkitRowDivider()
-            LinkitCardRow(glyph = "📷", title = "Pair with a different Mac", accent = accent, onClick = onRePair) { Chevron() }
+            LinkitCardRow(icon = Icons.Rounded.QrCodeScanner, title = "Pair with a different Mac", accent = accent, onClick = onRePair) { RowChevron() }
             LinkitRowDivider()
-            LinkitCardRow(glyph = "🗑", title = "Forget this Mac", accent = accent, onClick = onForget) {
+            LinkitCardRow(icon = Icons.Rounded.DeleteOutline, title = "Forget this Mac", accent = accent, onClick = onForget) {
                 Text("Forget", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
             }
         }
 
         SettingsGroupCard(label = "Clipboard") {
             LinkitToggleRow(
-                glyph = "📋",
+                icon = Icons.Rounded.ContentPaste,
                 title = "Sync clipboard to Mac",
                 subtitle = "Text you copy is pushed to the Mac. Android → Mac only syncs while Linkit is open (an OS limit).",
                 accent = accent,
@@ -2157,7 +2186,7 @@ private fun SettingsScreen(
         }
         SettingsGroupCard(label = "Notifications") {
             LinkitToggleRow(
-                glyph = "🔔",
+                icon = Icons.Rounded.Notifications,
                 title = "Mirror phone notifications to Mac",
                 subtitle = "Notifications that arrive on your phone briefly appear on the Mac. Needs notification access — a one-time Android setup.",
                 accent = accent,
@@ -2170,12 +2199,12 @@ private fun SettingsScreen(
             if (settings.notificationMirrorEnabled && !accessGranted) {
                 LinkitRowDivider()
                 LinkitCardRow(
-                    glyph = "⚠️",
+                    icon = Icons.Rounded.WarningAmber,
                     title = "Set up notification access",
                     subtitle = "Mirroring won't work until access is granted.",
                     accent = accent,
                     onClick = { showAccessHelp = true }
-                ) { Chevron() }
+                ) { RowChevron() }
             }
         }
 
@@ -2191,19 +2220,19 @@ private fun SettingsScreen(
 
         SettingsGroupCard(label = "Transfers") {
             LinkitCardRow(
-                glyph = "⬇️",
+                icon = Icons.Rounded.Download,
                 title = "Received files",
                 subtitle = "Downloads/Linkit Drop",
                 accent = accent
             ) {}
             LinkitRowDivider()
             LinkitCardRow(
-                glyph = "🧹",
+                icon = Icons.Rounded.DeleteSweep,
                 title = "Clear recent activity",
                 accent = accent,
                 enabled = history.isNotEmpty(),
                 onClick = onClearHistory
-            ) { if (history.isNotEmpty()) Chevron() }
+            ) { if (history.isNotEmpty()) RowChevron() }
         }
 
         SettingsGroupCard(label = "Accent color") {
@@ -2223,114 +2252,29 @@ private fun SettingsScreen(
         )
 
         AboutCard(version = state.currentAndroidVersion)
+
+        LinkitFooter(version = "v${state.currentAndroidVersion}", accent = accent)
     }
 }
 
 @Composable
 private fun SettingsTopBar(onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(onClick = onBack) {
-            Text(
-                "←",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.padding(top = 4.dp).size(36.dp)
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "Back",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp)
             )
         }
-        Text(
-            "Settings",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onBackground
-        )
+        LinkitLargeHeader(title = "Settings", subtitle = "Manage your Linkit connection and preferences.")
     }
 }
 
-@Composable
-private fun SettingsSectionLabel(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onBackground,
-        modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
-    )
-}
-
-@Composable
-private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(
-                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                RoundedCornerShape(18.dp)
-            ),
-        content = content
-    )
-}
-
-@Composable
-private fun SettingsRowDivider() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(MaterialTheme.colorScheme.outlineVariant)
-    )
-}
-
-@Composable
-private fun SettingsActionRow(
-    title: String,
-    subtitle: String? = null,
-    destructive: Boolean = false,
-    enabled: Boolean = true,
-    onClick: () -> Unit
-) {
-    val titleColor = when {
-        destructive -> MaterialTheme.colorScheme.error
-        enabled -> MaterialTheme.colorScheme.onSurface
-        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-    }
-    val base = Modifier.fillMaxWidth()
-    val interactive = if (enabled) base.clickable(onClick = onClick) else base
-    Row(
-        modifier = interactive.padding(horizontal = 16.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = titleColor
-            )
-            subtitle?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-        if (enabled && !destructive) {
-            Text(
-                "›",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
-        }
-    }
-}
 
 @Composable
 private fun NotificationAccessDialog(
@@ -2430,15 +2374,6 @@ private fun AppearanceSelector(
 }
 
 @Composable
-private fun Chevron() {
-    Text(
-        "›",
-        style = MaterialTheme.typography.titleLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-    )
-}
-
-@Composable
 private fun AccentColorPicker(currentHex: String, onSelect: (String) -> Unit) {
     Column(
         modifier = Modifier.padding(14.dp),
@@ -2507,7 +2442,12 @@ private fun AccentSwatch(
         contentAlignment = Alignment.Center
     ) {
         if (selected) {
-            Text("✓", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }
@@ -2618,7 +2558,7 @@ private fun NotificationsGroup() {
     val ignoringBattery = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
     SettingsGroupCard(label = "Notifications & background") {
         LinkitCardRow(
-            glyph = "🔋",
+            icon = Icons.Rounded.Bolt,
             title = "Background activity",
             subtitle = if (ignoringBattery) {
                 "Allowed — Linkit keeps receiving while the screen is off."
@@ -2638,10 +2578,10 @@ private fun NotificationsGroup() {
                     )
                 }
             }
-        ) { if (!ignoringBattery) Chevron() }
+        ) { if (!ignoringBattery) RowChevron() }
         LinkitRowDivider()
         LinkitCardRow(
-            glyph = "🔔",
+            icon = Icons.Rounded.Notifications,
             title = "Notification settings",
             subtitle = "Open Android's notification settings for Linkit.",
             accent = accent,
@@ -2653,25 +2593,25 @@ private fun NotificationsGroup() {
                     )
                 }
             }
-        ) { Chevron() }
+        ) { RowChevron() }
     }
 }
 
 @Composable
 private fun AboutCard(version: String) {
     val context = LocalContext.current
-    SettingsSectionLabel("About")
-    SettingsCard {
+    val accent = MaterialTheme.colorScheme.primary
+    SettingsGroupCard(label = "About") {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(44.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
@@ -2686,20 +2626,23 @@ private fun AboutCard(version: String) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     "Linkit",
-                    style = MaterialTheme.typography.titleMedium,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    version,
-                    style = MaterialTheme.typography.bodySmall,
+                    "A private, cloud-free link between your Mac and this phone. $version.",
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
-        SettingsRowDivider()
-        SettingsActionRow(
+        LinkitRowDivider()
+        LinkitCardRow(
+            icon = Icons.Rounded.Link,
             title = "View on GitHub",
+            accent = accent,
             onClick = {
                 runCatching {
                     context.startActivity(
@@ -2707,7 +2650,7 @@ private fun AboutCard(version: String) {
                     )
                 }
             }
-        )
+        ) { RowChevron() }
     }
 }
 
@@ -2823,7 +2766,3 @@ private fun formatRelative(epochMillis: Long): String {
     }
 }
 
-private fun String.firstInitial(): String {
-    val first = trim().firstOrNull { it.isLetterOrDigit() } ?: return "M"
-    return first.uppercase()
-}

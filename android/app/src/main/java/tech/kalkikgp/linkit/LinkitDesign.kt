@@ -14,6 +14,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -24,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,24 +85,27 @@ object LinkitAccents {
 
 /** Accent gradient used by icon tiles and avatars (top-leading → bottom-trailing). */
 fun accentGradient(accent: Color): Brush = Brush.linearGradient(
-    colors = listOf(accent, accent.copy(alpha = 0.6f))
+    colors = listOf(accent, accent.copy(alpha = 0.62f))
 )
 
-/** Accent-tinted rounded glyph tile at the leading edge of a card row (Mac `IconTile`). */
+/**
+ * Accent-tinted rounded icon tile at the leading edge of a card row — the app's signature motif,
+ * matching the Mac's `IconTile` (a monochrome symbol on an accent gradient).
+ */
 @Composable
-fun IconTile(glyph: String, accent: Color, size: Int = 34) {
+fun IconTile(icon: ImageVector, accent: Color, size: Int = 32) {
     Box(
         modifier = Modifier
             .size(size.dp)
-            .clip(RoundedCornerShape((size * 0.26f).dp))
+            .clip(RoundedCornerShape((size * 0.28f).dp))
             .background(accentGradient(accent)),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            glyph,
-            color = Color.White,
-            fontSize = (size * 0.44f).sp,
-            fontWeight = FontWeight.SemiBold
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size((size * 0.56f).dp)
         )
     }
 }
@@ -108,11 +116,11 @@ fun SettingsGroupCard(label: String, content: @Composable ColumnScope.() -> Unit
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             label.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
+            fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            letterSpacing = 0.8.sp,
-            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+            letterSpacing = 0.9.sp,
+            modifier = Modifier.padding(start = 6.dp, bottom = 8.dp)
         )
         Column(
             modifier = Modifier
@@ -131,7 +139,7 @@ fun SettingsGroupCard(label: String, content: @Composable ColumnScope.() -> Unit
 /** A card row with an icon tile, title/subtitle, and an arbitrary trailing slot (Mac `CardRow`). */
 @Composable
 fun LinkitCardRow(
-    glyph: String,
+    icon: ImageVector,
     title: String,
     accent: Color,
     subtitle: String? = null,
@@ -146,21 +154,22 @@ fun LinkitCardRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconTile(glyph = glyph, accent = accent)
+        IconTile(icon = icon, accent = accent)
         Column(
             modifier = Modifier.weight(1f).padding(end = 4.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Text(
                 title,
-                style = MaterialTheme.typography.bodyLarge,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.5f)
             )
             subtitle?.let {
                 Text(
                     it,
-                    style = MaterialTheme.typography.bodySmall,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -172,7 +181,7 @@ fun LinkitCardRow(
 /** A card row whose trailing control is an accent-tinted switch (Mac `ToggleRow`). */
 @Composable
 fun LinkitToggleRow(
-    glyph: String,
+    icon: ImageVector,
     title: String,
     subtitle: String,
     accent: Color,
@@ -183,7 +192,7 @@ fun LinkitToggleRow(
     // Tapping anywhere on the row flips the switch — the expected touch affordance on a phone,
     // where the switch alone is a small target.
     LinkitCardRow(
-        glyph = glyph,
+        icon = icon,
         title = title,
         subtitle = subtitle,
         accent = accent,
@@ -210,6 +219,71 @@ fun LinkitRowDivider() {
             .fillMaxWidth()
             .padding(start = 56.dp)
             .height(1.dp)
-            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
     )
+}
+
+/**
+ * A trailing chevron rendered as a real vector glyph (not a text "›"), used on tappable rows.
+ */
+@Composable
+fun RowChevron() {
+    Icon(
+        imageVector = Icons.Rounded.ChevronRight,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+        modifier = Modifier.size(20.dp)
+    )
+}
+
+/** Big page title + one-line subtitle, echoing the Mac Settings detail header. */
+@Composable
+fun LinkitLargeHeader(title: String, subtitle: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            title,
+            fontSize = 26.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Text(
+            subtitle,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** Footer strip echoing the Mac Settings window ("Thanks for using Linkit · vX"). */
+@Composable
+fun LinkitFooter(version: String, accent: Color) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.FavoriteBorder,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(13.dp)
+        )
+        Text(
+            "Thanks for using Linkit",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Box(modifier = Modifier.weight(1f))
+        Text(
+            version,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 9.dp, vertical = 3.dp)
+        )
+    }
 }
