@@ -180,7 +180,16 @@ fun LinkitToggleRow(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
-    LinkitCardRow(glyph = glyph, title = title, subtitle = subtitle, accent = accent, enabled = enabled) {
+    // Tapping anywhere on the row flips the switch — the expected touch affordance on a phone,
+    // where the switch alone is a small target.
+    LinkitCardRow(
+        glyph = glyph,
+        title = title,
+        subtitle = subtitle,
+        accent = accent,
+        enabled = enabled,
+        onClick = { onCheckedChange(!checked) }
+    ) {
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,

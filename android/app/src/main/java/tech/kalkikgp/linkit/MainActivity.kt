@@ -1631,6 +1631,8 @@ private fun PhoneControlsSection(
                 append(if (status.canWatchCalls) "On" else "Off")
                 append("  ·  Direct call: ")
                 append(if (status.canPlaceDirectCalls) "On" else "Dialer")
+                append("  ·  Controls: ")
+                append(if (status.canControlCalls) "On" else "Off")
                 append("  ·  Caller ID: ")
                 append(
                     when {
