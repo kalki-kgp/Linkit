@@ -284,11 +284,7 @@ data class LinkitUiState(
     val clipboardSyncEnabled: Boolean = true,
     val localFeatures: List<FeatureStatus> = emptyList(),
     val macFeatures: List<FeatureStatus> = emptyList()
-) {
-    /** Local features the user wants on but that are currently broken (missing permission, etc). */
-    val featuresNeedingAttention: List<FeatureStatus>
-        get() = localFeatures.filter { it.state == FeatureState.ATTENTION }
-}
+)
 
 class LinkitViewModel(application: Application) : AndroidViewModel(application) {
     private val client = LinkitClient()
@@ -1156,15 +1152,6 @@ private enum class TopTab { HOME, ACTIVITY, SETTINGS }
 /** The Settings tab is a hub that pushes one of these focused detail screens. */
 private enum class SettingsRoute { HUB, DEVICE, CLIPBOARD, NOTIFICATIONS, PHONE, APPEARANCE, BACKGROUND, UPDATES, ABOUT }
 
-/** Where the "needs attention" banner and each broken feature deep-link to. */
-private fun settingsRouteForFeature(id: String): SettingsRoute = when (id) {
-    AndroidFeatureStatus.ID_NOTIFICATION_MIRROR -> SettingsRoute.NOTIFICATIONS
-    AndroidFeatureStatus.ID_PHONE_CONTROL -> SettingsRoute.PHONE
-    AndroidFeatureStatus.ID_BATTERY -> SettingsRoute.BACKGROUND
-    AndroidFeatureStatus.ID_CLIPBOARD_SYNC -> SettingsRoute.CLIPBOARD
-    else -> SettingsRoute.DEVICE
-}
-
 @Composable
 private fun LinkitScreen(
     viewModel: LinkitViewModel,
@@ -1256,8 +1243,8 @@ private fun LinkitScreen(
                     onOpenLink = viewModel::openClipboardLinkOnMac,
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
                     onReconnect = viewModel::discoverAndReconnect,
-                    onOpenPhone = { openSettingsDetail(SettingsRoute.PHONE) },
-                    onOpenAttention = { openSettingsDetail(SettingsRoute.DEVICE) }
+                    onReconnectNotificationListener = viewModel::reconnectNotificationListener,
+                    onEnablePhoneControls = onEnablePhoneControls
                 )
                 TopTab.ACTIVITY -> ActivityTab(history = history, onClear = viewModel::clearHistory)
                 TopTab.SETTINGS -> SettingsTab(
@@ -1275,7 +1262,6 @@ private fun LinkitScreen(
                     onSetAppearance = viewModel::setAppearance,
                     onCheckUpdate = viewModel::checkForAndroidUpdate,
                     onInstallUpdate = viewModel::installAndroidUpdate,
-                    onReconnectNotificationListener = viewModel::reconnectNotificationListener,
                     onEnablePhoneControls = onEnablePhoneControls,
                     onSetAccent = viewModel::setAccentColor
                 )
@@ -1410,9 +1396,10 @@ private fun HomeTab(
     onOpenLink: () -> Unit,
     onToggleClipboardSync: () -> Unit,
     onReconnect: () -> Unit,
-    onOpenPhone: () -> Unit,
-    onOpenAttention: () -> Unit
+    onReconnectNotificationListener: () -> Unit,
+    onEnablePhoneControls: () -> Unit
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1423,10 +1410,30 @@ private fun HomeTab(
         HomeWordmark()
         Spacer(modifier = Modifier.height(4.dp))
         DeviceCard(state = state, onReconnect = onReconnect)
-        val attention = state.featuresNeedingAttention
-        if (attention.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
-            FeatureAttentionBanner(features = attention, onOpen = onOpenAttention)
+        Spacer(modifier = Modifier.height(20.dp))
+        // Feature health lives on Home so a broken feature is visible — and fixable —
+        // without digging into Settings. Attention rows show a red dot and a "Fix" action.
+        SettingsGroupCard(label = "Feature status") {
+            FeatureStatusList(
+                phoneName = "This phone",
+                features = state.localFeatures,
+                onResolve = { feature ->
+                    resolveFeatureAction(
+                        context = context,
+                        feature = feature,
+                        onReconnectNotificationListener = onReconnectNotificationListener,
+                        onEnablePhoneControls = onEnablePhoneControls
+                    )
+                }
+            )
+            if (state.macFeatures.isNotEmpty()) {
+                LinkitRowDivider()
+                FeatureStatusList(
+                    phoneName = state.trustedMac?.deviceName ?: "Your Mac",
+                    features = state.macFeatures,
+                    onResolve = null
+                )
+            }
         }
         Spacer(modifier = Modifier.height(20.dp))
         ActionGrid(
@@ -1441,8 +1448,6 @@ private fun HomeTab(
             Spacer(modifier = Modifier.height(16.dp))
             ErrorBanner(it)
         }
-        Spacer(modifier = Modifier.height(20.dp))
-        HomePhoneRow(status = state.phoneControlStatus, onOpen = onOpenPhone)
     }
 }
 
@@ -1473,34 +1478,6 @@ private fun HomeWordmark() {
                 }
             }
         )
-    }
-}
-
-/** Compact phone-control status on Home; taps through to Settings → Phone. */
-@Composable
-private fun HomePhoneRow(status: PhoneControlPermissionStatus, onOpen: () -> Unit) {
-    val accent = MaterialTheme.colorScheme.primary
-    val allGranted = status.canWatchCalls && status.canPlaceDirectCalls &&
-        status.canControlCalls && status.canSeeNumbers && status.canResolveContacts
-    SettingsGroupCard(label = "Phone") {
-        LinkitCardRow(
-            icon = Icons.Rounded.Call,
-            title = "Call mirroring",
-            subtitle = if (allGranted) "Control your calls from the Mac." else "Some permissions are needed.",
-            accent = accent,
-            onClick = onOpen
-        ) {
-            if (allGranted) {
-                Text(
-                    "On",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.tertiary
-                )
-            } else {
-                RowChevron()
-            }
-        }
     }
 }
 
@@ -2109,49 +2086,6 @@ private fun TransferBar(state: LinkitUiState, onCancel: () -> Unit) {
 }
 
 @Composable
-private fun FeatureAttentionBanner(features: List<FeatureStatus>, onOpen: () -> Unit) {
-    val message = if (features.size == 1) {
-        "${features.first().title} needs attention"
-    } else {
-        "${features.size} features need attention"
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)), RoundedCornerShape(14.dp))
-            .clickable(onClick = onOpen)
-            .padding(14.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.error)
-        )
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                message,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                features.first().detail,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        RowChevron()
-    }
-}
-
-@Composable
 private fun ErrorBanner(message: String) {
     Row(
         modifier = Modifier
@@ -2204,7 +2138,6 @@ private fun SettingsTab(
     onSetAppearance: (AppearancePreference) -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
-    onReconnectNotificationListener: () -> Unit,
     onEnablePhoneControls: () -> Unit,
     onSetAccent: (String) -> Unit
 ) {
@@ -2216,9 +2149,7 @@ private fun SettingsTab(
             onReconnect = onReconnect,
             onDisconnect = onDisconnect,
             onRePair = onRePair,
-            onForget = onForget,
-            onReconnectNotificationListener = onReconnectNotificationListener,
-            onEnablePhoneControls = onEnablePhoneControls
+            onForget = onForget
         )
         SettingsRoute.CLIPBOARD -> ClipboardDetail(state, onBackToHub, onToggleClipboardSync)
         SettingsRoute.NOTIFICATIONS -> NotificationsDetail(settings, onBackToHub, onSetNotificationMirror)
@@ -2234,7 +2165,6 @@ private fun SettingsTab(
 @Composable
 private fun SettingsHub(state: LinkitUiState, onOpenDetail: (SettingsRoute) -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
-    val attention = state.featuresNeedingAttention.size
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2251,7 +2181,6 @@ private fun SettingsHub(state: LinkitUiState, onOpenDetail: (SettingsRoute) -> U
                 title = "Device",
                 subtitle = if (state.isConnectedToMac) "Connected · ${state.trustedMac?.deviceName ?: "Mac"}" else "Paired, offline",
                 accent = accent,
-                badge = attention,
                 onClick = { onOpenDetail(SettingsRoute.DEVICE) }
             )
         }
@@ -2345,15 +2274,12 @@ private fun DeviceDetail(
     onReconnect: () -> Unit,
     onDisconnect: () -> Unit,
     onRePair: () -> Unit,
-    onForget: () -> Unit,
-    onReconnectNotificationListener: () -> Unit,
-    onEnablePhoneControls: () -> Unit
+    onForget: () -> Unit
 ) {
-    val context = LocalContext.current
     val accent = MaterialTheme.colorScheme.primary
     SettingsDetailScaffold(
         title = "Device",
-        subtitle = "Your paired Mac and cross-device feature health.",
+        subtitle = "Your paired Mac and connection.",
         onBack = onBack
     ) {
         SettingsGroupCard(label = "Connection") {
@@ -2381,29 +2307,6 @@ private fun DeviceDetail(
             LinkitRowDivider()
             LinkitCardRow(icon = Icons.Rounded.DeleteOutline, title = "Forget this Mac", accent = accent, onClick = onForget) {
                 Text("Forget", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
-            }
-        }
-
-        SettingsGroupCard(label = "Feature status") {
-            FeatureStatusList(
-                phoneName = "This phone",
-                features = state.localFeatures,
-                onResolve = { feature ->
-                    resolveFeatureAction(
-                        context = context,
-                        feature = feature,
-                        onReconnectNotificationListener = onReconnectNotificationListener,
-                        onEnablePhoneControls = onEnablePhoneControls
-                    )
-                }
-            )
-            if (state.macFeatures.isNotEmpty()) {
-                LinkitRowDivider()
-                FeatureStatusList(
-                    phoneName = state.trustedMac?.deviceName ?: "Your Mac",
-                    features = state.macFeatures,
-                    onResolve = null
-                )
             }
         }
     }
