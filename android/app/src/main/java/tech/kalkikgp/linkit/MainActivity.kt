@@ -376,6 +376,11 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             // Recompute local feature health whenever a persisted toggle changes.
             preferences.settings.collect { refreshFeatureStatus() }
         }
+        viewModelScope.launch {
+            // The notification listener binds/unbinds asynchronously (e.g. after a forced rebind);
+            // recompute so the dashboard flips off "On, but not receiving" as soon as it connects.
+            NotificationMirrorState.connected.collect { refreshFeatureStatus() }
+        }
         if (preferences.settings.value.clipboardSyncEnabled) {
             startClipboardSync()
         }

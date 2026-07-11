@@ -160,8 +160,12 @@ class LinkitClient(
         )
         val response = executeJson(request)
         // The registration response carries the Mac's own feature health back down, so the phone
-        // can show the same two-sided status snapshot the Mac shows.
-        MacPresence.setMacFeatures(featureStatusesFromJson(response.optJSONArray("features")))
+        // can show the same two-sided status snapshot the Mac shows. Only overwrite when the key
+        // is present — an older Mac that predates the exchange omits it (don't wipe on those),
+        // but a current Mac sending an explicit empty array clears stale state.
+        if (response.has("features")) {
+            MacPresence.setMacFeatures(featureStatusesFromJson(response.optJSONArray("features")))
+        }
         MacPresence.touch()
         DebugTelemetry.recordEvent("client", "registerReceiver ok ${mac.ip}:${mac.port}")
     }

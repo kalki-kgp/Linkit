@@ -10,6 +10,8 @@ import android.service.notification.StatusBarNotification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -131,17 +133,20 @@ class NotificationMirrorService : NotificationListenerService() {
  * whether the listener is *actually* connected and able to receive notifications right now.
  */
 object NotificationMirrorState {
-    @Volatile
-    var listenerConnected: Boolean = false
-        private set
+    // Exposed as a flow so the UI can recompute feature health the moment the listener binds
+    // (e.g. after a forced rebind) instead of waiting for the next resume/presence tick.
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> = _connected
+
+    val listenerConnected: Boolean get() = _connected.value
 
     @Volatile
     var lastConnectedAtMillis: Long = 0L
         private set
 
     fun setConnected(connected: Boolean) {
-        listenerConnected = connected
         if (connected) lastConnectedAtMillis = System.currentTimeMillis()
+        _connected.value = connected
     }
 }
 
