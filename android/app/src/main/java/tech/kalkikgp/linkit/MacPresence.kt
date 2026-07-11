@@ -16,7 +16,7 @@ object MacPresence {
     }
 
     fun setMacFeatures(features: List<FeatureStatus>) {
-        if (features.isNotEmpty()) _macFeatures.value = features
+        _macFeatures.value = features
     }
 
     fun reset() {

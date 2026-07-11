@@ -1594,11 +1594,14 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func macFeatureStatuses() -> [FeatureStatus] {
         var features: [FeatureStatus] = []
 
+        // Snapshot once: the HTTP server calls this off-main while Settings can toggle the pref on
+        // the main thread, so reading it twice could split into an `on` state with an `off` detail.
+        let clipboardEnabled = clipboardSyncEnabled
         features.append(FeatureStatus(
             id: MacFeatureID.clipboardSync,
             title: "Clipboard sync",
-            state: clipboardSyncEnabled ? .on : .off,
-            detail: clipboardSyncEnabled
+            state: clipboardEnabled ? .on : .off,
+            detail: clipboardEnabled
                 ? "Copying Mac clipboard text to your phone."
                 : "Turn on to copy Mac clipboard text to your phone."
         ))
