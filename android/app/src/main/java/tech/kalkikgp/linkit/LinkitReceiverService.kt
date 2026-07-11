@@ -34,8 +34,12 @@ class LinkitReceiverService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        running = true
         DebugTelemetry.install(applicationContext)
         DebugTelemetry.serviceStarted("LinkitReceiverService")
+        // A reboot restarts this service (START_STICKY) but the notification listener may not
+        // rebind on its own; nudge it here so mirroring recovers without user action.
+        NotificationAccess.ensureListenerBound(applicationContext)
         ensureChannel()
         startForegroundWithNotification(currentStatus("Listening for Mac drops"))
         acquireWifiLock()
@@ -68,6 +72,7 @@ class LinkitReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         phoneCallBridge?.stop()
         phoneCallBridge = null
         presenceJob?.cancel()
@@ -172,13 +177,18 @@ class LinkitReceiverService : Service() {
 
     private suspend fun refreshMacRegistration(identityStore: IdentityStore, client: LinkitClient, source: String) {
         val mac = identityStore.trustedMac() ?: return
+        val features = AndroidFeatureStatus.local(
+            applicationContext,
+            LinkitPreferences.get(applicationContext).settings.value
+        )
         val registered = runCatching {
             client.verifyMacEndpoint(mac)
             client.registerReceiver(
                 mac = mac,
                 identityStore = identityStore,
                 receivePort = AndroidDropReceiver.PORT,
-                batteryPercent = BatteryStatus.percent(applicationContext)
+                batteryPercent = BatteryStatus.percent(applicationContext),
+                features = features
             )
         }.onSuccess {
             DebugTelemetry.recordEvent("presence", "receiver registration refreshed ($source)")
@@ -200,7 +210,8 @@ class LinkitReceiverService : Service() {
                 mac = rediscovered,
                 identityStore = identityStore,
                 receivePort = AndroidDropReceiver.PORT,
-                batteryPercent = BatteryStatus.percent(applicationContext)
+                batteryPercent = BatteryStatus.percent(applicationContext),
+                features = features
             )
         }.onSuccess {
             updateNotification("Listening for Mac drops")
@@ -276,6 +287,11 @@ class LinkitReceiverService : Service() {
         private const val CHANNEL_ID = "linkit_receiver"
         private const val NOTIFICATION_ID = 4271
         const val ACTION_STOP = "tech.kalkikgp.linkit.action.STOP_RECEIVER"
+
+        /** Live flag so feature-status can report whether the receiver FGS is actually running. */
+        @Volatile
+        var running: Boolean = false
+            private set
 
         fun start(context: Context) {
             val intent = Intent(context, LinkitReceiverService::class.java)

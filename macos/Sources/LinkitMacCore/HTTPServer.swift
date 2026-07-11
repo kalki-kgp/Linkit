@@ -38,7 +38,8 @@ public final class LinkitReceiverApp {
 
     public init(
         configuration: ReceiverConfiguration = ReceiverConfiguration(),
-        bluetoothAddressProvider: @escaping () -> String? = { nil }
+        bluetoothAddressProvider: @escaping () -> String? = { nil },
+        localFeaturesProvider: @escaping () -> [FeatureStatus] = { [] }
     ) throws {
         self.configuration = configuration
         self.devToken = try LinkitRandom.token()
@@ -71,7 +72,8 @@ public final class LinkitReceiverApp {
             store: store,
             history: history,
             logger: logger,
-            bluetoothAddressProvider: bluetoothAddressProvider
+            bluetoothAddressProvider: bluetoothAddressProvider,
+            localFeaturesProvider: localFeaturesProvider
         )
     }
 
@@ -123,7 +125,7 @@ public final class LinkitReceiverApp {
             pairingSecret: trusted.pairingSecret
         )
         let status = try outgoingClient.status(of: target)
-        return connections.refreshStatus(deviceId: deviceId, batteryPercent: status.batteryPercent) ?? connected
+        return connections.refreshStatus(deviceId: deviceId, batteryPercent: status.batteryPercent, features: status.features) ?? connected
     }
 
     public func forgetDevice(_ deviceId: String) throws {
@@ -185,7 +187,8 @@ public final class LinkitReceiverApp {
                 device: candidate,
                 host: host,
                 receivePort: port,
-                batteryPercent: status.batteryPercent
+                batteryPercent: status.batteryPercent,
+                features: status.features
             )
             logger.info("revived Android \(candidate.deviceId) at \(host):\(port) for outgoing send")
             return candidate
@@ -216,6 +219,7 @@ final class HTTPServer {
     private let history: TransferHistoryStore
     private let logger: LinkitLogger
     private let bluetoothAddressProvider: () -> String?
+    private let localFeaturesProvider: () -> [FeatureStatus]
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -236,7 +240,8 @@ final class HTTPServer {
         store: TransferStore,
         history: TransferHistoryStore,
         logger: LinkitLogger,
-        bluetoothAddressProvider: @escaping () -> String? = { nil }
+        bluetoothAddressProvider: @escaping () -> String? = { nil },
+        localFeaturesProvider: @escaping () -> [FeatureStatus] = { [] }
     ) {
         self.port = port
         self.token = token
@@ -250,6 +255,7 @@ final class HTTPServer {
         self.history = history
         self.logger = logger
         self.bluetoothAddressProvider = bluetoothAddressProvider
+        self.localFeaturesProvider = localFeaturesProvider
     }
 
     func run() throws {
@@ -383,7 +389,8 @@ final class HTTPServer {
                 device: device,
                 host: remoteHost,
                 receivePort: update.receivePort,
-                batteryPercent: update.batteryPercent
+                batteryPercent: update.batteryPercent,
+                features: update.features
             )
             trustStore.updateEndpoint(deviceId: deviceId, host: remoteHost, receivePort: update.receivePort)
             return jsonResponse(status: 200, body: connectionResponse(connected, status: "connected"))
@@ -406,7 +413,8 @@ final class HTTPServer {
                     receivePort: nil,
                     batteryPercent: nil,
                     connectedAt: nil,
-                    lastSeenAt: nil
+                    lastSeenAt: nil,
+                    features: nil
                 )
             )
         }
@@ -865,7 +873,8 @@ final class HTTPServer {
             receivePort: connected.receivePort,
             batteryPercent: connected.batteryPercent,
             connectedAt: connected.connectedAt,
-            lastSeenAt: connected.lastSeenAt
+            lastSeenAt: connected.lastSeenAt,
+            features: localFeaturesProvider()
         )
     }
 

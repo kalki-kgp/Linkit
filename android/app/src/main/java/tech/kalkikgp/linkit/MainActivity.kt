@@ -134,6 +134,7 @@ class MainActivity : ComponentActivity() {
         DebugTelemetry.install(applicationContext)
         consumeIncomingShareIntent(intent)
         requestNotificationPermissionIfNeeded()
+        NotificationAccess.ensureListenerBound(applicationContext)
         if (IdentityStore(applicationContext).trustedMac() != null) {
             LinkitReceiverService.start(applicationContext)
             linkitViewModel.discoverAndReconnect()
@@ -194,6 +195,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         linkitViewModel.refreshPhoneControlStatus()
+        linkitViewModel.refreshFeatureStatus()
+        NotificationAccess.ensureListenerBound(applicationContext)
         if (IdentityStore(applicationContext).trustedMac() != null) {
             linkitViewModel.discoverAndReconnect(force = true)
         }
@@ -241,8 +244,14 @@ data class LinkitUiState(
     val savedPath: String? = null,
     val tokenRejected: Boolean = false,
     val networkHint: String? = null,
-    val clipboardSyncEnabled: Boolean = true
-)
+    val clipboardSyncEnabled: Boolean = true,
+    val localFeatures: List<FeatureStatus> = emptyList(),
+    val macFeatures: List<FeatureStatus> = emptyList()
+) {
+    /** Local features the user wants on but that are currently broken (missing permission, etc). */
+    val featuresNeedingAttention: List<FeatureStatus>
+        get() = localFeatures.filter { it.state == FeatureState.ATTENTION }
+}
 
 class LinkitViewModel(application: Application) : AndroidViewModel(application) {
     private val client = LinkitClient()
@@ -267,7 +276,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             },
             currentAndroidVersion = appUpdater.currentVersionLabel(),
             phoneControlStatus = PhonePermissions.status(application),
-            clipboardSyncEnabled = preferences.settings.value.clipboardSyncEnabled
+            clipboardSyncEnabled = preferences.settings.value.clipboardSyncEnabled,
+            localFeatures = AndroidFeatureStatus.local(application, preferences.settings.value)
         )
     )
     val uiState: StateFlow<LinkitUiState> = _uiState
@@ -335,7 +345,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                                 mac = trustedMac,
                                 identityStore = identityStore,
                                 receivePort = AndroidDropReceiver.PORT,
-                                batteryPercent = BatteryStatus.percent(getApplication())
+                                batteryPercent = BatteryStatus.percent(getApplication()),
+                                features = localFeatures()
                             )
                         }.isSuccess
                     } == true
@@ -354,6 +365,15 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+        viewModelScope.launch {
+            MacPresence.macFeatures.collect { features ->
+                _uiState.update { it.copy(macFeatures = features) }
+            }
+        }
+        viewModelScope.launch {
+            // Recompute local feature health whenever a persisted toggle changes.
+            preferences.settings.collect { refreshFeatureStatus() }
+        }
         if (preferences.settings.value.clipboardSyncEnabled) {
             startClipboardSync()
         }
@@ -361,6 +381,19 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setAppearance(value: AppearancePreference) {
         preferences.setAppearance(value)
+    }
+
+    /** Recompute this phone's live feature health (permissions, listener bind state, FGS). */
+    fun refreshFeatureStatus() {
+        _uiState.update {
+            it.copy(localFeatures = AndroidFeatureStatus.local(getApplication(), preferences.settings.value))
+        }
+    }
+
+    /** Force the OS to rebind the notification listener when it silently dropped (e.g. reboot). */
+    fun reconnectNotificationListener() {
+        NotificationAccess.ensureListenerBound(getApplication())
+        refreshFeatureStatus()
     }
 
     override fun onCleared() {
@@ -371,7 +404,12 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun refreshPhoneControlStatus() {
-        _uiState.update { it.copy(phoneControlStatus = PhonePermissions.status(getApplication())) }
+        _uiState.update {
+            it.copy(
+                phoneControlStatus = PhonePermissions.status(getApplication()),
+                localFeatures = AndroidFeatureStatus.local(getApplication(), preferences.settings.value)
+            )
+        }
     }
 
     private fun startNetworkMonitor() {
@@ -818,9 +856,13 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setNotificationMirrorEnabled(enabled: Boolean) {
         preferences.setNotificationMirrorEnabled(enabled)
+        // Turning it on should also recover a listener the OS may have dropped, so mirroring
+        // actually resumes instead of just flipping a toggle over a dead listener.
+        if (enabled) NotificationAccess.ensureListenerBound(getApplication())
         _uiState.update {
             it.copy(status = if (enabled) "Notification mirroring on" else "Notification mirroring off")
         }
+        refreshFeatureStatus()
     }
 
     private fun startClipboardSync() {
@@ -879,6 +921,9 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun localFeatures(): List<FeatureStatus> =
+        AndroidFeatureStatus.local(getApplication(), preferences.settings.value)
+
     private fun registerAndroidReceiver(mac: TrustedMac) {
         LinkitReceiverService.start(getApplication())
         viewModelScope.launch {
@@ -888,7 +933,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                     mac = mac,
                     identityStore = identityStore,
                     receivePort = AndroidDropReceiver.PORT,
-                    batteryPercent = BatteryStatus.percent(getApplication())
+                    batteryPercent = BatteryStatus.percent(getApplication()),
+                    features = localFeatures()
                 )
             }.onSuccess {
                 _uiState.update { state ->
@@ -1127,7 +1173,9 @@ private fun LinkitScreen(
                     onSetNotificationMirror = viewModel::setNotificationMirrorEnabled,
                     onSetAppearance = viewModel::setAppearance,
                     onCheckUpdate = viewModel::checkForAndroidUpdate,
-                    onInstallUpdate = viewModel::installAndroidUpdate
+                    onInstallUpdate = viewModel::installAndroidUpdate,
+                    onReconnectNotificationListener = viewModel::reconnectNotificationListener,
+                    onEnablePhoneControls = onEnablePhoneControls
                 )
             } else {
                 HomeScreen(
@@ -1258,6 +1306,11 @@ private fun HomeScreen(
         TopBar(onOpenSettings = onOpenSettings)
         Spacer(modifier = Modifier.height(4.dp))
         DeviceCard(state = state, onReconnect = onReconnect)
+        val attention = state.featuresNeedingAttention
+        if (attention.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            FeatureAttentionBanner(features = attention, onOpen = onOpenSettings)
+        }
         Spacer(modifier = Modifier.height(20.dp))
         ActionGrid(
             enabled = state.isConnectedToMac,
@@ -1961,6 +2014,53 @@ private fun TransferBar(state: LinkitUiState, onCancel: () -> Unit) {
 }
 
 @Composable
+private fun FeatureAttentionBanner(features: List<FeatureStatus>, onOpen: () -> Unit) {
+    val message = if (features.size == 1) {
+        "${features.first().title} needs attention"
+    } else {
+        "${features.size} features need attention"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)), RoundedCornerShape(14.dp))
+            .clickable(onClick = onOpen)
+            .padding(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.error)
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                message,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                features.first().detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            "›",
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+    }
+}
+
+@Composable
 private fun ErrorBanner(message: String) {
     Row(
         modifier = Modifier
@@ -2014,8 +2114,11 @@ private fun SettingsScreen(
     onSetNotificationMirror: (Boolean) -> Unit,
     onSetAppearance: (AppearancePreference) -> Unit,
     onCheckUpdate: () -> Unit,
-    onInstallUpdate: () -> Unit
+    onInstallUpdate: () -> Unit,
+    onReconnectNotificationListener: () -> Unit,
+    onEnablePhoneControls: () -> Unit
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2025,6 +2128,31 @@ private fun SettingsScreen(
     ) {
         SettingsTopBar(onBack = onBack)
         Spacer(modifier = Modifier.height(8.dp))
+
+        SettingsSectionLabel("Feature status")
+        SettingsCard {
+            FeatureStatusList(
+                phoneName = "This phone",
+                features = state.localFeatures,
+                onResolve = { feature ->
+                    resolveFeatureAction(
+                        context = context,
+                        feature = feature,
+                        onReconnectNotificationListener = onReconnectNotificationListener,
+                        onEnablePhoneControls = onEnablePhoneControls
+                    )
+                }
+            )
+            if (state.macFeatures.isNotEmpty()) {
+                SettingsRowDivider()
+                FeatureStatusList(
+                    phoneName = state.trustedMac?.deviceName ?: "Your Mac",
+                    features = state.macFeatures,
+                    onResolve = null
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(20.dp))
 
         SettingsSectionLabel("Connection")
         SettingsCard {
@@ -2060,7 +2188,6 @@ private fun SettingsScreen(
         }
         Spacer(modifier = Modifier.height(20.dp))
 
-        val context = LocalContext.current
         var accessGranted by remember { mutableStateOf(NotificationAccess.isGranted(context)) }
         var showAccessHelp by remember { mutableStateOf(false) }
         val lifecycleOwner = LocalLifecycleOwner.current
@@ -2405,6 +2532,104 @@ private fun AppearanceSelector(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun FeatureStatusList(
+    phoneName: String,
+    features: List<FeatureStatus>,
+    onResolve: ((FeatureStatus) -> Unit)?
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            phoneName,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 16.dp, top = 14.dp, bottom = 4.dp)
+        )
+        features.forEachIndexed { index, feature ->
+            FeatureStatusRow(feature = feature, onResolve = onResolve)
+        }
+    }
+}
+
+@Composable
+private fun FeatureStatusRow(
+    feature: FeatureStatus,
+    onResolve: ((FeatureStatus) -> Unit)?
+) {
+    val dotColor = when (feature.state) {
+        FeatureState.ON -> MaterialTheme.colorScheme.tertiary
+        FeatureState.ATTENTION -> MaterialTheme.colorScheme.error
+        FeatureState.OFF -> MaterialTheme.colorScheme.outline
+        FeatureState.UNSUPPORTED -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    val actionable = feature.state == FeatureState.ATTENTION && onResolve != null
+    val base = Modifier.fillMaxWidth()
+    val interactive = if (actionable) base.clickable { onResolve?.invoke(feature) } else base
+    Row(
+        modifier = interactive.padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                feature.title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                feature.detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (actionable) {
+            Text(
+                "Fix",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+/** Routes an attention feature to the OS setting / action that re-enables it. */
+private fun resolveFeatureAction(
+    context: Context,
+    feature: FeatureStatus,
+    onReconnectNotificationListener: () -> Unit,
+    onEnablePhoneControls: () -> Unit
+) {
+    when (feature.id) {
+        AndroidFeatureStatus.ID_NOTIFICATION_MIRROR -> {
+            onReconnectNotificationListener()
+            if (!NotificationAccess.isGranted(context)) {
+                runCatching { context.startActivity(NotificationAccess.settingsIntent()) }
+            }
+        }
+        AndroidFeatureStatus.ID_PHONE_CONTROL -> onEnablePhoneControls()
+        AndroidFeatureStatus.ID_BATTERY -> runCatching {
+            @Suppress("BatteryLife")
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:${context.packageName}")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        AndroidFeatureStatus.ID_RECEIVER -> LinkitReceiverService.start(context)
+        else -> Unit
     }
 }
 
