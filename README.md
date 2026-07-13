@@ -44,6 +44,10 @@ If you live in both ecosystems — Android in your pocket, Mac on your desk — 
 - Incoming calls can show a Mac prompt with caller number and contact name when Android grants call log / contacts access.
 - Call audio stays on the phone — normal apps cannot forward cellular call audio over the LAN.
 
+**Notification mirroring**
+- Optionally mirror ordinary phone notifications to the Mac. Linkit skips its own, foreground-service, ongoing, and group-summary notifications.
+- Android requires the system's notification-listener permission. Notification title, text, and source-app name travel only to the paired Mac over the encrypted local channel.
+
 **Clipboard caveat:** Android 10+ limits clipboard reads to focused apps and input methods. Automatic Android → Mac clipboard sync only works while Linkit is open/focused; background copies from other Android apps need the Linkit share sheet or the explicit **Send Clipboard** button. Mac → Android clipboard sync can run from the Mac menu-bar app.
 
 **Reconnect after network changes** — when Wi-Fi or hotspot is toggled, both apps refresh presence without re-pairing. Android rediscovers the paired Mac by name over Bonjour, verifies it with signed identity proof, and re-registers its receiver — including from the background foreground service and while the UI shows paired-but-offline. macOS persists the last-known Android endpoint, probes on network path changes, and can revive the peer when you send. No re-scanning the QR.
@@ -84,7 +88,7 @@ You can pair on home Wi-Fi, office Wi-Fi, a coffee shop hotspot, or your phone's
 
 ## What's in the box
 
-**macOS app** — menu-bar app. Click for paired devices, pairing QR, recent transfers, drop folder, phone controls, optional call-audio setup, in-app update check, and diagnostics. The icon animates to reflect pairing, transfer, and connection state.
+**macOS app** — menu-bar app. Click for paired devices, pairing QR, recent transfers, drop folder, phone controls, mirrored notifications, in-app update check, and diagnostics. The icon animates to reflect pairing, transfer, and connection state.
 
 **Android app** — Consumer-grade Compose UI: device hero card, action grid (send file, clipboard, link, sync, reconnect), recent activity, phone-permission status, and a quiet background receiver so the Mac can push files or signed actions at any time. The receiver notification carries **Send Clipboard** and **Open Link** action buttons so you can hand off without opening the app. A hidden debug panel (tap the **Linkit** wordmark seven times) shows process CPU, per-UID network bytes, foreground-service uptime, battery delta, reconnect/discovery events, and a log ring buffer.
 
@@ -107,7 +111,7 @@ Some of these may come later. The first version is about making one phone and on
 
 ## Status
 
-Open source under the **[GPLv3](LICENSE)**. **Latest release: [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/latest)** (June 2026) — a signed Android APK and a macOS app (ad-hoc signed, **not** Apple-notarized — see [install notes](docs/SETUP.md#installing-the-macos-app)) on GitHub Releases, with in-app updaters on both platforms.
+Open source under the **[GPLv3](LICENSE)**. **Latest release: [v0.9.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.9.1)** (July 2026) — a signed Android APK and a macOS app (ad-hoc signed, **not** Apple-notarized — see [install notes](docs/SETUP.md#installing-the-macos-app)) on GitHub Releases, with in-app updaters on both platforms.
 
 For the technical feature snapshot, see [`docs/current-state.md`](docs/current-state.md).
 

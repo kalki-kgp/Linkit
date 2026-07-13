@@ -38,8 +38,9 @@ commands or files.
 **end-to-end encrypted**, keyed from a 32-byte secret exchanged in the pairing QR
 (which travels screen-to-camera, never over the network):
 
-- **Control actions** — clipboard text, plain text, links, and phone control
-  (numbers, contact names), both directions — with **AES-256-GCM** under an
+- **Control actions** — clipboard text, plain text, links, phone control
+  (numbers, contact names), and optional mirrored notifications (source app,
+  title, text), both directions — with **AES-256-GCM** under an
   HKDF-derived message key.
 - **File-transfer contents** with **AES-256-CTR** under a per-transfer HKDF key.
   Integrity comes from the signed upload slot plus the end-to-end SHA-256 the
@@ -58,6 +59,12 @@ Apple-notarized** (notarization needs a paid Apple account). Verify what you run
 **building from source** (see `docs/SETUP.md`) if you don't want to trust the
 prebuilt binary. The Android APK is signed with the project's release key; the in-app
 updater verifies the downloaded artifact's SHA-256 over GitHub's HTTPS.
+
+**Android backup.** The paired-Mac record and pairing secret live in
+SharedPreferences, so the app sets `allowBackup="false"` — Android Auto Backup never
+copies that state into a device or cloud backup. The signing key is device-bound in
+the Android Keystore and is never backed up regardless, so a restored install cannot
+inherit the trust relationship and must re-pair from a fresh QR scan.
 
 ## Out of scope
 

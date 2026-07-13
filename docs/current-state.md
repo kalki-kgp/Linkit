@@ -1,23 +1,17 @@
 # Linkit Current State
 
-Last updated: 2026-06-29  
-**Release:** [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.6.1)
+Last updated: 2026-07-13
+**Release:** [v0.9.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.9.1)
 
 Linkit is a private Android + macOS local device link for one phone and one Mac. It moves files, clipboard text, plain text, links, and phone-call control directly over the local network or phone hotspot. There is no account, cloud relay, or internet data path.
 
-> **Unreleased (`feat/mac-calling` branch):** **Bluetooth Hands-Free call audio removed** on both platforms — it could never deliver Mac-side audio on Apple Silicon (SCO unsupported), so all call-audio routing UI/logic is gone (placing/answering Android calls from the Mac still works; audio stays on the phone). Mac call picker now surfaces the Android phone-permission precondition. The Mac transfer notification is a **free-floating panel** (consistent position over full-screen apps) you can **drag the received file out of**, with a manual close button. Android moved **Phone controls** and **Notifications & background** out of Settings onto the Home screen. New Mac **Appearance** settings: customizable accent color (preset swatches + custom picker) replacing the fixed amber scheme. The Mac **Settings window was redesigned** into an accent-driven liquid-glass layout (custom sidebar + card rows, translucent `NSVisualEffectView` materials extending under the title bar). **Recent transfers are now draggable everywhere** — both the Settings → Transfers list and the menu-bar popover RECENT list are file drag sources (click still opens). On Android, **received files in Recent are tappable to open** (resolved via the stored content URI). The Mac now **posts a notification when a call starts on the phone** (an outgoing/active call the Mac didn't place).  
-> **Unreleased (Android UI port):** the Android app was **restyled to match the Mac app** — accent-driven cards (`LinkitDesign.kt`: `SettingsGroupCard` / `LinkitCardRow` / `LinkitToggleRow` / `IconTile`), an accent-gradient device avatar, Mac-style quick-action tiles + a clipboard-sync toggle row on Home, and a card-language Settings screen. A **user-customizable accent color** (9 preset swatches matching the Mac + a custom `#RRGGBB` field, default `#D16B1F`) is stored in `LinkitPreferences.accentColorHex` and threaded through `LinkitTheme`'s primary, so cards, toggles, tiles, and status dots recolor — mirroring `Preferences.accentColorHex` on the Mac. The app was then **re-architected for wayfinding**: a persistent **bottom-navigation shell** (Home · Activity · Settings) replaces the single-scroll model, and Settings became a **hub of categories that drill into focused detail screens** (mirroring the Mac Settings sidebar) instead of one long page. Material Symbols vector icons throughout (no emoji).  
-> **Unreleased (feature-status work):** both apps now compute and **exchange a per-feature health snapshot** so each device shows the *other* device's self-reported status (one synced source of truth). The Android notification-mirror listener now tracks its real bind state and **force-rebinds after a reboot/update** (`NotificationMirrorState` + `requestRebind`), fixing the "mirroring silently stopped after I restarted" bug — the status now reads "On, but not receiving" and is re-enablable in one tap. Feature health rides the existing exchange (Android → Mac in the `GET /v1/devices/self/status` response and the `POST /v1/devices/self` registration body; Mac → Android in the registration response) — no new routes. Surfaces: Android Settings **Feature status** group + a Home "needs attention" banner; Mac Settings → Diagnostics **Phone status** group + a popover attention row.  
-> **Unreleased (`security/open-source` branch):** wire payloads are now **end-to-end encrypted** — control actions via AES-256-GCM and file contents via AES-256-CTR, keyed from the pairing-QR secret (`LinkitSecretBox` / `LinkitWireCrypto` / `LinkitStreamCipher`, cross-language golden-vector tested, device-validated to 1 GB+). Also: GPLv3 relicense + `CONTRIBUTING`/`SECURITY`/`PRIVACY`; PR CI; Mac HTTP read-timeout + connection cap; ad-hoc Mac codesign; Android Settings screen + theme.  
-> **Recent (v0.6.1):** `MacRediscovery` shared utility; receiver-service rediscovery on failed Mac registration; UI offline retry loop; persisted endpoint sync after background rediscovery.  
-> **Recent (v0.6):** Phone control + caller ID; experimental Bluetooth Hands-Free call audio on Mac; Doze resistance; Mac last-known Android endpoint persistence.  
-> **Earlier:** In-app updaters (v0.4+); bidirectional presence; Bonjour reconnect; consumer Compose UI; debug telemetry; clipboard notification actions; Mac→Android drops; signed pairing and uploads.
+v0.9.1 ships the Android Home feature-status compact list and tap-to-resolve dialog. The earlier v0.9 releases shipped the bottom-navigation Android UI, customizable accent color, live cross-device feature health, and notification-listener rebind recovery. These are release features, not branch-only work.
 
 ## Distribution
 
-- **GitHub Releases** — signed `linkit-release.apk` and `linkit-macos.zip` per tag (`v0.1.0`, `v0.4.0`, `v0.5.0`, `v0.6`, `v0.6.1`, …).
+- **GitHub Releases** — signed `linkit-release.apk` and `linkit-macos.zip` per tag; the current release is v0.9.1.
 - **In-app updaters** — both apps fetch `releases/latest/download/linkit-*-update.json`, verify SHA-256, and install (Android requires user approval; Mac swaps `Linkit.app` and relaunches).
-- **Release CI** — `.github/workflows/release.yml` runs tests, builds both platforms, uploads assets. Use workflow dispatch with explicit `version_code` (must increase; v0.6.1 = build **7**).
+- **CI** — `.github/workflows/ci.yml` runs `./scripts/verify.sh` on pull requests and pushes to `main`. `.github/workflows/release.yml` runs platform tests, builds both platforms, and uploads assets. Use workflow dispatch with an explicit, increasing `version_code` (v0.9.1 = build **18**).
 - Not on Play Store; macOS app is not notarized. Personal sideload / GitHub download only.
 
 ## What Works
@@ -90,7 +84,7 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 - Mac reports: clipboard sync, launch at login, transfer notifications (macOS authorization), and the receiver.
 - The snapshots are **exchanged over the existing presence/registration cadence** (no new endpoints): Android → Mac in the `GET /v1/devices/self/status` response and the `POST /v1/devices/self` registration body; Mac → Android in the registration response. Each app renders both its own and the peer's self-reported health.
 - **Notification-mirror reboot fix:** `NotificationMirrorService` overrides `onListenerConnected/onListenerDisconnected` to track real bind state (`NotificationMirrorState`) and calls `requestRebind`; `NotificationAccess.ensureListenerBound` re-binds a granted-but-dropped listener on app resume, receiver-service start, and when mirroring is toggled on. The OS keeps the permission grant across reboots but does not always rebind the listener — this recovers it without the user re-toggling.
-- Surfaces: Android **Settings → Feature status** (This phone + Your Mac, tap an `attention` row to jump to the OS setting that fixes it) and a Home **needs-attention banner**; Mac **Settings → Diagnostics → Phone status** and a **popover attention row** linking to Diagnostics.
+- Surfaces: Android **Home → Feature status** (a compact list; tap an `attention` row for an explanation and one Fix action) and the relevant Settings detail screens; Mac **Settings → Diagnostics → Phone status** and a **popover attention row** linking to Diagnostics.
 
 ### Reconnect After Network Change
 
@@ -153,6 +147,8 @@ Local builds:
 
 Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gradlew assembleDebug`, release build scripts, `git diff --check`. Release workflow also runs Mac + Android tests before upload.
 
+`scripts/smoke-signed-transfer.sh` is not included in that gate: its plaintext fixture predates encrypted file bodies and currently fails at finalize. It must be upgraded to encrypt the fixture with the pairing secret before it can be trusted as an end-to-end smoke test.
+
 ## Known Limits
 
 - One trusted phone + one Mac is the intended personal-use path.
@@ -171,4 +167,5 @@ Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gra
 - Add WebSocket or event stream for richer live state.
 - Quick Settings tile for **Send Clipboard to Mac** (notification actions already exist).
 - Mirror debug telemetry into the Mac menu-bar diagnostics.
-- Add CI workflow for PR test/build checks (release workflow exists; no separate PR CI yet).
+- Add an instrumented Android-device smoke lane to CI; JVM tests and debug builds do not exercise foreground-service, notification-listener, or OEM battery behavior.
+- Update `smoke-signed-transfer.sh` for encrypted upload bodies, then make it part of the release gate.

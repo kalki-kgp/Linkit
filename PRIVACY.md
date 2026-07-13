@@ -7,8 +7,9 @@ party.**
 
 ## What Linkit does with your data
 
-- **Files, clipboard text, links, phone numbers, and call state** travel directly
-  between the one phone and the one Mac you paired, over your LAN or phone hotspot.
+- **Files, clipboard text, links, phone numbers, call state, and (when enabled)
+  notification title/text/source-app name** travel directly between the one phone
+  and the one Mac you paired, over your LAN or phone hotspot.
 - There is **no cloud relay, no telemetry, and no internet data path.** The author
   cannot see any of it.
 - Received files land in `Downloads/Linkit Drop` on each device. Nothing else is
@@ -18,6 +19,11 @@ party.**
   hardware-backed where the device supports it).
 - The in-app **debug telemetry** panel (Android) is entirely on-device — it is a
   local diagnostics view and transmits nothing.
+
+- **Android Auto Backup is disabled** (`allowBackup="false"`), so the paired-Mac
+  record and its pairing secret are never copied into a device or cloud backup. The
+  Android signing key is device-bound in the Keystore and cannot be restored anyway,
+  so a restored install always re-pairs from a fresh QR scan.
 
 ## In transit
 
@@ -41,6 +47,7 @@ permissions and still use file, clipboard, and link transfer.
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `FOREGROUND_SERVICE_SPECIAL_USE` | Run the receiver/sender so the Mac can reach the phone, with a persistent notification. |
 | `WAKE_LOCK`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Keep transfers alive and resist Doze. The battery-optimization exemption is **optional** and prompted, not forced. |
 | `POST_NOTIFICATIONS` | Show receiver status and transfer/clipboard action notifications. |
+| Notification-listener access | Optional system grant for notification mirroring. When enabled, Linkit forwards ordinary notification title, text, and source-app name to the paired Mac; it skips Linkit's own, ongoing, foreground-service, and group-summary notifications. |
 | `REQUEST_INSTALL_PACKAGES` | Let the in-app updater install a downloaded release APK (with your approval). |
 | `CAMERA` | Scan the Mac's pairing QR code. Used only during pairing; no images are stored or sent. |
 | `READ_PHONE_STATE` | Mirror call state (ringing/active) to your Mac. |

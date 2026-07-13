@@ -8,7 +8,7 @@ A private, cloud-free local device link between **one** Android phone and **one*
 
 The README is product-facing. **`docs/current-state.md`** is the technical feature snapshot (keep it updated when shipping). When behavior and docs disagree, trust the code and update the docs.
 
-**Latest release:** v0.6.1 on GitHub Releases (in-app updaters on both platforms).
+**Latest release:** v0.9.1 on GitHub Releases (in-app updaters on both platforms).
 
 ## Repository layout
 
@@ -44,10 +44,12 @@ Full local verification (both platforms — `swift test`, Mac build, Android uni
 ./scripts/verify.sh
 ```
 
-Smoke the whole signed-transfer stack without a phone:
+Run the current release gate:
 ```sh
-./scripts/smoke-signed-transfer.sh
+./scripts/verify.sh
 ```
+
+`scripts/smoke-signed-transfer.sh` is a stale plaintext fixture and currently fails against encrypted file bodies; update it before treating it as a release check.
 
 Packaging (see `docs/SETUP.md` for in-app-updater manifest URLs):
 ```sh
@@ -92,7 +94,7 @@ Streamed with constant memory and end-to-end SHA-256 verification; the upload sl
 
 ### Notable platform constraints (don't "fix" these — they're OS limits)
 - **Clipboard:** Android 10+ blocks background clipboard reads. Mac→Android clipboard push works anytime; automatic Android→Mac clipboard sync is foreground-only. `ClipboardActionActivity` defers the read to `onWindowFocusChanged(true)` so notification-button copies work.
-- No TLS/mTLS/Noise — transport is plain local HTTP; security comes from the signing layer.
+- No TLS/mTLS/Noise — transport is plain local HTTP. Signing authenticates requests; application-layer AES-256-GCM encrypts control payloads and AES-256-CTR encrypts file bodies. Filenames, sizes, history entries, and control responses remain cleartext metadata.
 
 ### Android debug telemetry
 Hidden panel: tap the **Linkit** wordmark 7× (`DebugActivity` / `DebugTelemetry` process-scoped singleton). Surfaces CPU, per-UID network bytes, FGS uptime windows, battery samples, an event log, and a 500-line ring buffer. In-app numbers are PID/UID proxies; real mAh needs `adb shell dumpsys batterystats --charged tech.kalkikgp.linkit`.
