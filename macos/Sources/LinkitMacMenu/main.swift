@@ -149,6 +149,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
     private var appUpdater: MacAppUpdater?
     private var updateCheckTimer: Timer?
+    /// True while an update check is running, so the launch and timer paths don't overlap.
+    private var updateCheckInFlight = false
+    /// True from the moment the user accepts an update until it finishes, so a second prompt
+    /// (e.g. a manual check racing the auto check) can't start a duplicate install.
+    private var installInProgress = false
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -688,15 +693,20 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// menu's manual "Check for Updates…", which reports every outcome). Throttled by a stored
     /// timestamp so relaunches within a day don't re-hit GitHub.
     private func maybeAutoCheckForUpdates() {
-        guard let appUpdater else { return }
+        guard let appUpdater, !updateCheckInFlight else { return }
         if let last = prefs.lastUpdateCheck, Date().timeIntervalSince(last) < 24 * 60 * 60 {
             return
         }
-        prefs.lastUpdateCheck = Date()
+        updateCheckInFlight = true
         Task {
-            guard let result = try? await appUpdater.checkForUpdates() else { return }
-            if case let .available(update) = result {
-                await MainActor.run {
+            let result = try? await appUpdater.checkForUpdates()
+            await MainActor.run {
+                self.updateCheckInFlight = false
+                // Record the daily slot only on a definitive result, so an offline launch retries
+                // next time instead of skipping the auto-check for the rest of the day.
+                guard let result else { return }
+                self.prefs.lastUpdateCheck = Date()
+                if case let .available(update) = result {
                     self.confirmAndInstall(update, appUpdater: appUpdater)
                 }
             }
@@ -735,6 +745,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func confirmAndInstall(_ update: LinkitAvailableUpdate, appUpdater: MacAppUpdater) {
+        if installInProgress { return }
         let notes = update.manifest.releaseNotes.flatMap { $0.isEmpty ? nil : $0 }
         let message = [
             "Version \(update.version) (\(update.build)) is available.",
@@ -752,6 +763,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return
         }
 
+        installInProgress = true
         showTransientIcon(.transferring(direction: .androidToMac), tooltip: "Installing update")
         Task {
             do {
@@ -761,6 +773,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 }
             } catch {
                 await MainActor.run {
+                    self.installInProgress = false
                     self.showTransientIcon(.error, tooltip: "Update failed")
                     self.showNonFatalError("Could not install update: \(error.localizedDescription)")
                 }
