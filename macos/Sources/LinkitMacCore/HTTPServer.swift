@@ -572,11 +572,18 @@ final class HTTPServer {
 
     private func handleAction(_ action: LinkitActionRequest, senderDeviceId: String?) throws -> LinkitActionResponse {
         let normalizedType = action.type.lowercased()
-        guard ["clipboard", "text", "open_url", "phone_state", "notification"].contains(normalizedType) else {
+        guard ["clipboard", "text", "open_url", "phone_state", "notification", "feature_resolve"].contains(normalizedType) else {
             throw HTTPFailure.badRequest("unsupported_action", "Action type is not supported")
         }
         guard !action.text.isEmpty, action.text.utf8.count <= 128 * 1024 else {
             throw HTTPFailure.badRequest("invalid_action_text", "Action text must be 1 byte to 128 KB")
+        }
+        // A "fix this on the Mac" nudge from the phone: `text` is a Mac feature id. The menu app
+        // resolves it (e.g. re-prompts for notification permission) when it observes the post below.
+        if normalizedType == "feature_resolve" {
+            guard action.text.utf8.count <= 128 else {
+                throw HTTPFailure.badRequest("invalid_action_text", "Feature id is too long")
+            }
         }
         if normalizedType == "open_url" {
             guard let url = URL(string: action.text), ["http", "https"].contains(url.scheme?.lowercased()) else {

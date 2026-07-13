@@ -21,6 +21,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 class LinkitReceiverService : Service() {
@@ -34,7 +36,7 @@ class LinkitReceiverService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        running = true
+        _runningFlow.value = true
         DebugTelemetry.install(applicationContext)
         DebugTelemetry.serviceStarted("LinkitReceiverService")
         // A reboot restarts this service (START_STICKY) but the notification listener may not
@@ -72,7 +74,7 @@ class LinkitReceiverService : Service() {
     }
 
     override fun onDestroy() {
-        running = false
+        _runningFlow.value = false
         phoneCallBridge?.stop()
         phoneCallBridge = null
         presenceJob?.cancel()
@@ -288,10 +290,14 @@ class LinkitReceiverService : Service() {
         private const val NOTIFICATION_ID = 4271
         const val ACTION_STOP = "tech.kalkikgp.linkit.action.STOP_RECEIVER"
 
+        // Exposed as a flow so feature-status recomputes the moment the receiver FGS actually
+        // binds/unbinds, instead of waiting for the next resume/presence tick — e.g. right after
+        // the user taps "Fix" and the service comes up a beat later.
+        private val _runningFlow = MutableStateFlow(false)
+        val runningFlow: StateFlow<Boolean> = _runningFlow
+
         /** Live flag so feature-status can report whether the receiver FGS is actually running. */
-        @Volatile
-        var running: Boolean = false
-            private set
+        val running: Boolean get() = _runningFlow.value
 
         fun start(context: Context) {
             val intent = Intent(context, LinkitReceiverService::class.java)

@@ -1395,8 +1395,43 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             handleAndroidPhoneState(text)
         case "notification":
             handleAndroidNotification(text)
+        case "feature_resolve":
+            resolveMacFeature(id: text)
         default:
             break
+        }
+    }
+
+    /// The phone tapped a broken "Your Mac" feature and asked this Mac to fix it. Re-drive the same
+    /// permission flow the user would trigger from Settings; once granted, the periodic sweep
+    /// refreshes the cached status and the next registration reply flips the phone's dot green.
+    private func resolveMacFeature(id: String) {
+        switch id {
+        case MacFeatureID.transferNotifications:
+            promptForNotificationPermission()
+        default:
+            break
+        }
+    }
+
+    /// Bring notification permission to the foreground: request it if never asked, otherwise open
+    /// the Notifications pane (macOS won't re-prompt once decided), then re-read the status.
+    private func promptForNotificationPermission() {
+        guard isRunningFromAppBundle, let center = notificationCenter else { return }
+        center.getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                if settings.authorizationStatus == .notDetermined {
+                    center.requestAuthorization(options: [.alert, .sound]) { _, _ in
+                        self?.refreshNotificationAuthorization()
+                    }
+                } else {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    self?.refreshNotificationAuthorization()
+                }
+                self?.showTransientIcon(.success, tooltip: "Phone asked to enable notifications")
+            }
         }
     }
 
@@ -1555,6 +1590,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func runPresenceSweep(force: Bool = false) {
+        // Re-read macOS notification authorization on the periodic tick so the feature-status we
+        // report (and mirror to the phone's "Your Mac" section) self-heals after the user grants
+        // permission in System Settings, instead of staying stale until the next relaunch.
+        refreshNotificationAuthorization()
         guard let app else { return }
         let connected = app.connectedDevices()
         if connected.isEmpty {

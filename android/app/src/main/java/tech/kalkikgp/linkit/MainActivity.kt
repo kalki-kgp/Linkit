@@ -430,6 +430,11 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
             // recompute so the dashboard flips off "On, but not receiving" as soon as it connects.
             NotificationMirrorState.connected.collect { refreshFeatureStatus() }
         }
+        viewModelScope.launch {
+            // The receiver FGS comes up a beat after start() returns; recompute so its dot flips
+            // green the moment it binds (right after "Fix") instead of only on the next resume.
+            LinkitReceiverService.runningFlow.collect { refreshFeatureStatus() }
+        }
         if (preferences.settings.value.clipboardSyncEnabled) {
             startClipboardSync()
         }
@@ -981,6 +986,38 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * The user tapped a Mac feature that needs attention. Ask the Mac to re-run that fix (it will
+     * re-prompt for the permission on its own screen), then immediately re-register to pull the
+     * Mac's current feature health back down — so if it was already fixed the dot flips now, and if
+     * not, it flips on the next registration once the user grants it on the Mac.
+     */
+    fun resolveMacFeature(feature: FeatureStatus) {
+        val mac = _uiState.value.trustedMac
+        if (mac == null || !_uiState.value.isConnectedToMac) {
+            _uiState.update { it.copy(error = "Connect to your Mac first") }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                client.sendAction(mac, identityStore, "feature_resolve", feature.id)
+                client.registerReceiver(
+                    mac = mac,
+                    identityStore = identityStore,
+                    receivePort = AndroidDropReceiver.PORT,
+                    batteryPercent = BatteryStatus.percent(getApplication()),
+                    features = localFeatures()
+                )
+            }.onSuccess {
+                _uiState.update {
+                    it.copy(status = "Asked your Mac to fix ${feature.title}", error = null)
+                }
+            }.onFailure { error ->
+                _uiState.update { it.copy(error = error.message ?: "Could not reach your Mac") }
+            }
+        }
+    }
+
     private fun localFeatures(): List<FeatureStatus> =
         AndroidFeatureStatus.local(getApplication(), preferences.settings.value)
 
@@ -1302,7 +1339,8 @@ private fun LinkitScreen(
                     onToggleClipboardSync = viewModel::toggleClipboardSync,
                     onReconnect = viewModel::discoverAndReconnect,
                     onReconnectNotificationListener = viewModel::reconnectNotificationListener,
-                    onEnablePhoneControls = onEnablePhoneControls
+                    onEnablePhoneControls = onEnablePhoneControls,
+                    onResolveMacFeature = viewModel::resolveMacFeature
                 )
                 TopTab.ACTIVITY -> ActivityTab(history = history, onClear = viewModel::clearHistory)
                 TopTab.SETTINGS -> SettingsTab(
@@ -1455,10 +1493,12 @@ private fun HomeTab(
     onToggleClipboardSync: () -> Unit,
     onReconnect: () -> Unit,
     onReconnectNotificationListener: () -> Unit,
-    onEnablePhoneControls: () -> Unit
+    onEnablePhoneControls: () -> Unit,
+    onResolveMacFeature: (FeatureStatus) -> Unit
 ) {
     val context = LocalContext.current
     var resolveTarget by remember { mutableStateOf<FeatureStatus?>(null) }
+    var macResolveTarget by remember { mutableStateOf<FeatureStatus?>(null) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1489,7 +1529,7 @@ private fun HomeTab(
         HomeFeatureStatus(features = state.localFeatures, onResolve = { resolveTarget = it })
         if (state.macFeatures.isNotEmpty()) {
             Spacer(modifier = Modifier.height(16.dp))
-            MacFeatureStatus(features = state.macFeatures)
+            MacFeatureStatus(features = state.macFeatures, onResolve = { macResolveTarget = it })
         }
     }
 
@@ -1508,6 +1548,18 @@ private fun HomeTab(
             onDismiss = { resolveTarget = null }
         )
     }
+
+    macResolveTarget?.let { feature ->
+        FeatureResolveDialog(
+            feature = feature,
+            confirmLabel = "Fix on Mac",
+            onFix = {
+                onResolveMacFeature(feature)
+                macResolveTarget = null
+            },
+            onDismiss = { macResolveTarget = null }
+        )
+    }
 }
 
 /** Compact feature-health list: title + status dot, red chevron only when broken. */
@@ -1522,32 +1574,34 @@ private fun HomeFeatureStatus(features: List<FeatureStatus>, onResolve: (Feature
 }
 
 /**
- * Read-only mirror of the Mac's self-reported feature health. Android can't resolve Mac-side
- * issues, so these rows are informational (dot + title) with no Fix action — but the Mac's
- * attention/off states stay visible instead of being silently dropped.
+ * Mirror of the Mac's self-reported feature health. Android can't flip a Mac setting itself, but a
+ * feature the Mac reports as needing attention is tappable: tapping asks the Mac (over the signed
+ * link) to re-run that fix — e.g. re-prompt for notification permission — after which the Mac's next
+ * status refresh flips the dot green here. Non-attention rows stay informational.
  */
 @Composable
-private fun MacFeatureStatus(features: List<FeatureStatus>) {
+private fun MacFeatureStatus(features: List<FeatureStatus>, onResolve: (FeatureStatus) -> Unit) {
     SettingsGroupCard(label = "Your Mac") {
         features.forEachIndexed { index, feature ->
             if (index > 0) LinkitRowDivider()
-            MacFeatureRow(feature = feature)
+            MacFeatureRow(feature = feature, onResolve = onResolve)
         }
     }
 }
 
 @Composable
-private fun MacFeatureRow(feature: FeatureStatus) {
+private fun MacFeatureRow(feature: FeatureStatus, onResolve: (FeatureStatus) -> Unit) {
+    val attention = feature.state == FeatureState.ATTENTION
     val dotColor = when (feature.state) {
         FeatureState.ON -> MaterialTheme.colorScheme.tertiary
         FeatureState.ATTENTION -> MaterialTheme.colorScheme.error
         FeatureState.OFF -> MaterialTheme.colorScheme.outline
         FeatureState.UNSUPPORTED -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
     }
+    val base = Modifier.fillMaxWidth()
+    val row = if (attention) base.clickable { onResolve(feature) } else base
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 13.dp),
+        modifier = row.padding(horizontal = 16.dp, vertical = 13.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1566,6 +1620,14 @@ private fun MacFeatureRow(feature: FeatureStatus) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
+        if (attention) {
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = "Resolve on Mac",
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(20.dp)
+            )
+        }
     }
 }
 
@@ -1668,7 +1730,12 @@ private fun UpdateAvailableDialog(
 
 /** Explains what a broken feature needs and offers a single Fix action. */
 @Composable
-private fun FeatureResolveDialog(feature: FeatureStatus, onFix: () -> Unit, onDismiss: () -> Unit) {
+private fun FeatureResolveDialog(
+    feature: FeatureStatus,
+    onFix: () -> Unit,
+    onDismiss: () -> Unit,
+    confirmLabel: String = "Fix"
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -1681,7 +1748,7 @@ private fun FeatureResolveDialog(feature: FeatureStatus, onFix: () -> Unit, onDi
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         },
-        confirmButton = { TextButton(onClick = onFix) { Text("Fix") } },
+        confirmButton = { TextButton(onClick = onFix) { Text(confirmLabel) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
 }
