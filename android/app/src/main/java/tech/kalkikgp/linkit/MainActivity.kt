@@ -192,13 +192,14 @@ class MainActivity : ComponentActivity() {
                     onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) }
                 )
                 uiState.autoUpdatePrompt?.let { update ->
+                    // Keep the prompt up through the install so a download/checksum/installer
+                    // failure surfaces here with a retry, instead of silently disappearing. On
+                    // success the system installer takes over; "Later" dismisses.
                     UpdateAvailableDialog(
                         update = update,
                         installing = uiState.isInstallingUpdate,
-                        onUpdate = {
-                            linkitViewModel.installAndroidUpdate()
-                            linkitViewModel.dismissAutoUpdatePrompt()
-                        },
+                        error = uiState.updateError,
+                        onUpdate = { linkitViewModel.installAndroidUpdate() },
                         onDismiss = { linkitViewModel.dismissAutoUpdatePrompt() }
                     )
                 }
@@ -1059,6 +1060,8 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    @Volatile private var autoCheckInFlight = false
+
     /**
      * Once-a-day background update check. Runs quietly (no "up to date"/error surface): only a
      * found update raises the popup, via [LinkitUiState.autoUpdatePrompt]. Throttled by a stored
@@ -1067,18 +1070,28 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
     fun maybeAutoCheckForUpdate() {
         val elapsed = System.currentTimeMillis() - preferences.lastUpdateCheckAt()
         if (elapsed in 0 until UPDATE_CHECK_INTERVAL_MS) return
-        if (_uiState.value.isCheckingUpdate || _uiState.value.isInstallingUpdate) return
+        if (autoCheckInFlight || _uiState.value.isCheckingUpdate || _uiState.value.isInstallingUpdate) return
+        autoCheckInFlight = true
         viewModelScope.launch(Dispatchers.IO) {
-            preferences.markUpdateCheckedNow()
-            val result = runCatching { appUpdater.checkForUpdates() }.getOrNull()
-            if (result is AndroidUpdateCheckResult.Available) {
-                _uiState.update {
-                    it.copy(
-                        availableAndroidUpdate = result.update,
-                        autoUpdatePrompt = result.update,
-                        updateStatus = "Version ${result.update.versionName} (${result.update.versionCode}) is available"
-                    )
+            try {
+                // Record the daily slot only after a definitive result, so an offline launch
+                // retries on the next open instead of skipping updates for the rest of the day.
+                val result = runCatching { appUpdater.checkForUpdates() }.getOrNull() ?: return@launch
+                preferences.markUpdateCheckedNow()
+                if (result is AndroidUpdateCheckResult.Available) {
+                    _uiState.update {
+                        it.copy(
+                            availableAndroidUpdate = result.update,
+                            autoUpdatePrompt = result.update,
+                            // Clear any error left by a prior failed install so a freshly raised
+                            // prompt doesn't open showing stale failure text + "Try again".
+                            updateError = null,
+                            updateStatus = "Version ${result.update.versionName} (${result.update.versionCode}) is available"
+                        )
+                    }
                 }
+            } finally {
+                autoCheckInFlight = false
             }
         }
     }
@@ -1603,6 +1616,7 @@ private fun HomeFeatureRow(feature: FeatureStatus, onResolve: (FeatureStatus) ->
 private fun UpdateAvailableDialog(
     update: AndroidAvailableUpdate,
     installing: Boolean,
+    error: String?,
     onUpdate: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1626,11 +1640,24 @@ private fun UpdateAvailableDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                if (!installing) error?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = onUpdate, enabled = !installing) {
-                Text(if (installing) "Starting…" else "Update now")
+                Text(
+                    when {
+                        installing -> "Starting…"
+                        error != null -> "Try again"
+                        else -> "Update now"
+                    }
+                )
             }
         },
         dismissButton = {
