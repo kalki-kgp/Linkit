@@ -1083,6 +1083,9 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
                         it.copy(
                             availableAndroidUpdate = result.update,
                             autoUpdatePrompt = result.update,
+                            // Clear any error left by a prior failed install so a freshly raised
+                            // prompt doesn't open showing stale failure text + "Try again".
+                            updateError = null,
                             updateStatus = "Version ${result.update.versionName} (${result.update.versionCode}) is available"
                         )
                     }
