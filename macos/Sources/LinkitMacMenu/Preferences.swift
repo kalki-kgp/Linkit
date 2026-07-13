@@ -54,6 +54,7 @@ final class Preferences: ObservableObject {
         static let listenPort = "pref.listenPort"
         static let dropFolderBookmark = "pref.dropFolderBookmark"
         static let accentColor = "pref.accentColorHex"
+        static let lastUpdateCheck = "pref.lastUpdateCheck"
     }
 
     /// Default primary accent — the original amber the app shipped with.
@@ -94,6 +95,19 @@ final class Preferences: ObservableObject {
     /// Custom listen port. `0` means "let the app pick its built-in default".
     @Published var listenPort: Int {
         didSet { defaults.set(listenPort, forKey: Key.listenPort) }
+    }
+
+    /// When the once-a-day background update check last ran. `nil` if never checked,
+    /// so the first launch checks immediately.
+    var lastUpdateCheck: Date? {
+        get { defaults.object(forKey: Key.lastUpdateCheck) as? Date }
+        set {
+            if let newValue {
+                defaults.set(newValue, forKey: Key.lastUpdateCheck)
+            } else {
+                defaults.removeObject(forKey: Key.lastUpdateCheck)
+            }
+        }
     }
 
     /// Security-scoped bookmark for a user-chosen drop folder, or `nil` for the

@@ -41,7 +41,7 @@ class LinkitPreferences private constructor(context: Context) {
         }.getOrDefault(AppearancePreference.SYSTEM),
         clipboardSyncEnabled = prefs.getBoolean(KEY_CLIPBOARD_SYNC, true),
         notificationMirrorEnabled = prefs.getBoolean(KEY_NOTIFICATION_MIRROR, false),
-        accentColorHex = prefs.getString(KEY_ACCENT_COLOR, null) ?: LinkitAccents.DEFAULT_HEX
+        accentColorHex = LinkitAccents.normalize(prefs.getString(KEY_ACCENT_COLOR, null) ?: LinkitAccents.DEFAULT_HEX)
     )
 
     fun setAppearance(value: AppearancePreference) {
@@ -65,11 +65,19 @@ class LinkitPreferences private constructor(context: Context) {
         _settings.update { it.copy(accentColorHex = normalized) }
     }
 
+    /** Epoch millis of the last automatic update check (0 if never), for the once-a-day throttle. */
+    fun lastUpdateCheckAt(): Long = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L)
+
+    fun markUpdateCheckedNow() {
+        prefs.edit().putLong(KEY_LAST_UPDATE_CHECK, System.currentTimeMillis()).apply()
+    }
+
     companion object {
         private const val KEY_APPEARANCE = "appearance"
         private const val KEY_CLIPBOARD_SYNC = "clipboard_sync_enabled"
         private const val KEY_NOTIFICATION_MIRROR = "notification_mirror_enabled"
         private const val KEY_ACCENT_COLOR = "accent_color_hex"
+        private const val KEY_LAST_UPDATE_CHECK = "last_update_check_at"
 
         @Volatile private var instance: LinkitPreferences? = null
 

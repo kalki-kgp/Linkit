@@ -177,8 +177,10 @@ class MainActivity : ComponentActivity() {
             linkitViewModel.discoverAndReconnect()
             requestBatteryExemptionIfNeeded()
         }
+        linkitViewModel.maybeAutoCheckForUpdate()
         setContent {
             val settings by linkitViewModel.settings.collectAsStateWithLifecycle()
+            val uiState by linkitViewModel.uiState.collectAsStateWithLifecycle()
             val darkTheme = when (settings.appearance) {
                 AppearancePreference.SYSTEM -> isSystemInDarkTheme()
                 AppearancePreference.LIGHT -> false
@@ -189,6 +191,17 @@ class MainActivity : ComponentActivity() {
                     viewModel = linkitViewModel,
                     onEnablePhoneControls = { phonePermissions.launch(PhonePermissions.requested) }
                 )
+                uiState.autoUpdatePrompt?.let { update ->
+                    UpdateAvailableDialog(
+                        update = update,
+                        installing = uiState.isInstallingUpdate,
+                        onUpdate = {
+                            linkitViewModel.installAndroidUpdate()
+                            linkitViewModel.dismissAutoUpdatePrompt()
+                        },
+                        onDismiss = { linkitViewModel.dismissAutoUpdatePrompt() }
+                    )
+                }
             }
         }
     }
@@ -265,6 +278,8 @@ data class LinkitUiState(
     val lastAndroidDropPath: String? = null,
     val currentAndroidVersion: String = "",
     val availableAndroidUpdate: AndroidAvailableUpdate? = null,
+    /** Set when the once-a-day background check finds an update, to raise the update popup. */
+    val autoUpdatePrompt: AndroidAvailableUpdate? = null,
     val isCheckingUpdate: Boolean = false,
     val isInstallingUpdate: Boolean = false,
     val updateStatus: String = "Updates ready",
@@ -285,6 +300,8 @@ data class LinkitUiState(
     val localFeatures: List<FeatureStatus> = emptyList(),
     val macFeatures: List<FeatureStatus> = emptyList()
 )
+
+private const val UPDATE_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
 
 class LinkitViewModel(application: Application) : AndroidViewModel(application) {
     private val client = LinkitClient()
@@ -1042,6 +1059,34 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Once-a-day background update check. Runs quietly (no "up to date"/error surface): only a
+     * found update raises the popup, via [LinkitUiState.autoUpdatePrompt]. Throttled by a stored
+     * timestamp so opening the app repeatedly in a day checks GitHub at most once.
+     */
+    fun maybeAutoCheckForUpdate() {
+        val elapsed = System.currentTimeMillis() - preferences.lastUpdateCheckAt()
+        if (elapsed in 0 until UPDATE_CHECK_INTERVAL_MS) return
+        if (_uiState.value.isCheckingUpdate || _uiState.value.isInstallingUpdate) return
+        viewModelScope.launch(Dispatchers.IO) {
+            preferences.markUpdateCheckedNow()
+            val result = runCatching { appUpdater.checkForUpdates() }.getOrNull()
+            if (result is AndroidUpdateCheckResult.Available) {
+                _uiState.update {
+                    it.copy(
+                        availableAndroidUpdate = result.update,
+                        autoUpdatePrompt = result.update,
+                        updateStatus = "Version ${result.update.versionName} (${result.update.versionCode}) is available"
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissAutoUpdatePrompt() {
+        _uiState.update { it.copy(autoUpdatePrompt = null) }
+    }
+
     fun installAndroidUpdate() {
         if (_uiState.value.isInstallingUpdate) return
         val update = _uiState.value.availableAndroidUpdate ?: return checkForAndroidUpdate()
@@ -1429,6 +1474,10 @@ private fun HomeTab(
         // A feature with a problem shows a red dot + chevron; tapping opens a dialog
         // that explains how to resolve it.
         HomeFeatureStatus(features = state.localFeatures, onResolve = { resolveTarget = it })
+        if (state.macFeatures.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            MacFeatureStatus(features = state.macFeatures)
+        }
     }
 
     resolveTarget?.let { feature ->
@@ -1456,6 +1505,54 @@ private fun HomeFeatureStatus(features: List<FeatureStatus>, onResolve: (Feature
             if (index > 0) LinkitRowDivider()
             HomeFeatureRow(feature = feature, onResolve = onResolve)
         }
+    }
+}
+
+/**
+ * Read-only mirror of the Mac's self-reported feature health. Android can't resolve Mac-side
+ * issues, so these rows are informational (dot + title) with no Fix action — but the Mac's
+ * attention/off states stay visible instead of being silently dropped.
+ */
+@Composable
+private fun MacFeatureStatus(features: List<FeatureStatus>) {
+    SettingsGroupCard(label = "Your Mac") {
+        features.forEachIndexed { index, feature ->
+            if (index > 0) LinkitRowDivider()
+            MacFeatureRow(feature = feature)
+        }
+    }
+}
+
+@Composable
+private fun MacFeatureRow(feature: FeatureStatus) {
+    val dotColor = when (feature.state) {
+        FeatureState.ON -> MaterialTheme.colorScheme.tertiary
+        FeatureState.ATTENTION -> MaterialTheme.colorScheme.error
+        FeatureState.OFF -> MaterialTheme.colorScheme.outline
+        FeatureState.UNSUPPORTED -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+        Text(
+            feature.title,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -1499,6 +1596,47 @@ private fun HomeFeatureRow(feature: FeatureStatus, onResolve: (FeatureStatus) ->
             )
         }
     }
+}
+
+/** Daily-check popup: a new GitHub release is available; offer to install it directly. */
+@Composable
+private fun UpdateAvailableDialog(
+    update: AndroidAvailableUpdate,
+    installing: Boolean,
+    onUpdate: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val notes = update.manifest.releaseNotes?.takeIf { it.isNotBlank() }
+    AlertDialog(
+        onDismissRequest = { if (!installing) onDismiss() },
+        title = {
+            Text("Update available", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Linkit ${update.versionName} is ready to install.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                notes?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onUpdate, enabled = !installing) {
+                Text(if (installing) "Starting…" else "Update now")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !installing) { Text("Later") }
+        }
+    )
 }
 
 /** Explains what a broken feature needs and offers a single Fix action. */
