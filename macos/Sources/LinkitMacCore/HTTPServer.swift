@@ -580,9 +580,14 @@ final class HTTPServer {
         }
         // A "fix this on the Mac" nudge from the phone: `text` is a Mac feature id. The menu app
         // resolves it (e.g. re-prompts for notification permission) when it observes the post below.
+        // Reject ids the Mac can't act on so the phone reports a real failure instead of a false
+        // "asked your Mac to fix it" for a feature the menu handler would silently ignore.
         if normalizedType == "feature_resolve" {
             guard action.text.utf8.count <= 128 else {
                 throw HTTPFailure.badRequest("invalid_action_text", "Feature id is too long")
+            }
+            guard MacFeatureID.resolvable.contains(action.text) else {
+                throw HTTPFailure.badRequest("unsupported_feature", "This feature cannot be resolved from the phone")
             }
         }
         if normalizedType == "open_url" {

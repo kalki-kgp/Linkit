@@ -145,8 +145,23 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var notifiedPhoneCallActive = false
     private var notificationCenter: UNUserNotificationCenter?
     /// Cached macOS notification authorization; the system API is async, but the feature-status
-    /// provider (called off-main from the HTTP server) needs a synchronous read.
-    private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
+    /// provider (called off-main from the HTTP server) needs a synchronous read. Written on the
+    /// main thread (launch + periodic sweep) and read on the HTTP server thread, so all access is
+    /// serialized through `notificationAuthorizationLock` to avoid a torn/stale cross-thread read.
+    private let notificationAuthorizationLock = NSLock()
+    private var _notificationAuthorization: UNAuthorizationStatus = .notDetermined
+    private var notificationAuthorization: UNAuthorizationStatus {
+        get {
+            notificationAuthorizationLock.lock()
+            defer { notificationAuthorizationLock.unlock() }
+            return _notificationAuthorization
+        }
+        set {
+            notificationAuthorizationLock.lock()
+            _notificationAuthorization = newValue
+            notificationAuthorizationLock.unlock()
+        }
+    }
     private var appUpdater: MacAppUpdater?
     private var updateCheckTimer: Timer?
     /// True while an update check is running, so the launch and timer paths don't overlap.
