@@ -37,6 +37,7 @@ if [[ -z "$PAYLOAD" ]]; then
 fi
 
 PAYLOAD="$PAYLOAD" PORT="$PORT" swift - <<'SWIFT'
+import CommonCrypto
 import CryptoKit
 import Foundation
 
@@ -61,6 +62,41 @@ func request(_ request: URLRequest) throws -> HTTPResult {
 
 func hex(_ data: Data) -> String {
     data.map { String(format: "%02x", $0) }.joined()
+}
+
+// Mirrors LinkitSecretBox.transferKey: per-transfer AES key so file bodies stream
+// under AES-256-CTR with a zero counter. The receiver decrypts before hashing, so
+// the upload body must be sealed while finalSha256 stays the plaintext hash.
+func transferKey(pairingSecret: Data, transferId: String, fileIndex: Int) -> SymmetricKey {
+    HKDF<SHA256>.deriveKey(
+        inputKeyMaterial: SymmetricKey(data: pairingSecret),
+        salt: Data("linkit/aead/salt/v1".utf8),
+        info: Data(("linkit/aead/transfer/v1\n" + transferId + "\n" + String(fileIndex)).utf8),
+        outputByteCount: 32
+    )
+}
+
+// Mirrors LinkitStreamCipher: AES-256-CTR, big-endian counter, zero IV.
+func aesCTR(key: SymmetricKey, _ data: Data) -> Data {
+    let keyData = key.withUnsafeBytes { Data($0) }
+    var iv = [UInt8](repeating: 0, count: kCCBlockSizeAES128)
+    var ref: CCCryptorRef?
+    let created = keyData.withUnsafeBytes { keyBytes in
+        CCCryptorCreateWithMode(
+            CCOperation(kCCEncrypt), CCMode(kCCModeCTR), CCAlgorithm(kCCAlgorithmAES),
+            CCPadding(ccNoPadding), &iv, keyBytes.baseAddress, keyData.count,
+            nil, 0, 0, CCModeOptions(kCCModeOptionCTR_BE), &ref
+        )
+    }
+    precondition(created == kCCSuccess, "CCCryptorCreateWithMode failed")
+    defer { if let ref { CCCryptorRelease(ref) } }
+    var out = [UInt8](repeating: 0, count: data.count)
+    var moved = 0
+    let status = data.withUnsafeBytes { input in
+        CCCryptorUpdate(ref, input.baseAddress, data.count, &out, out.count, &moved)
+    }
+    precondition(status == kCCSuccess, "CCCryptorUpdate failed")
+    return Data(out.prefix(moved))
 }
 
 func jsonBody(_ object: Any) throws -> String {
@@ -124,6 +160,7 @@ let payload = try json(Data(ProcessInfo.processInfo.environment["PAYLOAD"]!.utf8
 let token = payload["pairingToken"] as! String
 let challenge = payload["pairingChallenge"] as! String
 let macDeviceId = payload["deviceId"] as! String
+let pairingSecret = Data(base64Encoded: payload["pairingSecret"] as! String)!
 let port = ProcessInfo.processInfo.environment["PORT"]!
 let base = "http://127.0.0.1:\(port)"
 
@@ -179,9 +216,12 @@ let file = (createJson["files"] as! [[String: Any]])[0]
 let transferId = createJson["transferId"] as! String
 let uploadUrl = "/v1/transfers/\(transferId)/files/0"
 let uploadToken = file["uploadToken"] as! String
+// AES-256-CTR is size-preserving, so the sealed body matches the signed content
+// length; the receiver decrypts it back to `bytes` before hashing at finalize.
+let sealedBytes = aesCTR(key: transferKey(pairingSecret: pairingSecret, transferId: transferId, fileIndex: 0), bytes)
 var upload = URLRequest(url: URL(string: base + uploadUrl)!)
 upload.httpMethod = "PUT"
-upload.httpBody = bytes
+upload.httpBody = sealedBytes
 upload.setValue(uploadToken, forHTTPHeaderField: "X-Linkit-Upload-Token")
 upload.setValue(deviceId, forHTTPHeaderField: "X-Linkit-Client-Device-Id")
 upload.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")

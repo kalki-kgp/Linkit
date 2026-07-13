@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex and other coding agents when working with code in this repository. It mirrors `CLAUDE.md`; keep the two in sync.
 
 ## What Linkit is
 
@@ -40,6 +40,11 @@ Android (from `android/`):
 ```
 
 Full local verification (both platforms — `swift test`, Mac build, Android unit tests + debug build):
+```sh
+./scripts/verify.sh
+```
+
+Run the current release gate:
 ```sh
 ./scripts/verify.sh
 ```

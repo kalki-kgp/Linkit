@@ -2,7 +2,7 @@
 
 Developer / sideload instructions for running Linkit locally.
 
-**Latest release:** [v0.6.1](https://github.com/kalki-kgp/Linkit/releases/latest) — download `linkit-release.apk` and `linkit-macos.zip`, or use **Check for Updates** in the Mac menu / Android app settings.
+**Latest release:** [v0.9.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.9.1) — download `linkit-release.apk` and `linkit-macos.zip`, or use **Check for Updates** in the Mac menu / Android app settings.
 
 ## Installing the macOS app
 
@@ -111,6 +111,10 @@ Mac menu bar:
 
 This is **call control only** over the signed LAN channel. Cellular call audio always stays on the phone — there is no Mac-side audio path (the experimental Bluetooth Hands-Free route was removed; it could not deliver audio on Apple Silicon).
 
+## Notification mirroring
+
+In Android **Settings → Notifications**, turn on **Mirror phone notifications to Mac** and grant Android's notification-listener access. Linkit forwards the source app, title, and text of ordinary notifications to the paired Mac over the encrypted local channel. It never mirrors Linkit's own, foreground-service, ongoing, or group-summary notifications.
+
 ## Reconnect after network change
 
 When Wi-Fi, hotspot, or SSID changes, the Mac's IP may change. Linkit recovers **without re-pairing**:
@@ -156,8 +160,10 @@ Android receives: `Downloads/Linkit Drop` on the phone.
 
 ```sh
 ./scripts/verify.sh                  # swift test + Mac build + Android tests + debug APK
-./scripts/smoke-signed-transfer.sh   # signed transfer stack without a phone
+./scripts/smoke-signed-transfer.sh   # signed + encrypted transfer stack without a phone
 ```
+
+`scripts/smoke-signed-transfer.sh` pairs against a headless `LinkitMacReceiver`, rejects a bad signature, then seals a file body with the per-transfer key (AES-256-CTR) and verifies the received bytes round-trip — an end-to-end check of the signed, encrypted protocol.
 
 ## Packaging (local)
 
@@ -184,17 +190,17 @@ adb install -r dist/linkit-release.apk
 
 First run creates `android/linkit-release.keystore` and `android/keystore.properties` (gitignored). Copy `android/keystore.properties.example` for your own keystore.
 
-Package updater manifests manually (example for v0.6.1):
+Package updater manifests manually (example for v0.9.1):
 
 ```sh
-LINKIT_VERSION=0.6.1 \
-LINKIT_BUILD=7 \
-LINKIT_UPDATE_ASSET_BASE_URL=https://github.com/kalki-kgp/Linkit/releases/download/v0.6.1 \
+LINKIT_VERSION=0.9.1 \
+LINKIT_BUILD=18 \
+LINKIT_UPDATE_ASSET_BASE_URL=https://github.com/kalki-kgp/Linkit/releases/download/v0.9.1 \
 ./scripts/package-macos-update.sh
 
-LINKIT_VERSION=0.6.1 \
-LINKIT_VERSION_CODE=7 \
-LINKIT_ANDROID_UPDATE_ASSET_BASE_URL=https://github.com/kalki-kgp/Linkit/releases/download/v0.6.1 \
+LINKIT_VERSION=0.9.1 \
+LINKIT_VERSION_CODE=18 \
+LINKIT_ANDROID_UPDATE_ASSET_BASE_URL=https://github.com/kalki-kgp/Linkit/releases/download/v0.9.1 \
 ./scripts/package-android-update.sh
 ```
 
@@ -206,8 +212,8 @@ Workflow: `.github/workflows/release.yml`
 
 **Recommended:** GitHub Actions → **Release** → **Run workflow** with:
 
-- `version_name` — e.g. `0.6.1`
-- `version_code` — integer **must increase** (Android `versionCode` and macOS build); v0.6.1 = `7`
+- `version_name` — e.g. `0.9.1`
+- `version_code` — integer **must increase** (Android `versionCode` and macOS build); v0.9.1 = `18`
 - `release_notes` — short text for updater manifests
 
 Required secrets: `LINKIT_ANDROID_KEYSTORE_BASE64`, `LINKIT_ANDROID_KEYSTORE_PASSWORD`, `LINKIT_ANDROID_KEY_ALIAS`, `LINKIT_ANDROID_KEY_PASSWORD`.
@@ -218,11 +224,11 @@ base64 -i android/linkit-release.keystore | pbcopy   # create keystore secret on
 
 Tag-only pushes (`git push origin v*`) also trigger the workflow, but `version_code` becomes the workflow run number — prefer **workflow dispatch** so `version_code` stays aligned with releases.
 
-Asset layout per tag `v0.6.1`:
+Asset layout per tag `v0.9.1`:
 
 ```txt
-https://github.com/kalki-kgp/Linkit/releases/download/v0.6.1/linkit-macos.zip
-https://github.com/kalki-kgp/Linkit/releases/download/v0.6.1/linkit-release.apk
+https://github.com/kalki-kgp/Linkit/releases/download/v0.9.1/linkit-macos.zip
+https://github.com/kalki-kgp/Linkit/releases/download/v0.9.1/linkit-release.apk
 ```
 
 Apps fetch latest manifests:
