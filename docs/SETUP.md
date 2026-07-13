@@ -160,9 +160,10 @@ Android receives: `Downloads/Linkit Drop` on the phone.
 
 ```sh
 ./scripts/verify.sh                  # swift test + Mac build + Android tests + debug APK
+./scripts/smoke-signed-transfer.sh   # signed + encrypted transfer stack without a phone
 ```
 
-`scripts/smoke-signed-transfer.sh` is not a release gate at v0.9.1: it still uploads a plaintext fixture, while current receivers decrypt file bodies before hashing. Update it to seal the transfer with the pairing secret before relying on it for an end-to-end protocol check.
+`scripts/smoke-signed-transfer.sh` pairs against a headless `LinkitMacReceiver`, rejects a bad signature, then seals a file body with the per-transfer key (AES-256-CTR) and verifies the received bytes round-trip — an end-to-end check of the signed, encrypted protocol.
 
 ## Packaging (local)
 

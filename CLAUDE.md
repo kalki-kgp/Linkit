@@ -44,12 +44,10 @@ Full local verification (both platforms — `swift test`, Mac build, Android uni
 ./scripts/verify.sh
 ```
 
-Run the current release gate:
+Smoke the whole signed, encrypted transfer stack without a phone:
 ```sh
-./scripts/verify.sh
+./scripts/smoke-signed-transfer.sh
 ```
-
-`scripts/smoke-signed-transfer.sh` is a stale plaintext fixture and currently fails against encrypted file bodies; update it before treating it as a release check.
 
 Packaging (see `docs/SETUP.md` for in-app-updater manifest URLs):
 ```sh

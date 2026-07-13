@@ -147,7 +147,7 @@ Local builds:
 
 Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gradlew assembleDebug`, release build scripts, `git diff --check`. Release workflow also runs Mac + Android tests before upload.
 
-`scripts/smoke-signed-transfer.sh` is not included in that gate: its plaintext fixture predates encrypted file bodies and currently fails at finalize. It must be upgraded to encrypt the fixture with the pairing secret before it can be trusted as an end-to-end smoke test.
+`scripts/smoke-signed-transfer.sh` exercises the full protocol without a phone: it pairs against a headless `LinkitMacReceiver`, rejects a bad signature, seals a file body with the per-transfer key (AES-256-CTR), and verifies the received bytes round-trip.
 
 ## Known Limits
 
@@ -168,4 +168,3 @@ Current verification passes: `swift test`, `./gradlew testDebugUnitTest`, `./gra
 - Quick Settings tile for **Send Clipboard to Mac** (notification actions already exist).
 - Mirror debug telemetry into the Mac menu-bar diagnostics.
 - Add an instrumented Android-device smoke lane to CI; JVM tests and debug builds do not exercise foreground-service, notification-listener, or OEM battery behavior.
-- Update `smoke-signed-transfer.sh` for encrypted upload bodies, then make it part of the release gate.
