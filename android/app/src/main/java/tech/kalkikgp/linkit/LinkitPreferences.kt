@@ -41,7 +41,7 @@ class LinkitPreferences private constructor(context: Context) {
         }.getOrDefault(AppearancePreference.SYSTEM),
         clipboardSyncEnabled = prefs.getBoolean(KEY_CLIPBOARD_SYNC, true),
         notificationMirrorEnabled = prefs.getBoolean(KEY_NOTIFICATION_MIRROR, false),
-        accentColorHex = prefs.getString(KEY_ACCENT_COLOR, null) ?: LinkitAccents.DEFAULT_HEX
+        accentColorHex = LinkitAccents.normalize(prefs.getString(KEY_ACCENT_COLOR, null) ?: LinkitAccents.DEFAULT_HEX)
     )
 
     fun setAppearance(value: AppearancePreference) {

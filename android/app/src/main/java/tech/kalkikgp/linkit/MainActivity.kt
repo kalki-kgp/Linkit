@@ -1429,6 +1429,10 @@ private fun HomeTab(
         // A feature with a problem shows a red dot + chevron; tapping opens a dialog
         // that explains how to resolve it.
         HomeFeatureStatus(features = state.localFeatures, onResolve = { resolveTarget = it })
+        if (state.macFeatures.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            MacFeatureStatus(features = state.macFeatures)
+        }
     }
 
     resolveTarget?.let { feature ->
@@ -1456,6 +1460,54 @@ private fun HomeFeatureStatus(features: List<FeatureStatus>, onResolve: (Feature
             if (index > 0) LinkitRowDivider()
             HomeFeatureRow(feature = feature, onResolve = onResolve)
         }
+    }
+}
+
+/**
+ * Read-only mirror of the Mac's self-reported feature health. Android can't resolve Mac-side
+ * issues, so these rows are informational (dot + title) with no Fix action — but the Mac's
+ * attention/off states stay visible instead of being silently dropped.
+ */
+@Composable
+private fun MacFeatureStatus(features: List<FeatureStatus>) {
+    SettingsGroupCard(label = "Your Mac") {
+        features.forEachIndexed { index, feature ->
+            if (index > 0) LinkitRowDivider()
+            MacFeatureRow(feature = feature)
+        }
+    }
+}
+
+@Composable
+private fun MacFeatureRow(feature: FeatureStatus) {
+    val dotColor = when (feature.state) {
+        FeatureState.ON -> MaterialTheme.colorScheme.tertiary
+        FeatureState.ATTENTION -> MaterialTheme.colorScheme.error
+        FeatureState.OFF -> MaterialTheme.colorScheme.outline
+        FeatureState.UNSUPPORTED -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+        Text(
+            feature.title,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
