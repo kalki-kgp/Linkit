@@ -148,12 +148,19 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// provider (called off-main from the HTTP server) needs a synchronous read.
     private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
     private var appUpdater: MacAppUpdater?
+    private var updateCheckTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         observeAppearance()
         configureNotifications()
         appUpdater = try? MacAppUpdater()
+        maybeAutoCheckForUpdates()
+        // A long-running menu-bar app: re-arm the daily check without needing a relaunch.
+        // The method self-throttles to once every 24h, so a 6h cadence is just a heartbeat.
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
+            self?.maybeAutoCheckForUpdates()
+        }
         do {
             let receiver = try LinkitReceiverApp(
                 configuration: makeReceiverConfiguration(),
@@ -674,6 +681,26 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc private func openTransferLog() {
         guard let app else { return }
         NSWorkspace.shared.open(app.logFile)
+    }
+
+    /// Once-a-day background update check. Runs quietly: only a found update raises the existing
+    /// "Update Linkit?" popup — an up-to-date result or a network failure stays silent (unlike the
+    /// menu's manual "Check for Updates…", which reports every outcome). Throttled by a stored
+    /// timestamp so relaunches within a day don't re-hit GitHub.
+    private func maybeAutoCheckForUpdates() {
+        guard let appUpdater else { return }
+        if let last = prefs.lastUpdateCheck, Date().timeIntervalSince(last) < 24 * 60 * 60 {
+            return
+        }
+        prefs.lastUpdateCheck = Date()
+        Task {
+            guard let result = try? await appUpdater.checkForUpdates() else { return }
+            if case let .available(update) = result {
+                await MainActor.run {
+                    self.confirmAndInstall(update, appUpdater: appUpdater)
+                }
+            }
+        }
     }
 
     @objc private func checkForUpdates() {
