@@ -145,8 +145,26 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var notifiedPhoneCallActive = false
     private var notificationCenter: UNUserNotificationCenter?
     /// Cached macOS notification authorization; the system API is async, but the feature-status
-    /// provider (called off-main from the HTTP server) needs a synchronous read.
-    private var notificationAuthorization: UNAuthorizationStatus = .notDetermined
+    /// provider (called off-main from the HTTP server) needs a synchronous read. Written on the
+    /// main thread (launch + periodic sweep) and read on the HTTP server thread, so all access is
+    /// serialized through `notificationAuthorizationLock` to avoid a torn/stale cross-thread read.
+    private let notificationAuthorizationLock = NSLock()
+    private var _notificationAuthorization: UNAuthorizationStatus = .notDetermined
+    private var notificationAuthorization: UNAuthorizationStatus {
+        get {
+            notificationAuthorizationLock.lock()
+            defer { notificationAuthorizationLock.unlock() }
+            return _notificationAuthorization
+        }
+        set {
+            notificationAuthorizationLock.lock()
+            _notificationAuthorization = newValue
+            notificationAuthorizationLock.unlock()
+        }
+    }
+    /// One-shot timer that clears an elapsed Do Not Disturb window so the icon
+    /// tooltip self-heals without waiting for the next menu open.
+    private var doNotDisturbExpiryTimer: Timer?
     private var appUpdater: MacAppUpdater?
     private var updateCheckTimer: Timer?
     /// True while an update check is running, so the launch and timer paths don't overlap.
@@ -200,6 +218,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         wirePanelActions()
         wireSettingsActions()
+        prefs.expireDoNotDisturbIfNeeded()
+        scheduleDoNotDisturbExpiry()
         refreshStatusButton()
         refreshPanel()
         startTransferObservers()
@@ -215,13 +235,16 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func refreshStatusButton() {
         let trusted = app?.trustedDevices() ?? []
         let connected = app?.connectedDevices() ?? []
-        let tooltip: String
+        var tooltip: String
         if connected.isEmpty {
             tooltip = trusted.isEmpty
                 ? "Linkit not paired"
                 : "Linkit paired with \(trusted.count), not connected"
         } else {
             tooltip = "Linkit connected to \(connected.count) device\(connected.count == 1 ? "" : "s")"
+        }
+        if prefs.isDoNotDisturbActive, let until = prefs.doNotDisturbUntil {
+            tooltip += " · Do Not Disturb until \(Self.doNotDisturbTimeFormatter.string(from: until))"
         }
         statusIcon?.setState(connected.isEmpty ? .disconnected : .connected, tooltip: tooltip)
     }
@@ -241,12 +264,38 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             refreshStatusButton()
             refreshPanel()
 
+            // The phone dropped while we were showing call UI: no further phone_state
+            // will arrive to close the panel, so clear it here (see teardown docs).
+            if hadConnectedSignature && connected.isEmpty {
+                teardownCallUIForLostConnection()
+            }
+
             if hadTrustedSignature && !devices.isEmpty && !trustedSignature.isEmpty {
                 announcePairing(devices.last)
             } else if !hadConnectedSignature && !connected.isEmpty {
                 announceConnection(connected.last)
             }
         }
+    }
+
+    /// Tears down the incoming/active call UI when the phone becomes unreachable.
+    ///
+    /// A call panel raised while connected would otherwise linger forever after a
+    /// mid-call disconnect: no further `phone_state` arrives to close it, and the
+    /// Hang Up button sends `phone_hangup` to a phone we can no longer reach — so
+    /// the only escape was quitting and relaunching the app. Clearing the panel and
+    /// resetting the per-call flags here restores a clean state; if the phone comes
+    /// back with a call still active it re-pushes `phone_state` and we re-present.
+    private func teardownCallUIForLostConnection() {
+        guard callPanel?.isShown == true || currentPhoneState != nil else { return }
+        callPanel?.close()
+        currentPhoneState = nil
+        previousPhoneStateRaw = "idle"
+        callDismissedByUser = false
+        callAnsweredFromMac = false
+        callInitiatedFromMac = false
+        notifiedPhoneCallActive = false
+        refreshPanel()
     }
 
     private func announcePairing(_ device: TrustedDevice?) {
@@ -408,15 +457,87 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Minimal right-click safety net so the app is never stuck if the popover
     /// misbehaves.
     private func showFallbackMenu() {
+        prefs.expireDoNotDisturbIfNeeded()
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Linkit", action: #selector(togglePopoverAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(makeDoNotDisturbMenuItem())
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Linkit", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
         statusItem?.button?.performClick(nil)
         statusItem?.menu = nil
+    }
+
+    /// Builds the "Do Not Disturb" entry for the menu-bar menu: a submenu of
+    /// preset quiet-window durations, plus a live "on until …" state and an
+    /// off switch when a window is already running.
+    private func makeDoNotDisturbMenuItem() -> NSMenuItem {
+        let active = prefs.isDoNotDisturbActive
+        let item = NSMenuItem(title: "Do Not Disturb", action: nil, keyEquivalent: "")
+        item.state = active ? .on : .off
+
+        let submenu = NSMenu()
+        if active, let until = prefs.doNotDisturbUntil {
+            let status = NSMenuItem(title: "On until \(Self.doNotDisturbTimeFormatter.string(from: until))", action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            submenu.addItem(status)
+            let off = NSMenuItem(title: "Turn Off", action: #selector(disableDoNotDisturb), keyEquivalent: "")
+            off.target = self
+            submenu.addItem(off)
+            submenu.addItem(NSMenuItem.separator())
+        }
+        for hours in Preferences.doNotDisturbDurations {
+            let title = hours == 1 ? "For 1 hour" : "For \(hours) hours"
+            let entry = NSMenuItem(title: title, action: #selector(enableDoNotDisturb(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = hours
+            submenu.addItem(entry)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    /// Local time-of-day formatter for the DND "on until …" label.
+    private static let doNotDisturbTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
+
+    @objc private func enableDoNotDisturb(_ sender: NSMenuItem) {
+        guard let hours = sender.representedObject as? Int else { return }
+        prefs.doNotDisturbUntil = Date().addingTimeInterval(TimeInterval(hours) * 3600)
+        scheduleDoNotDisturbExpiry()
+        refreshStatusButton()
+        showTransientIcon(.success, tooltip: "Do Not Disturb on")
+    }
+
+    @objc private func disableDoNotDisturb() {
+        prefs.doNotDisturbUntil = nil
+        doNotDisturbExpiryTimer?.invalidate()
+        doNotDisturbExpiryTimer = nil
+        refreshStatusButton()
+        showTransientIcon(.success, tooltip: "Do Not Disturb off")
+    }
+
+    /// Arms a one-shot timer that clears DND when the window elapses, so the
+    /// status icon and mirrored feature health self-heal without a menu open.
+    private func scheduleDoNotDisturbExpiry() {
+        doNotDisturbExpiryTimer?.invalidate()
+        guard let until = prefs.doNotDisturbUntil else { return }
+        let interval = max(1, until.timeIntervalSinceNow)
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.prefs.expireDoNotDisturbIfNeeded()
+            self.doNotDisturbExpiryTimer = nil
+            self.refreshStatusButton()
+        }
+        timer.tolerance = 30
+        doNotDisturbExpiryTimer = timer
     }
 
     @objc private func togglePopoverAction() {
@@ -558,16 +679,27 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func pollClipboardForSync() {
         guard clipboardSyncEnabled else { return }
+        // Don't attempt (and fail) a send while the phone is unreachable. A transient
+        // reconnect window used to fail the poll and silently turn clipboard sync off;
+        // skipping here keeps the preference intact and lets the latest clipboard sync
+        // once the phone is back (changeCount stays unadvanced until we actually send).
+        guard let app, !app.connectedDevices().isEmpty else { return }
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != lastClipboardChangeCount else { return }
         lastClipboardChangeCount = pasteboard.changeCount
         guard let text = pasteboard.string(forType: .string), !text.isEmpty, text != lastClipboardText else { return }
         guard text.utf8.count <= 128 * 1024 else { return }
         lastClipboardText = text
-        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard synced")
+        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard synced", silent: true)
     }
 
-    private func sendActionToAndroid(type: String, text: String, successTooltip: String) {
+    /// Sends a signed action to the paired phone.
+    ///
+    /// `silent` is for background sends (clipboard sync): a transient failure must not
+    /// pop a modal or otherwise disrupt the user. Notably, a failure here never toggles
+    /// the persisted clipboard-sync preference — an unrelated phone action failing, or a
+    /// brief drop during reconnect, must not silently disable clipboard sync.
+    private func sendActionToAndroid(type: String, text: String, successTooltip: String, silent: Bool = false) {
         guard let app else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -577,13 +709,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 }
             } catch {
                 DispatchQueue.main.async {
-                    if self.clipboardSyncEnabled {
-                        self.clipboardSyncEnabled = false
-                        self.stopClipboardSync()
-                        self.refreshPanel()
-                    }
                     self.showTransientIcon(.error, tooltip: "Android action failed")
-                    self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                    if !silent {
+                        self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                    }
                 }
             }
         }
@@ -1395,8 +1524,43 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             handleAndroidPhoneState(text)
         case "notification":
             handleAndroidNotification(text)
+        case "feature_resolve":
+            resolveMacFeature(id: text)
         default:
             break
+        }
+    }
+
+    /// The phone tapped a broken "Your Mac" feature and asked this Mac to fix it. Re-drive the same
+    /// permission flow the user would trigger from Settings; once granted, the periodic sweep
+    /// refreshes the cached status and the next registration reply flips the phone's dot green.
+    private func resolveMacFeature(id: String) {
+        switch id {
+        case MacFeatureID.transferNotifications:
+            promptForNotificationPermission()
+        default:
+            break
+        }
+    }
+
+    /// Bring notification permission to the foreground: request it if never asked, otherwise open
+    /// the Notifications pane (macOS won't re-prompt once decided), then re-read the status.
+    private func promptForNotificationPermission() {
+        guard isRunningFromAppBundle, let center = notificationCenter else { return }
+        center.getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                if settings.authorizationStatus == .notDetermined {
+                    center.requestAuthorization(options: [.alert, .sound]) { _, _ in
+                        self?.refreshNotificationAuthorization()
+                    }
+                } else {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    self?.refreshNotificationAuthorization()
+                }
+                self?.showTransientIcon(.success, tooltip: "Phone asked to enable notifications")
+            }
         }
     }
 
@@ -1404,7 +1568,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard let data = text.data(using: .utf8),
               let notification = try? JSONDecoder().decode(AndroidNotification.self, from: data)
         else { return }
-        ensureNotificationBannerManager().present(notification)
+        // Do Not Disturb suppresses the on-screen banner, but the phone
+        // notification is still logged to history so nothing is lost.
+        if !prefs.isDoNotDisturbActive {
+            ensureNotificationBannerManager().present(notification)
+        }
 
         let row = MirroredNotificationRow(
             id: UUID().uuidString,
@@ -1465,6 +1633,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func postPhoneCallNotification(state: AndroidPhoneState) {
+        guard !prefs.isDoNotDisturbActive else { return }
         guard let notificationCenter else { return }
         let content = UNMutableNotificationContent()
         content.title = "Call on your phone"
@@ -1555,6 +1724,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func runPresenceSweep(force: Bool = false) {
+        // Re-read macOS notification authorization on the periodic tick so the feature-status we
+        // report (and mirror to the phone's "Your Mac" section) self-heals after the user grants
+        // permission in System Settings, instead of staying stale until the next relaunch.
+        refreshNotificationAuthorization()
         guard let app else { return }
         let connected = app.connectedDevices()
         if connected.isEmpty {
@@ -1658,12 +1831,17 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         let notifState: FeatureState
         let notifDetail: String
+        // Snapshot once so a window elapsing mid-read can't split the state and detail.
+        let dndUntil = prefs.isDoNotDisturbActive ? prefs.doNotDisturbUntil : nil
         if !bundled {
             notifState = .unsupported
             notifDetail = "Banners require the packaged Linkit.app."
         } else if !prefs.notifyOnTransferComplete {
             notifState = .off
             notifDetail = "Turn on transfer notifications in Settings → General."
+        } else if let dndUntil {
+            notifState = .off
+            notifDetail = "Paused by Do Not Disturb until \(Self.doNotDisturbTimeFormatter.string(from: dndUntil))."
         } else {
             switch notificationAuthorization {
             case .authorized, .provisional, .ephemeral:
@@ -1696,6 +1874,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func postReceivedNotification(userInfo: [AnyHashable: Any]?) {
         guard prefs.notifyOnTransferComplete else { return }
+        guard !prefs.isDoNotDisturbActive else { return }
         guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let senderId = userInfo?[LinkitTransferNotification.senderDeviceIdKey] as? String
@@ -1720,6 +1899,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func postReceiveFailedNotification(userInfo: [AnyHashable: Any]?) {
         guard prefs.notifyOnTransferComplete else { return }
+        guard !prefs.isDoNotDisturbActive else { return }
         guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let error = (userInfo?[LinkitTransferNotification.errorKey] as? String).flatMap { $0.isEmpty ? nil : $0 }

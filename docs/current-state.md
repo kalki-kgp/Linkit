@@ -57,7 +57,7 @@ v0.9.1 ships the Android Home feature-status compact list and tap-to-resolve dia
   - `clipboard` for plain-text clipboard handoff.
   - `text` for plain-text handoff.
   - `open_url` for opening `http` or `https` links on the other device.
-- Mac menu can send clipboard text to Android, open the clipboard link on Android, and turn on Mac → Android clipboard text sync.
+- Mac menu can send clipboard text to Android, open the clipboard link on Android, and turn on Mac → Android clipboard text sync. Mac → Android clipboard sync is a **sticky preference**: the poll skips sends while the phone is unreachable and a transient failure never disables it, so it survives reconnects (a failed send previously toggled the preference off).
 - Android app can send current clipboard text to Mac, open the current clipboard link on Mac, and turn on foreground clipboard text sync.
 - Android share sheet can send selected plain text to the Mac clipboard or open shared URLs on the Mac.
 - Mac receiving text sets the Mac clipboard; Android receiving text sets the Android clipboard.
@@ -76,6 +76,7 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 - When a call **starts on the phone** (goes active without first ringing and the Mac didn't place it — i.e. an outgoing call dialed on Android), the Mac posts a "Call on your phone" notification with the caller name/number when available. Calls placed from the Mac (which already show the call panel) and incoming calls answered on the phone (`ringing → active`) are excluded.
 - The call picker surfaces the phone-permission precondition: when Contacts / Call log aren't granted on Android it explains how to enable them ("open Linkit and tap *Enable phone controls*"), instead of silently showing an empty list.
 - Cellular call audio is **not** relayed — audio always stays on the phone. Normal third-party apps cannot capture/forward cellular audio with public permissions, so there is no Mac-side call-audio path (the experimental Bluetooth Hands-Free route was removed; see the unreleased note).
+- **Stale call panel on disconnect:** the Mac call panel is closed and its per-call flags reset whenever the phone drops off (`teardownCallUIForLostConnection`, driven from `checkForTrustChanges` when the connected set empties). Without this a call panel raised while connected would linger after a mid-call disconnect — no further `phone_state` arrives to close it and Hang Up can't reach the phone — previously forcing an app relaunch.
 
 ### Feature Status & Health
 
@@ -107,6 +108,13 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 - Android receiver notification (`Mac drops enabled on …`) carries **Send Clipboard** and **Open Link** actions.
 - Tapping launches `ClipboardActionActivity` (translucent theme, real window focus). Clipboard read deferred to `onWindowFocusChanged(true)` for Android 10+.
 - Result via Toast, then activity finishes.
+
+### Do Not Disturb (Mac)
+
+- The Mac status-item **right-click menu** carries a **Do Not Disturb** submenu with preset quiet windows (1 / 2 / 6 / 12 / 24 hours). While a window is active the submenu shows "On until …" plus **Turn Off**, and the menu entry is checkmarked.
+- Engaging DND stores an expiry timestamp in `Preferences.doNotDisturbUntil` (persisted, so a window survives relaunch). While `isDoNotDisturbActive`, the Mac suppresses **transfer-received / transfer-failed / call-on-phone** notifications and the **mirrored-Android notification banner** — the Android notification is still logged to the Mac's notification history, only the on-screen banner is withheld.
+- The status-icon tooltip appends "· Do Not Disturb until …", and the mirrored **Transfer notifications** feature-status reports `off` with a "Paused by Do Not Disturb until …" detail so the paired phone reflects the quiet window.
+- A one-shot timer (`doNotDisturbExpiryTimer`) clears the window when it elapses and refreshes the icon; the state is also lazily expired whenever the menu opens or the app launches.
 
 ### Consumer UI (Android)
 

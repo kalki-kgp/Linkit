@@ -55,7 +55,11 @@ final class Preferences: ObservableObject {
         static let dropFolderBookmark = "pref.dropFolderBookmark"
         static let accentColor = "pref.accentColorHex"
         static let lastUpdateCheck = "pref.lastUpdateCheck"
+        static let doNotDisturbUntil = "pref.doNotDisturbUntil"
     }
+
+    /// Durations offered by the menu-bar Do Not Disturb submenu, in hours.
+    static let doNotDisturbDurations: [Int] = [1, 2, 6, 12, 24]
 
     /// Default primary accent — the original amber the app shipped with.
     static let defaultAccentHex = "#D16B1F"
@@ -90,6 +94,36 @@ final class Preferences: ObservableObject {
 
     @Published var notifyOnConnect: Bool {
         didSet { defaults.set(notifyOnConnect, forKey: Key.notifyOnConnect) }
+    }
+
+    /// When Do Not Disturb should automatically switch off, or `nil` when it is
+    /// not engaged. While this is a future date, notification banners are
+    /// suppressed. Persisted so a scheduled quiet window survives relaunch.
+    @Published var doNotDisturbUntil: Date? {
+        didSet {
+            if let doNotDisturbUntil {
+                defaults.set(doNotDisturbUntil, forKey: Key.doNotDisturbUntil)
+            } else {
+                defaults.removeObject(forKey: Key.doNotDisturbUntil)
+            }
+        }
+    }
+
+    /// Whether Do Not Disturb is currently in effect. Reads through to
+    /// `doNotDisturbUntil`; an elapsed window counts as off (callers should
+    /// clear the stale date via `expireDoNotDisturbIfNeeded()` to tidy state).
+    var isDoNotDisturbActive: Bool {
+        guard let doNotDisturbUntil else { return false }
+        return doNotDisturbUntil > Date()
+    }
+
+    /// Clears a Do Not Disturb window that has already elapsed. Returns `true`
+    /// when it actually cleared one, so callers can refresh dependent UI.
+    @discardableResult
+    func expireDoNotDisturbIfNeeded() -> Bool {
+        guard let doNotDisturbUntil, doNotDisturbUntil <= Date() else { return false }
+        self.doNotDisturbUntil = nil
+        return true
     }
 
     /// Custom listen port. `0` means "let the app pick its built-in default".
@@ -142,5 +176,6 @@ final class Preferences: ObservableObject {
         self.notifyOnTransferComplete = defaults.bool(forKey: Key.notifyOnTransfer)
         self.notifyOnConnect = defaults.bool(forKey: Key.notifyOnConnect)
         self.listenPort = defaults.integer(forKey: Key.listenPort)
+        self.doNotDisturbUntil = defaults.object(forKey: Key.doNotDisturbUntil) as? Date
     }
 }

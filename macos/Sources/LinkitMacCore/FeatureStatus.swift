@@ -35,4 +35,9 @@ public enum MacFeatureID {
     public static let launchAtLogin = "launch_at_login"
     public static let transferNotifications = "transfer_notifications"
     public static let receiver = "receiver"
+
+    /// Feature ids the Mac can re-drive on the phone's behalf via a `feature_resolve` action.
+    /// The phone only claims success for these; anything else is rejected so it can't falsely
+    /// report "asked your Mac to fix it" for a feature the Mac would silently ignore.
+    public static let resolvable: Set<String> = [transferNotifications]
 }
