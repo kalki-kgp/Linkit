@@ -264,12 +264,38 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             refreshStatusButton()
             refreshPanel()
 
+            // The phone dropped while we were showing call UI: no further phone_state
+            // will arrive to close the panel, so clear it here (see teardown docs).
+            if hadConnectedSignature && connected.isEmpty {
+                teardownCallUIForLostConnection()
+            }
+
             if hadTrustedSignature && !devices.isEmpty && !trustedSignature.isEmpty {
                 announcePairing(devices.last)
             } else if !hadConnectedSignature && !connected.isEmpty {
                 announceConnection(connected.last)
             }
         }
+    }
+
+    /// Tears down the incoming/active call UI when the phone becomes unreachable.
+    ///
+    /// A call panel raised while connected would otherwise linger forever after a
+    /// mid-call disconnect: no further `phone_state` arrives to close it, and the
+    /// Hang Up button sends `phone_hangup` to a phone we can no longer reach — so
+    /// the only escape was quitting and relaunching the app. Clearing the panel and
+    /// resetting the per-call flags here restores a clean state; if the phone comes
+    /// back with a call still active it re-pushes `phone_state` and we re-present.
+    private func teardownCallUIForLostConnection() {
+        guard callPanel?.isShown == true || currentPhoneState != nil else { return }
+        callPanel?.close()
+        currentPhoneState = nil
+        previousPhoneStateRaw = "idle"
+        callDismissedByUser = false
+        callAnsweredFromMac = false
+        callInitiatedFromMac = false
+        notifiedPhoneCallActive = false
+        refreshPanel()
     }
 
     private func announcePairing(_ device: TrustedDevice?) {

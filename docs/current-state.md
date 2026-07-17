@@ -76,6 +76,7 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 - When a call **starts on the phone** (goes active without first ringing and the Mac didn't place it — i.e. an outgoing call dialed on Android), the Mac posts a "Call on your phone" notification with the caller name/number when available. Calls placed from the Mac (which already show the call panel) and incoming calls answered on the phone (`ringing → active`) are excluded.
 - The call picker surfaces the phone-permission precondition: when Contacts / Call log aren't granted on Android it explains how to enable them ("open Linkit and tap *Enable phone controls*"), instead of silently showing an empty list.
 - Cellular call audio is **not** relayed — audio always stays on the phone. Normal third-party apps cannot capture/forward cellular audio with public permissions, so there is no Mac-side call-audio path (the experimental Bluetooth Hands-Free route was removed; see the unreleased note).
+- **Stale call panel on disconnect:** the Mac call panel is closed and its per-call flags reset whenever the phone drops off (`teardownCallUIForLostConnection`, driven from `checkForTrustChanges` when the connected set empties). Without this a call panel raised while connected would linger after a mid-call disconnect — no further `phone_state` arrives to close it and Hang Up can't reach the phone — previously forcing an app relaunch.
 
 ### Feature Status & Health
 
