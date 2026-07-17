@@ -57,7 +57,7 @@ v0.9.1 ships the Android Home feature-status compact list and tap-to-resolve dia
   - `clipboard` for plain-text clipboard handoff.
   - `text` for plain-text handoff.
   - `open_url` for opening `http` or `https` links on the other device.
-- Mac menu can send clipboard text to Android, open the clipboard link on Android, and turn on Mac → Android clipboard text sync.
+- Mac menu can send clipboard text to Android, open the clipboard link on Android, and turn on Mac → Android clipboard text sync. Mac → Android clipboard sync is a **sticky preference**: the poll skips sends while the phone is unreachable and a transient failure never disables it, so it survives reconnects (a failed send previously toggled the preference off).
 - Android app can send current clipboard text to Mac, open the current clipboard link on Mac, and turn on foreground clipboard text sync.
 - Android share sheet can send selected plain text to the Mac clipboard or open shared URLs on the Mac.
 - Mac receiving text sets the Mac clipboard; Android receiving text sets the Android clipboard.

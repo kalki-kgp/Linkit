@@ -679,16 +679,27 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func pollClipboardForSync() {
         guard clipboardSyncEnabled else { return }
+        // Don't attempt (and fail) a send while the phone is unreachable. A transient
+        // reconnect window used to fail the poll and silently turn clipboard sync off;
+        // skipping here keeps the preference intact and lets the latest clipboard sync
+        // once the phone is back (changeCount stays unadvanced until we actually send).
+        guard let app, !app.connectedDevices().isEmpty else { return }
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != lastClipboardChangeCount else { return }
         lastClipboardChangeCount = pasteboard.changeCount
         guard let text = pasteboard.string(forType: .string), !text.isEmpty, text != lastClipboardText else { return }
         guard text.utf8.count <= 128 * 1024 else { return }
         lastClipboardText = text
-        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard synced")
+        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard synced", silent: true)
     }
 
-    private func sendActionToAndroid(type: String, text: String, successTooltip: String) {
+    /// Sends a signed action to the paired phone.
+    ///
+    /// `silent` is for background sends (clipboard sync): a transient failure must not
+    /// pop a modal or otherwise disrupt the user. Notably, a failure here never toggles
+    /// the persisted clipboard-sync preference — an unrelated phone action failing, or a
+    /// brief drop during reconnect, must not silently disable clipboard sync.
+    private func sendActionToAndroid(type: String, text: String, successTooltip: String, silent: Bool = false) {
         guard let app else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -698,13 +709,10 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 }
             } catch {
                 DispatchQueue.main.async {
-                    if self.clipboardSyncEnabled {
-                        self.clipboardSyncEnabled = false
-                        self.stopClipboardSync()
-                        self.refreshPanel()
-                    }
                     self.showTransientIcon(.error, tooltip: "Android action failed")
-                    self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                    if !silent {
+                        self.showNonFatalError("Could not send to Android: \(error.localizedDescription)")
+                    }
                 }
             }
         }
