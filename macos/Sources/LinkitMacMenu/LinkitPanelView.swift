@@ -349,9 +349,9 @@ private struct PhoneAttentionRow: View {
 
 // MARK: - Do Not Disturb tile
 
-/// Quick-action tile for Do Not Disturb. Off: a menu of preset quiet windows
-/// (1/2/6/12/24h). On: an accented tile showing the end time that turns DND off
-/// on click. Styled to match ``QuickActionTile`` so it sits in the same row.
+/// Quick-action tile for Do Not Disturb, styled to match ``QuickActionTile``.
+/// Clicking it opens a menu of preset quiet windows (1/2/6/12/24h); while active
+/// the tile is accent-amber and the menu also offers Turn Off.
 private struct DoNotDisturbTile: View {
     @ObservedObject var model: PanelViewModel
 
@@ -361,54 +361,46 @@ private struct DoNotDisturbTile: View {
     }
 
     var body: some View {
-        if isActive {
-            Button(action: model.onTurnOffDoNotDisturb) {
-                tileBody(title: "Until \(untilText)", systemImage: "moon.fill", active: true)
+        Menu {
+            if isActive {
+                Button("Turn Off Do Not Disturb", action: model.onTurnOffDoNotDisturb)
+                Divider()
             }
-            .buttonStyle(.plain)
-            .help("Do Not Disturb on until \(untilText) — click to turn off")
-        } else {
-            Menu {
-                ForEach(Preferences.doNotDisturbDurations, id: \.self) { hours in
-                    Button(hours == 1 ? "For 1 hour" : "For \(hours) hours") {
-                        model.onSetDoNotDisturb(hours)
-                    }
+            ForEach(Preferences.doNotDisturbDurations, id: \.self) { hours in
+                Button(hours == 1 ? "For 1 hour" : "For \(hours) hours") {
+                    model.onSetDoNotDisturb(hours)
                 }
-            } label: {
-                tileBody(title: "Do Not Disturb", systemImage: "moon", active: false)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .help("Mute Linkit notifications")
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: isActive ? "moon.fill" : "moon")
+                    .font(.system(size: 18, weight: .regular))
+                Text("DND")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 62)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isActive ? Brand.amber.opacity(0.14) : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(isActive ? Brand.amber.opacity(0.3) : Color.primary.opacity(0.07), lineWidth: 1)
+            )
+            .foregroundStyle(isActive ? Brand.amber : Color.primary)
+            .contentShape(Rectangle())
         }
-    }
-
-    private func tileBody(title: String, systemImage: String, active: Bool) -> some View {
-        VStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.system(size: 18, weight: .regular))
-            Text(title)
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .frame(maxWidth: .infinity)
-        .frame(height: 62)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(active ? Brand.amber.opacity(0.14) : Color.primary.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(active ? Brand.amber.opacity(0.3) : Color.primary.opacity(0.07), lineWidth: 1)
-        )
-        .foregroundStyle(active ? Brand.amber : Color.primary)
-        .contentShape(Rectangle())
+        .help(helpText)
     }
 
-    private var untilText: String {
-        guard let until = model.doNotDisturbUntil else { return "on" }
-        return Self.timeFormatter.string(from: until)
+    private var helpText: String {
+        guard isActive, let until = model.doNotDisturbUntil else { return "Mute Linkit notifications" }
+        return "Do Not Disturb on until \(Self.timeFormatter.string(from: until))"
     }
 
     private static let timeFormatter: DateFormatter = {
