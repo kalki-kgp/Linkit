@@ -162,6 +162,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             notificationAuthorizationLock.unlock()
         }
     }
+    /// One-shot timer that clears an elapsed Do Not Disturb window so the icon
+    /// tooltip self-heals without waiting for the next menu open.
+    private var doNotDisturbExpiryTimer: Timer?
     private var appUpdater: MacAppUpdater?
     private var updateCheckTimer: Timer?
     /// True while an update check is running, so the launch and timer paths don't overlap.
@@ -215,6 +218,8 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         wirePanelActions()
         wireSettingsActions()
+        prefs.expireDoNotDisturbIfNeeded()
+        scheduleDoNotDisturbExpiry()
         refreshStatusButton()
         refreshPanel()
         startTransferObservers()
@@ -230,13 +235,16 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func refreshStatusButton() {
         let trusted = app?.trustedDevices() ?? []
         let connected = app?.connectedDevices() ?? []
-        let tooltip: String
+        var tooltip: String
         if connected.isEmpty {
             tooltip = trusted.isEmpty
                 ? "Linkit not paired"
                 : "Linkit paired with \(trusted.count), not connected"
         } else {
             tooltip = "Linkit connected to \(connected.count) device\(connected.count == 1 ? "" : "s")"
+        }
+        if prefs.isDoNotDisturbActive, let until = prefs.doNotDisturbUntil {
+            tooltip += " · Do Not Disturb until \(Self.doNotDisturbTimeFormatter.string(from: until))"
         }
         statusIcon?.setState(connected.isEmpty ? .disconnected : .connected, tooltip: tooltip)
     }
@@ -423,15 +431,87 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Minimal right-click safety net so the app is never stuck if the popover
     /// misbehaves.
     private func showFallbackMenu() {
+        prefs.expireDoNotDisturbIfNeeded()
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Linkit", action: #selector(togglePopoverAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(makeDoNotDisturbMenuItem())
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Linkit", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
         statusItem?.button?.performClick(nil)
         statusItem?.menu = nil
+    }
+
+    /// Builds the "Do Not Disturb" entry for the menu-bar menu: a submenu of
+    /// preset quiet-window durations, plus a live "on until …" state and an
+    /// off switch when a window is already running.
+    private func makeDoNotDisturbMenuItem() -> NSMenuItem {
+        let active = prefs.isDoNotDisturbActive
+        let item = NSMenuItem(title: "Do Not Disturb", action: nil, keyEquivalent: "")
+        item.state = active ? .on : .off
+
+        let submenu = NSMenu()
+        if active, let until = prefs.doNotDisturbUntil {
+            let status = NSMenuItem(title: "On until \(Self.doNotDisturbTimeFormatter.string(from: until))", action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            submenu.addItem(status)
+            let off = NSMenuItem(title: "Turn Off", action: #selector(disableDoNotDisturb), keyEquivalent: "")
+            off.target = self
+            submenu.addItem(off)
+            submenu.addItem(NSMenuItem.separator())
+        }
+        for hours in Preferences.doNotDisturbDurations {
+            let title = hours == 1 ? "For 1 hour" : "For \(hours) hours"
+            let entry = NSMenuItem(title: title, action: #selector(enableDoNotDisturb(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = hours
+            submenu.addItem(entry)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    /// Local time-of-day formatter for the DND "on until …" label.
+    private static let doNotDisturbTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
+
+    @objc private func enableDoNotDisturb(_ sender: NSMenuItem) {
+        guard let hours = sender.representedObject as? Int else { return }
+        prefs.doNotDisturbUntil = Date().addingTimeInterval(TimeInterval(hours) * 3600)
+        scheduleDoNotDisturbExpiry()
+        refreshStatusButton()
+        showTransientIcon(.success, tooltip: "Do Not Disturb on")
+    }
+
+    @objc private func disableDoNotDisturb() {
+        prefs.doNotDisturbUntil = nil
+        doNotDisturbExpiryTimer?.invalidate()
+        doNotDisturbExpiryTimer = nil
+        refreshStatusButton()
+        showTransientIcon(.success, tooltip: "Do Not Disturb off")
+    }
+
+    /// Arms a one-shot timer that clears DND when the window elapses, so the
+    /// status icon and mirrored feature health self-heal without a menu open.
+    private func scheduleDoNotDisturbExpiry() {
+        doNotDisturbExpiryTimer?.invalidate()
+        guard let until = prefs.doNotDisturbUntil else { return }
+        let interval = max(1, until.timeIntervalSinceNow)
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.prefs.expireDoNotDisturbIfNeeded()
+            self.doNotDisturbExpiryTimer = nil
+            self.refreshStatusButton()
+        }
+        timer.tolerance = 30
+        doNotDisturbExpiryTimer = timer
     }
 
     @objc private func togglePopoverAction() {
@@ -1454,7 +1534,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard let data = text.data(using: .utf8),
               let notification = try? JSONDecoder().decode(AndroidNotification.self, from: data)
         else { return }
-        ensureNotificationBannerManager().present(notification)
+        // Do Not Disturb suppresses the on-screen banner, but the phone
+        // notification is still logged to history so nothing is lost.
+        if !prefs.isDoNotDisturbActive {
+            ensureNotificationBannerManager().present(notification)
+        }
 
         let row = MirroredNotificationRow(
             id: UUID().uuidString,
@@ -1515,6 +1599,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func postPhoneCallNotification(state: AndroidPhoneState) {
+        guard !prefs.isDoNotDisturbActive else { return }
         guard let notificationCenter else { return }
         let content = UNMutableNotificationContent()
         content.title = "Call on your phone"
@@ -1712,12 +1797,17 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         let notifState: FeatureState
         let notifDetail: String
+        // Snapshot once so a window elapsing mid-read can't split the state and detail.
+        let dndUntil = prefs.isDoNotDisturbActive ? prefs.doNotDisturbUntil : nil
         if !bundled {
             notifState = .unsupported
             notifDetail = "Banners require the packaged Linkit.app."
         } else if !prefs.notifyOnTransferComplete {
             notifState = .off
             notifDetail = "Turn on transfer notifications in Settings → General."
+        } else if let dndUntil {
+            notifState = .off
+            notifDetail = "Paused by Do Not Disturb until \(Self.doNotDisturbTimeFormatter.string(from: dndUntil))."
         } else {
             switch notificationAuthorization {
             case .authorized, .provisional, .ephemeral:
@@ -1750,6 +1840,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func postReceivedNotification(userInfo: [AnyHashable: Any]?) {
         guard prefs.notifyOnTransferComplete else { return }
+        guard !prefs.isDoNotDisturbActive else { return }
         guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let senderId = userInfo?[LinkitTransferNotification.senderDeviceIdKey] as? String
@@ -1774,6 +1865,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func postReceiveFailedNotification(userInfo: [AnyHashable: Any]?) {
         guard prefs.notifyOnTransferComplete else { return }
+        guard !prefs.isDoNotDisturbActive else { return }
         guard let notificationCenter else { return }
         guard let filename = userInfo?[LinkitTransferNotification.filenameKey] as? String else { return }
         let error = (userInfo?[LinkitTransferNotification.errorKey] as? String).flatMap { $0.isEmpty ? nil : $0 }

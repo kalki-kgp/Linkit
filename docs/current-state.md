@@ -108,6 +108,13 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 - Tapping launches `ClipboardActionActivity` (translucent theme, real window focus). Clipboard read deferred to `onWindowFocusChanged(true)` for Android 10+.
 - Result via Toast, then activity finishes.
 
+### Do Not Disturb (Mac)
+
+- The Mac status-item **right-click menu** carries a **Do Not Disturb** submenu with preset quiet windows (1 / 2 / 6 / 12 / 24 hours). While a window is active the submenu shows "On until …" plus **Turn Off**, and the menu entry is checkmarked.
+- Engaging DND stores an expiry timestamp in `Preferences.doNotDisturbUntil` (persisted, so a window survives relaunch). While `isDoNotDisturbActive`, the Mac suppresses **transfer-received / transfer-failed / call-on-phone** notifications and the **mirrored-Android notification banner** — the Android notification is still logged to the Mac's notification history, only the on-screen banner is withheld.
+- The status-icon tooltip appends "· Do Not Disturb until …", and the mirrored **Transfer notifications** feature-status reports `off` with a "Paused by Do Not Disturb until …" detail so the paired phone reflects the quiet window.
+- A one-shot timer (`doNotDisturbExpiryTimer`) clears the window when it elapses and refreshes the icon; the state is also lazily expired whenever the menu opens or the app launches.
+
 ### Consumer UI (Android)
 
 - **Bottom-navigation shell** (`TopTab` = Home · Activity · Settings) — a persistent Material3 `NavigationBar` is the always-visible map (Android's answer to the Mac Settings sidebar). System back walks the hierarchy: detail → hub, then any tab → Home, then exit. Nav state survives config changes via `rememberSaveable`.
