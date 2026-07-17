@@ -95,7 +95,7 @@ struct LinkitPanelView: View {
         HStack(spacing: 10) {
             QuickActionTile(title: "Send File", systemImage: "doc.badge.plus", enabled: model.isConnected, action: model.onSendFile)
             QuickActionTile(title: "Clipboard", systemImage: "doc.on.clipboard", enabled: model.isConnected, action: model.onSendClipboard)
-            QuickActionTile(title: "Open Link", systemImage: "link", enabled: model.isConnected, action: model.onOpenLink)
+            DoNotDisturbTile(model: model)
         }
     }
 
@@ -345,6 +345,70 @@ private struct PhoneAttentionRow: View {
         }
         .buttonStyle(.plain)
     }
+}
+
+// MARK: - Do Not Disturb tile
+
+/// Quick-action tile for Do Not Disturb, styled to match ``QuickActionTile``.
+/// Clicking it opens a menu of preset quiet windows (1/2/6/12/24h); while active
+/// the tile is accent-amber and the menu also offers Turn Off.
+private struct DoNotDisturbTile: View {
+    @ObservedObject var model: PanelViewModel
+
+    private var isActive: Bool {
+        guard let until = model.doNotDisturbUntil else { return false }
+        return until > Date()
+    }
+
+    var body: some View {
+        Menu {
+            if isActive {
+                Button("Turn Off Do Not Disturb", action: model.onTurnOffDoNotDisturb)
+                Divider()
+            }
+            ForEach(Preferences.doNotDisturbDurations, id: \.self) { hours in
+                Button(hours == 1 ? "For 1 hour" : "For \(hours) hours") {
+                    model.onSetDoNotDisturb(hours)
+                }
+            }
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: isActive ? "moon.fill" : "moon")
+                    .font(.system(size: 18, weight: .regular))
+                Text("DND")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 62)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isActive ? Brand.amber.opacity(0.14) : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(isActive ? Brand.amber.opacity(0.3) : Color.primary.opacity(0.07), lineWidth: 1)
+            )
+            .foregroundStyle(isActive ? Brand.amber : Color.primary)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .frame(maxWidth: .infinity)
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        guard isActive, let until = model.doNotDisturbUntil else { return "Mute Linkit notifications" }
+        return "Do Not Disturb on until \(Self.timeFormatter.string(from: until))"
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
 }
 
 // MARK: - Transfer strip

@@ -57,7 +57,7 @@ v0.9.1 ships the Android Home feature-status compact list and tap-to-resolve dia
   - `clipboard` for plain-text clipboard handoff.
   - `text` for plain-text handoff.
   - `open_url` for opening `http` or `https` links on the other device.
-- Mac menu can send clipboard text to Android, open the clipboard link on Android, and turn on Mac → Android clipboard text sync. Mac → Android clipboard sync is a **sticky preference**: the poll skips sends while the phone is unreachable and a transient failure never disables it, so it survives reconnects (a failed send previously toggled the preference off).
+- Mac menu can send clipboard text to Android and turn on Mac → Android clipboard text sync. (The Mac → Android "open link" popover action was removed — it went unused; Android → Mac link opening is unaffected.) Mac → Android clipboard sync is a **sticky preference**: the poll skips sends while the phone is unreachable and a transient failure never disables it, so it survives reconnects (a failed send previously toggled the preference off).
 - Android app can send current clipboard text to Mac, open the current clipboard link on Mac, and turn on foreground clipboard text sync.
 - Android share sheet can send selected plain text to the Mac clipboard or open shared URLs on the Mac.
 - Mac receiving text sets the Mac clipboard; Android receiving text sets the Android clipboard.
@@ -111,7 +111,7 @@ Android limitation: Android 10+ does not let ordinary background apps read clipb
 
 ### Do Not Disturb (Mac)
 
-- The Mac status-item **right-click menu** carries a **Do Not Disturb** submenu with preset quiet windows (1 / 2 / 6 / 12 / 24 hours). While a window is active the submenu shows "On until …" plus **Turn Off**, and the menu entry is checkmarked.
+- **Left-click popover:** Do Not Disturb is a quick-action tile (it replaced the unused Mac → Android "Open Link" tile, alongside Send File and Clipboard). Off, the tile is a menu of preset quiet windows (1 / 2 / 6 / 12 / 24 hours); on, it turns accent-amber, shows "Until 3:45 PM", and clicking it turns DND off. The status-item **right-click menu** carries the same options as a **Do Not Disturb** submenu ("On until …" + **Turn Off**, checkmarked when active). Both surfaces call the shared `setDoNotDisturb(hours:)` / `disableDoNotDisturb()` and stay in lockstep.
 - Engaging DND stores an expiry timestamp in `Preferences.doNotDisturbUntil` (persisted, so a window survives relaunch). While `isDoNotDisturbActive`, the Mac suppresses **transfer-received / transfer-failed / call-on-phone** notifications and the **mirrored-Android notification banner** — the Android notification is still logged to the Mac's notification history, only the on-screen banner is withheld.
 - The status-icon tooltip appends "· Do Not Disturb until …", and the mirrored **Transfer notifications** feature-status reports `off` with a "Paused by Do Not Disturb until …" detail so the paired phone reflects the quiet window.
 - A one-shot timer (`doNotDisturbExpiryTimer`) clears the window when it elapses and refreshes the icon; the state is also lazily expired whenever the menu opens or the app launches.

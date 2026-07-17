@@ -57,6 +57,9 @@ final class PanelViewModel: ObservableObject {
     @Published var batteryPercent: Int? = nil
     @Published var hasAndroidTarget: Bool = false
     @Published var clipboardSyncEnabled: Bool = true
+    /// When Do Not Disturb is scheduled to end, or `nil` when it's off. The view
+    /// treats a past date as off.
+    @Published var doNotDisturbUntil: Date? = nil
     @Published var phone = PanelPhoneState()
     @Published var recentTransfers: [RecentTransferRow] = []
     @Published var activeTransfer: PanelTransfer? = nil
@@ -66,8 +69,10 @@ final class PanelViewModel: ObservableObject {
     // MARK: Actions (wired by the delegate)
     var onSendFile: () -> Void = {}
     var onSendClipboard: () -> Void = {}
-    var onOpenLink: () -> Void = {}
     var onToggleClipboardSync: () -> Void = {}
+    /// Engage Do Not Disturb for the given number of hours.
+    var onSetDoNotDisturb: (Int) -> Void = { _ in }
+    var onTurnOffDoNotDisturb: () -> Void = {}
     var onShowQR: () -> Void = {}
     var onReconnect: () -> Void = {}
     var onCallNumber: () -> Void = {}

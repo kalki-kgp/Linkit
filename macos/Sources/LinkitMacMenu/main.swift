@@ -348,6 +348,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         panelViewModel.hasAndroidTarget = !androidTargets.isEmpty
         panelViewModel.peerAttentionCount = androidTargets.first?.features.filter { $0.state == .attention }.count ?? 0
         panelViewModel.clipboardSyncEnabled = clipboardSyncEnabled
+        panelViewModel.doNotDisturbUntil = prefs.isDoNotDisturbActive ? prefs.doNotDisturbUntil : nil
         panelViewModel.phone = panelPhoneState()
         panelViewModel.recentTransfers = app.recentTransfers(limit: 8).enumerated().map { index, entry in
             RecentTransferRow(
@@ -392,8 +393,9 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func wirePanelActions() {
         panelViewModel.onSendFile = { [weak self] in self?.pickFilesToSend() }
         panelViewModel.onSendClipboard = { [weak self] in self?.sendClipboardTextToAndroid() }
-        panelViewModel.onOpenLink = { [weak self] in self?.openClipboardLinkOnAndroid() }
         panelViewModel.onToggleClipboardSync = { [weak self] in self?.toggleClipboardSync() }
+        panelViewModel.onSetDoNotDisturb = { [weak self] hours in self?.setDoNotDisturb(hours: hours) }
+        panelViewModel.onTurnOffDoNotDisturb = { [weak self] in self?.disableDoNotDisturb() }
         panelViewModel.onShowQR = { [weak self] in self?.closePopover(); self?.showPairingQR() }
         panelViewModel.onReconnect = { [weak self] in self?.refreshAllDeviceStatus() }
         panelViewModel.onCallNumber = { [weak self] in self?.callNumberOnAndroid() }
@@ -510,9 +512,16 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     @objc private func enableDoNotDisturb(_ sender: NSMenuItem) {
         guard let hours = sender.representedObject as? Int else { return }
+        setDoNotDisturb(hours: hours)
+    }
+
+    /// Engages Do Not Disturb for `hours`. Shared by the menu-bar submenu and the
+    /// popover duration pills so both surfaces stay in lockstep.
+    func setDoNotDisturb(hours: Int) {
         prefs.doNotDisturbUntil = Date().addingTimeInterval(TimeInterval(hours) * 3600)
         scheduleDoNotDisturbExpiry()
         refreshStatusButton()
+        refreshPanel()
         showTransientIcon(.success, tooltip: "Do Not Disturb on")
     }
 
@@ -521,6 +530,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         doNotDisturbExpiryTimer?.invalidate()
         doNotDisturbExpiryTimer = nil
         refreshStatusButton()
+        refreshPanel()
         showTransientIcon(.success, tooltip: "Do Not Disturb off")
     }
 
@@ -535,6 +545,7 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             self.prefs.expireDoNotDisturbIfNeeded()
             self.doNotDisturbExpiryTimer = nil
             self.refreshStatusButton()
+            self.refreshPanel()
         }
         timer.tolerance = 30
         doNotDisturbExpiryTimer = timer
@@ -641,14 +652,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return
         }
         sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard sent to Android")
-    }
-
-    @objc private func openClipboardLinkOnAndroid() {
-        guard let text = currentClipboardText(), let url = validatedWebURL(text) else {
-            showNonFatalError("Clipboard does not contain an http or https URL.")
-            return
-        }
-        sendActionToAndroid(type: "open_url", text: url.absoluteString, successTooltip: "Opened link on Android")
     }
 
     @objc private func toggleClipboardSync() {
