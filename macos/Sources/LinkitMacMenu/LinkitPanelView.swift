@@ -95,7 +95,7 @@ struct LinkitPanelView: View {
         HStack(spacing: 10) {
             QuickActionTile(title: "Send File", systemImage: "doc.badge.plus", enabled: model.isConnected, action: model.onSendFile)
             QuickActionTile(title: "Clipboard", systemImage: "doc.on.clipboard", enabled: model.isConnected, action: model.onSendClipboard)
-            QuickActionTile(title: "Open Link", systemImage: "link", enabled: model.isConnected, action: model.onOpenLink)
+            DoNotDisturbTile(model: model)
         }
     }
 
@@ -345,6 +345,78 @@ private struct PhoneAttentionRow: View {
         }
         .buttonStyle(.plain)
     }
+}
+
+// MARK: - Do Not Disturb tile
+
+/// Quick-action tile for Do Not Disturb. Off: a menu of preset quiet windows
+/// (1/2/6/12/24h). On: an accented tile showing the end time that turns DND off
+/// on click. Styled to match ``QuickActionTile`` so it sits in the same row.
+private struct DoNotDisturbTile: View {
+    @ObservedObject var model: PanelViewModel
+
+    private var isActive: Bool {
+        guard let until = model.doNotDisturbUntil else { return false }
+        return until > Date()
+    }
+
+    var body: some View {
+        if isActive {
+            Button(action: model.onTurnOffDoNotDisturb) {
+                tileBody(title: "Until \(untilText)", systemImage: "moon.fill", active: true)
+            }
+            .buttonStyle(.plain)
+            .help("Do Not Disturb on until \(untilText) — click to turn off")
+        } else {
+            Menu {
+                ForEach(Preferences.doNotDisturbDurations, id: \.self) { hours in
+                    Button(hours == 1 ? "For 1 hour" : "For \(hours) hours") {
+                        model.onSetDoNotDisturb(hours)
+                    }
+                }
+            } label: {
+                tileBody(title: "Do Not Disturb", systemImage: "moon", active: false)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("Mute Linkit notifications")
+        }
+    }
+
+    private func tileBody(title: String, systemImage: String, active: Bool) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .regular))
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 62)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(active ? Brand.amber.opacity(0.14) : Color.primary.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(active ? Brand.amber.opacity(0.3) : Color.primary.opacity(0.07), lineWidth: 1)
+        )
+        .foregroundStyle(active ? Brand.amber : Color.primary)
+        .contentShape(Rectangle())
+    }
+
+    private var untilText: String {
+        guard let until = model.doNotDisturbUntil else { return "on" }
+        return Self.timeFormatter.string(from: until)
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
 }
 
 // MARK: - Transfer strip
