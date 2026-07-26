@@ -39,7 +39,7 @@ class LinkitReceiverService : Service() {
         _runningFlow.value = true
         DebugTelemetry.install(applicationContext)
         DebugTelemetry.serviceStarted("LinkitReceiverService")
-        // A reboot restarts this service (START_STICKY) but the notification listener may not
+        // A reboot restarts this service (BootReceiver) but the notification listener may not
         // rebind on its own; nudge it here so mirroring recovers without user action.
         NotificationAccess.ensureListenerBound(applicationContext)
         ensureChannel()
@@ -61,6 +61,9 @@ class LinkitReceiverService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // The only path that clears the flag: an explicit Stop means "stay stopped",
+            // so boot and task-removal must not resurrect the receiver afterwards.
+            LinkitPreferences.get(applicationContext).setReceiverEnabled(false)
             serviceScope.launch {
                 val identityStore = IdentityStore(applicationContext)
                 identityStore.trustedMac()?.let { mac ->
@@ -70,7 +73,26 @@ class LinkitReceiverService : Service() {
             }
             return START_NOT_STICKY
         }
+        // The user swiped the persistent notification away. It is the only handle on a
+        // running receiver, so put it straight back.
+        if (intent?.action == ACTION_RESTORE_NOTIFICATION) {
+            startForegroundWithNotification(currentStatus("Listening for Mac drops"))
+            DebugTelemetry.recordEvent("fgs", "notification restored after dismissal")
+        }
+        LinkitPreferences.get(applicationContext).setReceiverEnabled(true)
         return START_STICKY
+    }
+
+    /**
+     * Swiping the app out of Recents can tear down the process on many OEM builds. The
+     * receiver is meant to outlive the UI, so ask for an immediate restart — legal here
+     * because we are still a running foreground service when this fires.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (!LinkitPreferences.get(applicationContext).receiverEnabled()) return
+        runCatching { start(applicationContext) }
+            .onFailure { DebugTelemetry.recordEvent("fgs", "restart after task removal failed: ${it.message}") }
     }
 
     override fun onDestroy() {
@@ -251,6 +273,15 @@ class LinkitReceiverService : Service() {
             ClipboardActionActivity.intent(this, ClipboardActionActivity.ACTION_OPEN_LINK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        // Android 13+ lets users swipe away a foreground-service notification even when it is
+        // ongoing. This delete intent re-posts it, so the receiver keeps a visible handle and
+        // the only way to actually stop it stays the explicit Stop action.
+        val restoreIntent = PendingIntent.getService(
+            this,
+            4,
+            Intent(this, LinkitReceiverService::class.java).apply { action = ACTION_RESTORE_NOTIFICATION },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setContentTitle("Linkit ready")
@@ -260,6 +291,7 @@ class LinkitReceiverService : Service() {
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setDeleteIntent(restoreIntent)
             .setContentIntent(openIntent)
             .addAction(0, "Send Clipboard", sendClipboardIntent)
             .addAction(0, "Open Link", openLinkIntent)
@@ -289,6 +321,7 @@ class LinkitReceiverService : Service() {
         private const val CHANNEL_ID = "linkit_receiver"
         private const val NOTIFICATION_ID = 4271
         const val ACTION_STOP = "tech.kalkikgp.linkit.action.STOP_RECEIVER"
+        private const val ACTION_RESTORE_NOTIFICATION = "tech.kalkikgp.linkit.action.RESTORE_RECEIVER_NOTIFICATION"
 
         // Exposed as a flow so feature-status recomputes the moment the receiver FGS actually
         // binds/unbinds, instead of waiting for the next resume/presence tick — e.g. right after
@@ -309,6 +342,7 @@ class LinkitReceiverService : Service() {
         }
 
         fun stop(context: Context) {
+            LinkitPreferences.get(context).setReceiverEnabled(false)
             context.stopService(Intent(context, LinkitReceiverService::class.java))
         }
     }

@@ -65,6 +65,17 @@ class LinkitPreferences private constructor(context: Context) {
         _settings.update { it.copy(accentColorHex = normalized) }
     }
 
+    /**
+     * True while the user wants the receiver running. Set when the receiver FGS is started
+     * and cleared only by an explicit Stop, so a reboot or a task-swipe can bring the service
+     * back without waiting for the user to reopen the app.
+     */
+    fun receiverEnabled(): Boolean = prefs.getBoolean(KEY_RECEIVER_ENABLED, false)
+
+    fun setReceiverEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_RECEIVER_ENABLED, enabled).apply()
+    }
+
     /** Epoch millis of the last automatic update check (0 if never), for the once-a-day throttle. */
     fun lastUpdateCheckAt(): Long = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L)
 
@@ -77,6 +88,7 @@ class LinkitPreferences private constructor(context: Context) {
         private const val KEY_CLIPBOARD_SYNC = "clipboard_sync_enabled"
         private const val KEY_NOTIFICATION_MIRROR = "notification_mirror_enabled"
         private const val KEY_ACCENT_COLOR = "accent_color_hex"
+        private const val KEY_RECEIVER_ENABLED = "receiver_enabled"
         private const val KEY_LAST_UPDATE_CHECK = "last_update_check_at"
 
         @Volatile private var instance: LinkitPreferences? = null
