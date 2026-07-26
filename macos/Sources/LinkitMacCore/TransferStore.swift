@@ -10,6 +10,10 @@ final class TransferStore {
     private let history: TransferHistoryStore?
     private let sessionTTL: TimeInterval = 60 * 60
     private let uploadTokenTTL: TimeInterval = 5 * 60
+    /// How long a record is kept past `expiresAt` before it is dropped from memory. The
+    /// grace period keeps finalize replay idempotent and late `status`/`cancel` calls
+    /// answerable; beyond it the id resolves to `not_found`.
+    private let expiredRecordGrace: TimeInterval = 60 * 60
 
     init(destination: URL, logger: LinkitLogger, history: TransferHistoryStore? = nil) throws {
         self.destination = destination
@@ -20,7 +24,23 @@ final class TransferStore {
         try FileManager.default.createDirectory(at: tmpFolder, withIntermediateDirectories: true)
     }
 
+    /// Drops records whose session expired long enough ago that no client can still be
+    /// asking about them. Without this the dictionary grows by one record per transfer for
+    /// the life of the process — and the menu-bar app is a long-running `LSUIElement`.
+    /// Caller must hold `lock`.
+    private func pruneExpiredRecordsLocked(now: Date) {
+        let cutoff = now.addingTimeInterval(-expiredRecordGrace)
+        guard records.contains(where: { $0.value.expiresAt <= cutoff }) else { return }
+        let before = records.count
+        records = records.filter { $0.value.expiresAt > cutoff }
+        logger.info("pruned expired transfer records removed=\(before - records.count) remaining=\(records.count)")
+    }
+
     func sweepOrphans(now: Date = Date()) {
+        lock.lock()
+        pruneExpiredRecordsLocked(now: now)
+        lock.unlock()
+
         let cutoff = now.addingTimeInterval(-sessionTTL)
         let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
 
@@ -98,6 +118,7 @@ final class TransferStore {
         )
 
         lock.lock()
+        pruneExpiredRecordsLocked(now: now)
         records[id] = record
         lock.unlock()
 

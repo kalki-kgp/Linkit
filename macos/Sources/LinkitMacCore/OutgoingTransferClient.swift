@@ -20,7 +20,7 @@ public struct OutgoingTransferProgress: Equatable {
 public final class LinkitCancellationToken {
     private let lock = NSLock()
     private var canceled = false
-    private var handlers: [() -> Void] = []
+    private var handlers: [UUID: () -> Void] = [:]
 
     public init() {}
 
@@ -38,7 +38,7 @@ public final class LinkitCancellationToken {
             return
         }
         canceled = true
-        callbacks = handlers
+        callbacks = Array(handlers.values)
         handlers.removeAll()
         lock.unlock()
         callbacks.forEach { $0() }
@@ -50,14 +50,27 @@ public final class LinkitCancellationToken {
         }
     }
 
-    fileprivate func onCancel(_ handler: @escaping () -> Void) {
+    /// Registers a cancel handler and returns its registration id, or `nil` if the token
+    /// was already canceled (the handler ran inline). Callers **must** pass the id back to
+    /// ``removeHandler(_:)`` once their work finishes: one token spans a whole multi-file
+    /// batch, so a handler left behind pins that file's `URLSessionUploadTask` for the rest
+    /// of the batch even though the upload is long done.
+    fileprivate func onCancel(_ handler: @escaping () -> Void) -> UUID? {
         lock.lock()
         if canceled {
             lock.unlock()
             handler()
-            return
+            return nil
         }
-        handlers.append(handler)
+        let id = UUID()
+        handlers[id] = handler
+        lock.unlock()
+        return id
+    }
+
+    fileprivate func removeHandler(_ id: UUID) {
+        lock.lock()
+        handlers.removeValue(forKey: id)
         lock.unlock()
     }
 }
@@ -349,7 +362,10 @@ final class OutgoingTransferClient {
             semaphore.signal()
         }
         task.resume()
-        cancellation?.onCancel { task.cancel() }
+        let cancelRegistration = cancellation?.onCancel { task.cancel() }
+        defer {
+            if let cancelRegistration { cancellation?.removeHandler(cancelRegistration) }
+        }
         semaphore.wait()
         try cancellation?.throwIfCanceled()
         let result = try taskResult.get()
