@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
-import kotlinx.coroutines.runBlocking
 
 class ShareTargetActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,42 +26,26 @@ class ShareTargetActivity : Activity() {
             return
         }
 
-        if (uris.isEmpty() && !sharedText.isNullOrBlank()) {
-            sendTextHandoff(sharedText)
-            return
+        // This activity is `windowNoDisplay`, so it MUST call finish() before onResume()
+        // completes or the framework throws. Every branch below therefore hands the work
+        // to LinkitSendService and finishes synchronously — never on a callback.
+        val enqueue = runCatching {
+            if (uris.isEmpty()) {
+                LinkitSendService.enqueueText(
+                    context = this,
+                    type = if (isWebUrl(sharedText!!)) "open_url" else "text",
+                    text = sharedText.trim()
+                )
+            } else {
+                LinkitSendService.enqueue(this, uris)
+            }
         }
-
-        runCatching { LinkitSendService.enqueue(this, uris) }
+        enqueue
             .onSuccess { Toast.makeText(this, "Sending via Linkit", Toast.LENGTH_SHORT).show() }
             .onFailure { error ->
                 Toast.makeText(this, "Could not start Linkit send: ${error.message}", Toast.LENGTH_LONG).show()
             }
         finish()
-    }
-
-    private fun sendTextHandoff(text: String) {
-        Toast.makeText(this, "Sending via Linkit", Toast.LENGTH_SHORT).show()
-        Thread {
-            val result = runCatching {
-                val store = IdentityStore(applicationContext)
-                val mac = store.trustedMac() ?: error("Pair Linkit with your Mac first")
-                val type = if (isWebUrl(text)) "open_url" else "text"
-                runBlocking { LinkitClient().sendAction(mac, store, type, text.trim()) }
-                type
-            }
-            runOnUiThread {
-                result.onSuccess { type ->
-                    Toast.makeText(
-                        this,
-                        if (type == "open_url") "Opening link on Mac" else "Sent text to Mac",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }.onFailure { error ->
-                    Toast.makeText(this, "Could not hand off text: ${error.message}", Toast.LENGTH_LONG).show()
-                }
-                finish()
-            }
-        }.start()
     }
 
     private fun extractUris(intent: Intent?): List<Uri> {
