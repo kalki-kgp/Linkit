@@ -220,6 +220,10 @@ public struct DeviceConnectionResponse: Codable, Equatable {
     public let lastSeenAt: String?
     /// This Mac's self-reported feature health (Mac → Android), returned to the registering peer.
     public let features: [FeatureStatus]?
+    /// This Mac's live condition (battery, link quality, free space), so the phone can show a
+    /// device card as informative as the one the Mac shows for the phone. Nil on peers that
+    /// predate the exchange.
+    public let mac: MacSystemStatus?
 }
 
 public struct AndroidDeviceStatusResponse: Codable, Equatable {

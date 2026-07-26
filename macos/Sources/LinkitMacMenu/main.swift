@@ -187,7 +187,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         do {
             let receiver = try LinkitReceiverApp(
                 configuration: makeReceiverConfiguration(),
-                localFeaturesProvider: { [weak self] in self?.macFeatureStatuses() ?? [] }
+                localFeaturesProvider: { [weak self] in self?.macFeatureStatuses() ?? [] },
+                // Read off the HTTP server's thread, like `macFeatureStatuses()` above: a single
+                // Date comparison against a pref the main thread may be rewriting, where the only
+                // possible skew is a status one refresh cycle stale.
+                doNotDisturbProvider: { [weak self] in self?.prefs.isDoNotDisturbActive ?? false }
             )
             self.app = receiver
             setupMenu()

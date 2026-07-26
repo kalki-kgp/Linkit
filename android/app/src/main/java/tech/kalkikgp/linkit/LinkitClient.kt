@@ -166,6 +166,9 @@ class LinkitClient(
         if (response.has("features")) {
             MacPresence.setMacFeatures(featureStatusesFromJson(response.optJSONArray("features")))
         }
+        // Same contract for the Mac's live battery/link/storage snapshot: absent on an older Mac,
+        // so leave the last known values alone rather than blanking the card on every refresh.
+        response.optJSONObject("mac")?.let { MacPresence.setMacStatus(MacSystemStatus.fromJson(it)) }
         MacPresence.touch()
         DebugTelemetry.recordEvent("client", "registerReceiver ok ${mac.ip}:${mac.port}")
     }

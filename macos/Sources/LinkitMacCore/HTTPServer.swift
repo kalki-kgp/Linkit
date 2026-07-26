@@ -39,7 +39,8 @@ public final class LinkitReceiverApp {
     public init(
         configuration: ReceiverConfiguration = ReceiverConfiguration(),
         bluetoothAddressProvider: @escaping () -> String? = { nil },
-        localFeaturesProvider: @escaping () -> [FeatureStatus] = { [] }
+        localFeaturesProvider: @escaping () -> [FeatureStatus] = { [] },
+        doNotDisturbProvider: @escaping () -> Bool = { false }
     ) throws {
         self.configuration = configuration
         self.devToken = try LinkitRandom.token()
@@ -73,7 +74,12 @@ public final class LinkitReceiverApp {
             history: history,
             logger: logger,
             bluetoothAddressProvider: bluetoothAddressProvider,
-            localFeaturesProvider: localFeaturesProvider
+            localFeaturesProvider: localFeaturesProvider,
+            // Free space is measured on the volume that actually receives drops, which is the
+            // number the phone cares about before starting a large send.
+            macStatusProvider: { [dropFolder = configuration.destination] in
+                MacSystemStatusReader.current(doNotDisturb: doNotDisturbProvider(), dropFolder: dropFolder)
+            }
         )
     }
 
@@ -220,6 +226,7 @@ final class HTTPServer {
     private let logger: LinkitLogger
     private let bluetoothAddressProvider: () -> String?
     private let localFeaturesProvider: () -> [FeatureStatus]
+    private let macStatusProvider: () -> MacSystemStatus?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -241,7 +248,8 @@ final class HTTPServer {
         history: TransferHistoryStore,
         logger: LinkitLogger,
         bluetoothAddressProvider: @escaping () -> String? = { nil },
-        localFeaturesProvider: @escaping () -> [FeatureStatus] = { [] }
+        localFeaturesProvider: @escaping () -> [FeatureStatus] = { [] },
+        macStatusProvider: @escaping () -> MacSystemStatus? = { nil }
     ) {
         self.port = port
         self.token = token
@@ -256,6 +264,7 @@ final class HTTPServer {
         self.logger = logger
         self.bluetoothAddressProvider = bluetoothAddressProvider
         self.localFeaturesProvider = localFeaturesProvider
+        self.macStatusProvider = macStatusProvider
     }
 
     func run() throws {
@@ -414,7 +423,10 @@ final class HTTPServer {
                     batteryPercent: nil,
                     connectedAt: nil,
                     lastSeenAt: nil,
-                    features: nil
+                    features: nil,
+                    // The phone is deliberately unregistering; sending it a fresh Mac snapshot
+                    // would only be state it is about to throw away.
+                    mac: nil
                 )
             )
         }
@@ -886,7 +898,8 @@ final class HTTPServer {
             batteryPercent: connected.batteryPercent,
             connectedAt: connected.connectedAt,
             lastSeenAt: connected.lastSeenAt,
-            features: localFeaturesProvider()
+            features: localFeaturesProvider(),
+            mac: macStatusProvider()
         )
     }
 
