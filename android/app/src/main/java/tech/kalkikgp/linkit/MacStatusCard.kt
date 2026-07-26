@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -176,13 +177,18 @@ fun MacStatusCard(
  * Mac's own panel does. Vector shapes only — no bitmap asset to ship or theme.
  */
 @Composable
-private fun MacBookGlyph(accent: Color, connected: Boolean) {
+internal fun MacBookGlyph(
+    accent: Color,
+    connected: Boolean,
+    width: Dp = 96.dp,
+    height: Dp = 62.dp
+) {
     val screenTint = if (connected) accent else MaterialTheme.colorScheme.outline
     val body = MaterialTheme.colorScheme.onSurfaceVariant
     androidx.compose.foundation.Canvas(
         modifier = Modifier
-            .width(96.dp)
-            .height(62.dp)
+            .width(width)
+            .height(height)
     ) {
         drawMacBook(screenTint = screenTint, bodyTint = body)
     }
