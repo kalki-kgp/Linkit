@@ -106,6 +106,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -1257,7 +1261,7 @@ private fun Intent.streamUris(): List<Uri> {
 enum class TopTab { HOME, ACTIVITY, SETTINGS }
 
 /** The Settings tab is a hub that pushes one of these focused detail screens. */
-private enum class SettingsRoute { HUB, DEVICE, CLIPBOARD, NOTIFICATIONS, PHONE, APPEARANCE, BACKGROUND, UPDATES, ABOUT }
+enum class SettingsRoute { HUB, DEVICE, CLIPBOARD, NOTIFICATIONS, PHONE, APPEARANCE, BACKGROUND, UPDATES, ABOUT }
 
 @Composable
 private fun LinkitScreen(
@@ -2136,7 +2140,7 @@ private fun SettingsTab(
     onSetAccent: (String) -> Unit
 ) {
     when (route) {
-        SettingsRoute.HUB -> SettingsHub(state = state, onOpenDetail = onOpenDetail)
+        SettingsRoute.HUB -> SettingsHubPage(state = state, settings = settings, onOpenDetail = onOpenDetail)
         SettingsRoute.DEVICE -> DeviceDetail(
             state = state,
             onBack = onBackToHub,
@@ -2155,78 +2159,21 @@ private fun SettingsTab(
     }
 }
 
-/** The Settings hub: a short, scannable list of categories that drill in. */
+/** Scroll host for the Settings hub; the hub's own content lives in `SettingsHub.kt`. */
 @Composable
-private fun SettingsHub(state: LinkitUiState, onOpenDetail: (SettingsRoute) -> Unit) {
-    val accent = MaterialTheme.colorScheme.primary
+private fun SettingsHubPage(
+    state: LinkitUiState,
+    settings: LinkitSettings,
+    onOpenDetail: (SettingsRoute) -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
-            .padding(top = 8.dp, bottom = GlassBarContentPadding),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
+            .padding(top = 8.dp, bottom = GlassBarContentPadding)
     ) {
-        LinkitLargeHeader(title = "Settings", subtitle = "Manage your Linkit connection and preferences.")
-
-        SettingsGroupCard(label = "Connection") {
-            HubRow(
-                icon = Icons.Rounded.Devices,
-                title = "Device",
-                subtitle = if (state.isConnectedToMac) "Connected · ${state.trustedMac?.deviceName ?: "Mac"}" else "Paired, offline",
-                accent = accent,
-                onClick = { onOpenDetail(SettingsRoute.DEVICE) }
-            )
-        }
-
-        SettingsGroupCard(label = "Features") {
-            HubRow(Icons.Rounded.ContentPaste, "Clipboard", "Sync copied text between devices.", accent) { onOpenDetail(SettingsRoute.CLIPBOARD) }
-            LinkitRowDivider()
-            HubRow(Icons.Rounded.Notifications, "Notifications", "Mirror phone notifications to the Mac.", accent) { onOpenDetail(SettingsRoute.NOTIFICATIONS) }
-            LinkitRowDivider()
-            HubRow(Icons.Rounded.Call, "Phone", "Call control permissions and caller ID.", accent) { onOpenDetail(SettingsRoute.PHONE) }
-        }
-
-        SettingsGroupCard(label = "App") {
-            HubRow(Icons.Rounded.Palette, "Appearance", "Accent color and light or dark theme.", accent) { onOpenDetail(SettingsRoute.APPEARANCE) }
-            LinkitRowDivider()
-            HubRow(Icons.Rounded.Bolt, "Background & battery", "Keep Linkit reachable while the screen is off.", accent) { onOpenDetail(SettingsRoute.BACKGROUND) }
-            LinkitRowDivider()
-            HubRow(Icons.Rounded.Download, "Updates", "Check for a newer Linkit build.", accent) { onOpenDetail(SettingsRoute.UPDATES) }
-            LinkitRowDivider()
-            HubRow(Icons.Rounded.Info, "About", "Version and source code.", accent) { onOpenDetail(SettingsRoute.ABOUT) }
-        }
-    }
-}
-
-/** A hub category row: icon tile, title, one-line summary, optional badge, chevron. */
-@Composable
-private fun HubRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    accent: Color,
-    badge: Int = 0,
-    onClick: () -> Unit
-) {
-    LinkitCardRow(icon = icon, title = title, subtitle = subtitle, accent = accent, onClick = onClick) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (badge > 0) {
-                Box(
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("$badge", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onError)
-                }
-            }
-            RowChevron()
-        }
+        SettingsHubScreen(state = state, settings = settings, onOpenDetail = onOpenDetail)
     }
 }
 
@@ -2238,6 +2185,7 @@ private fun SettingsDetailScaffold(
     onBack: () -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val headerWash = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2246,16 +2194,35 @@ private fun SettingsDetailScaffold(
             .padding(bottom = GlassBarContentPadding),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            IconButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp).size(36.dp)) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "Back",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(22.dp)
-                )
+        // A soft accent wash behind the header, echoing the hero cards on Home and the hub, so
+        // drilling in still feels like the same app rather than a plain sub-page. Bled past the
+        // page's horizontal padding so it reads as a band, not a card.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .drawBehind {
+                    val bleed = 20.dp.toPx()
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            listOf(headerWash, Color.Transparent),
+                            endY = size.height + bleed
+                        ),
+                        topLeft = Offset(-bleed, -bleed),
+                        size = Size(size.width + bleed * 2, size.height + bleed * 2)
+                    )
+                }
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                IconButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp).size(36.dp)) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                LinkitLargeHeader(title = title, subtitle = subtitle)
             }
-            LinkitLargeHeader(title = title, subtitle = subtitle)
         }
         content()
     }

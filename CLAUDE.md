@@ -8,7 +8,7 @@ A private, cloud-free local device link between **one** Android phone and **one*
 
 The README is product-facing. **`docs/current-state.md`** is the technical feature snapshot (keep it updated when shipping). When behavior and docs disagree, trust the code and update the docs.
 
-**Latest release:** v0.9.4 on GitHub Releases (in-app updaters on both platforms).
+**Latest release:** v0.9.5 on GitHub Releases (in-app updaters on both platforms).
 
 ## Repository layout
 
