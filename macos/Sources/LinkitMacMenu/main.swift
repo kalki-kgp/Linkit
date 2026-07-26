@@ -187,7 +187,11 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         do {
             let receiver = try LinkitReceiverApp(
                 configuration: makeReceiverConfiguration(),
-                localFeaturesProvider: { [weak self] in self?.macFeatureStatuses() ?? [] }
+                localFeaturesProvider: { [weak self] in self?.macFeatureStatuses() ?? [] },
+                // Read off the HTTP server's thread, like `macFeatureStatuses()` above: a single
+                // Date comparison against a pref the main thread may be rewriting, where the only
+                // possible skew is a status one refresh cycle stale.
+                doNotDisturbProvider: { [weak self] in self?.prefs.isDoNotDisturbActive ?? false }
             )
             self.app = receiver
             setupMenu()
@@ -392,7 +396,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Connects the popover's buttons to the delegate's existing handlers.
     private func wirePanelActions() {
         panelViewModel.onSendFile = { [weak self] in self?.pickFilesToSend() }
-        panelViewModel.onSendClipboard = { [weak self] in self?.sendClipboardTextToAndroid() }
         panelViewModel.onToggleClipboardSync = { [weak self] in self?.toggleClipboardSync() }
         panelViewModel.onSetDoNotDisturb = { [weak self] hours in self?.setDoNotDisturb(hours: hours) }
         panelViewModel.onTurnOffDoNotDisturb = { [weak self] in self?.disableDoNotDisturb() }
@@ -644,14 +647,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc private func openDropFolder() {
         guard let app else { return }
         NSWorkspace.shared.open(app.dropFolder)
-    }
-
-    @objc private func sendClipboardTextToAndroid() {
-        guard let text = currentClipboardText(), !text.isEmpty else {
-            showNonFatalError("Clipboard does not contain text.")
-            return
-        }
-        sendActionToAndroid(type: "clipboard", text: text, successTooltip: "Clipboard sent to Android")
     }
 
     @objc private func toggleClipboardSync() {
@@ -940,10 +935,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             self?.setLaunchAtLogin(enabled: on)
             self?.refreshSettings()
         }
-        settingsViewModel.onSetClipboardSync = { [weak self] on in
-            self?.setClipboardSync(enabled: on)
-            self?.refreshSettings()
-        }
         settingsViewModel.onDisconnect = { [weak self] id in
             self?.app?.disconnectDevice(id)
             self?.refreshStatusButton()
@@ -975,7 +966,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let byId = Dictionary(connected.map { ($0.deviceId, $0) }, uniquingKeysWith: { first, _ in first })
         settingsViewModel.launchAtLogin = isLaunchAtLoginEnabled
         settingsViewModel.launchAtLoginAvailable = isRunningFromAppBundle
-        settingsViewModel.clipboardSyncEnabled = clipboardSyncEnabled
         settingsViewModel.devices = app.trustedDevices().map { device in
             SettingsDeviceRow(
                 id: device.deviceId,
@@ -1007,11 +997,6 @@ final class LinkitMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         settingsViewModel.phoneStatus = panelPhoneState().statusText
         settingsViewModel.version = appVersionString()
         settingsViewModel.build = appBuildString()
-    }
-
-    private func setClipboardSync(enabled: Bool) {
-        guard enabled != clipboardSyncEnabled else { return }
-        toggleClipboardSync()
     }
 
     // MARK: Preferences applied at launch

@@ -16,7 +16,6 @@ final class SettingsViewModel: ObservableObject {
     // MARK: Snapshot
     @Published var launchAtLogin = false
     @Published var launchAtLoginAvailable = false
-    @Published var clipboardSyncEnabled = true
     @Published var devices: [SettingsDeviceRow] = []
     @Published var localIP = ""
     @Published var port = ""
@@ -34,7 +33,6 @@ final class SettingsViewModel: ObservableObject {
 
     // MARK: Actions
     var onSetLaunchAtLogin: (Bool) -> Void = { _ in }
-    var onSetClipboardSync: (Bool) -> Void = { _ in }
     var onDisconnect: (String) -> Void = { _ in }
     var onForget: (String) -> Void = { _ in }
     var onShowQR: () -> Void = {}

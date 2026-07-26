@@ -30,7 +30,6 @@ struct LinkitPanelView: View {
                             PhoneAttentionRow(count: model.peerAttentionCount, onOpenSettings: model.onOpenSettings)
                         }
                         quickActions
-                        clipboardSyncRow
                         PhoneRow(model: model)
                         if !model.recentTransfers.isEmpty {
                             recentTransfers
@@ -94,27 +93,9 @@ struct LinkitPanelView: View {
     private var quickActions: some View {
         HStack(spacing: 10) {
             QuickActionTile(title: "Send File", systemImage: "doc.badge.plus", enabled: model.isConnected, action: model.onSendFile)
-            QuickActionTile(title: "Clipboard", systemImage: "doc.on.clipboard", enabled: model.isConnected, action: model.onSendClipboard)
+            ClipboardSyncTile(model: model)
             DoNotDisturbTile(model: model)
         }
-    }
-
-    private var clipboardSyncRow: some View {
-        Toggle(isOn: Binding(
-            get: { model.clipboardSyncEnabled },
-            set: { _ in model.onToggleClipboardSync() }
-        )) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Clipboard Sync")
-                    .font(.system(size: 12, weight: .medium))
-                Text("Copy on Mac → paste on Android")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .toggleStyle(.switch)
-        .tint(Brand.amber)
-        .disabled(!model.isConnected)
     }
 
     // MARK: Recent transfers
@@ -344,6 +325,50 @@ private struct PhoneAttentionRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Clipboard sync tile
+
+/// Quick-action tile for clipboard sync, styled to match ``QuickActionTile``.
+/// Clicking it toggles sync; while on the tile is accent-amber. There is no
+/// manual "send clipboard" action because macOS lets Linkit read the pasteboard
+/// in the background, so an active sync already pushes every copy to the phone.
+private struct ClipboardSyncTile: View {
+    @ObservedObject var model: PanelViewModel
+
+    var body: some View {
+        Button(action: model.onToggleClipboardSync) {
+            VStack(spacing: 7) {
+                Image(systemName: model.clipboardSyncEnabled ? "clipboard.fill" : "clipboard")
+                    .font(.system(size: 18, weight: .regular))
+                Text("Clipboard")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 62)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(model.clipboardSyncEnabled ? Brand.amber.opacity(0.14) : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(model.clipboardSyncEnabled ? Brand.amber.opacity(0.3) : Color.primary.opacity(0.07), lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(tint)
+        .opacity(model.isConnected ? 1 : 0.45)
+        .disabled(!model.isConnected)
+        .help(model.clipboardSyncEnabled
+              ? "Clipboard sync on — copy on Mac, paste on Android"
+              : "Clipboard sync off — click to sync copied text to Android")
+    }
+
+    private var tint: Color {
+        guard model.isConnected else { return .secondary }
+        return model.clipboardSyncEnabled ? Brand.amber : .primary
     }
 }
 

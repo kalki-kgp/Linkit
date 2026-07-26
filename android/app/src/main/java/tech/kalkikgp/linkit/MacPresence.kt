@@ -11,6 +11,10 @@ object MacPresence {
     private val _macFeatures = MutableStateFlow<List<FeatureStatus>>(emptyList())
     val macFeatures: StateFlow<List<FeatureStatus>> = _macFeatures
 
+    /** The Mac's live battery/link/storage snapshot, from the same registration response. */
+    private val _macStatus = MutableStateFlow<MacSystemStatus?>(null)
+    val macStatus: StateFlow<MacSystemStatus?> = _macStatus
+
     fun touch(now: Long = System.currentTimeMillis()) {
         _lastSeenMillis.value = now
     }
@@ -19,8 +23,13 @@ object MacPresence {
         _macFeatures.value = features
     }
 
+    fun setMacStatus(status: MacSystemStatus) {
+        _macStatus.value = status
+    }
+
     fun reset() {
         _lastSeenMillis.value = null
         _macFeatures.value = emptyList()
+        _macStatus.value = null
     }
 }

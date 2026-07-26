@@ -384,19 +384,6 @@ private struct GeneralSettings: View {
                 )
             }
 
-            SettingsGroup(label: "Clipboard") {
-                ToggleRow(
-                    icon: "doc.on.clipboard.fill",
-                    title: "Sync clipboard text to Android",
-                    subtitle: "Copy on your Mac, paste on the paired Android device. Android → Mac sync only works while the Android app is open (an OS privacy limit).",
-                    accent: prefs.accent,
-                    isOn: Binding(
-                        get: { model.clipboardSyncEnabled },
-                        set: { model.onSetClipboardSync($0) }
-                    )
-                )
-            }
-
             SettingsGroup(label: "Notifications") {
                 ToggleRow(
                     icon: "bell.badge.fill",

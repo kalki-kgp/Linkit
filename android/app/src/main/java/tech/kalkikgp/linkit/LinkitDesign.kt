@@ -29,9 +29,36 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.text.format.Formatter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/** Human file size ("15.15 kB"), using the platform formatter so it follows the locale. */
+@Composable
+fun formatBytes(bytes: Long): String = Formatter.formatFileSize(LocalContext.current, bytes)
+
+fun formatEta(seconds: Long): String {
+    if (seconds <= 0) return "0s"
+    val minutes = seconds / 60
+    val rest = seconds % 60
+    return if (minutes > 0) "${minutes}m ${rest}s" else "${rest}s"
+}
+
+fun formatRelative(epochMillis: Long): String {
+    val deltaSeconds = ((System.currentTimeMillis() - epochMillis) / 1000).coerceAtLeast(0)
+    return when {
+        deltaSeconds < 60 -> "just now"
+        deltaSeconds < 3600 -> "${deltaSeconds / 60}m ago"
+        deltaSeconds < 86_400 -> "${deltaSeconds / 3600}h ago"
+        deltaSeconds < 7 * 86_400 -> "${deltaSeconds / 86_400}d ago"
+        else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(epochMillis))
+    }
+}
 
 /**
  * The accent-color system, mirroring the Mac app's `LinkitAccent` / `Preferences.accentColorHex`.

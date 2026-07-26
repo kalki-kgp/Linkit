@@ -34,6 +34,25 @@ final class TransferStoreTests: XCTestCase {
         }
     }
 
+    /// Records used to accumulate for the life of the process — one per transfer, never
+    /// released — which matters because the menu-bar app runs for weeks. A record stays
+    /// resolvable through the grace window (so finalize replay stays idempotent) and is
+    /// dropped only well past expiry.
+    func testExpiredRecordsArePrunedAfterGraceWindow() throws {
+        let fixture = try StoreFixture()
+        defer { fixture.cleanup() }
+
+        let create = try fixture.store.create(request: createRequest(name: "stale.txt", size: 3, clientDeviceId: "phone-a"))
+
+        fixture.store.sweepOrphans(now: Date().addingTimeInterval(90 * 60))
+        XCTAssertNoThrow(try fixture.store.status(id: create.transferId))
+
+        fixture.store.sweepOrphans(now: Date().addingTimeInterval(4 * 60 * 60))
+        XCTAssertThrowsError(try fixture.store.status(id: create.transferId)) { error in
+            XCTAssertEqual((error as? HTTPFailure)?.error, "not_found")
+        }
+    }
+
     func testFinalizeReplayReturnsSameSavedResult() throws {
         let fixture = try StoreFixture()
         defer { fixture.cleanup() }

@@ -8,7 +8,7 @@ A private, cloud-free local device link between **one** Android phone and **one*
 
 The README is product-facing. **`docs/current-state.md`** is the technical feature snapshot (keep it updated when shipping). When behavior and docs disagree, trust the code and update the docs.
 
-**Latest release:** v0.9.1 on GitHub Releases (in-app updaters on both platforms).
+**Latest release:** v0.9.4 on GitHub Releases (in-app updaters on both platforms).
 
 ## Repository layout
 
@@ -80,10 +80,11 @@ Streamed with constant memory and end-to-end SHA-256 verification; the upload sl
 - **`MacRediscovery.kt`** — shared mutex-guarded Bonjour lookup by paired device name + identity proof + persist new endpoint. Used by `MainActivity.discoverAndReconnect()` and `LinkitReceiverService.refreshMacRegistration()` when the stored Mac address fails.
 - Reconnect after Wi-Fi/hotspot changes happens without re-pairing: Android `ConnectivityManager` callbacks, resume-time rediscovery, and a paired-but-offline UI retry loop (~30 s); Mac `NWPathMonitor` (`LocalNetwork.swift` / menu app) drives re-probe and persists `lastKnownHost`/`receivePort` for Android.
 - Bidirectional presence: Mac runs a periodic signed `GET /v1/devices/self/status` sweep (~30 s staleness); Android foreground service refreshes Mac registration (~20 s) and runs active identity proof after >45 s silence. Both converge on the same UI connection state.
+- The `POST /v1/devices/self` **response** is the Mac → Android status channel (no extra endpoint): it carries the Mac's `features` health list and a `mac` object of live system readings (`MacSystemStatus.swift` ↔ `MacSystemStatus.kt` — battery/charging, Low Power, link kind + Wi-Fi quality, free disk, DND, macOS version). Both are optional on the wire; an absent key must leave existing state alone rather than blanking it, so a version-skewed pair keeps working.
 - Android Doze resistance: foreground service holds a Wi-Fi lock; optional battery-optimization exemption prompt; partial wake lock during receive uploads.
 
 ### Android service model
-`LinkitReceiverService` is a foreground service (`foregroundServiceType="specialUse"`) that owns the receiver socket, presence refresh, network monitor, Wi-Fi lock, and `PhoneCallBridge`. `LinkitSendService` (`dataSync`) handles outbound sends. The app must be opened once to start the receiver. Android receive depends on this foreground service running.
+`LinkitReceiverService` is a foreground service (`foregroundServiceType="specialUse"`) that owns the receiver socket, presence refresh, network monitor, Wi-Fi lock, and `PhoneCallBridge`. `LinkitSendService` (`dataSync`) handles outbound sends — both file uploads and `text`/`open_url` handoffs, so share-sheet activities can finish immediately instead of doing network work themselves. The app must be opened once to start the receiver; after that it is meant to stay up: `START_STICKY`, an `onTaskRemoved` restart, a `BootReceiver` (BOOT_COMPLETED / MY_PACKAGE_REPLACED), and a delete-intent that re-posts the persistent notification if the user swipes it away. All of that is gated on `LinkitPreferences.receiverEnabled()`, which only the notification's explicit **Stop** action clears. Android receive depends on this foreground service running.
 
 ### Phone control
 - **Call control** (`PhoneControl.kt` / Mac menu): signed `phone_call`, `phone_answer`, `phone_decline`, `phone_hangup` actions; Android mirrors state with `phone_state` (number, display name when call log/contacts granted). Mac shows incoming-call panel when ringing.

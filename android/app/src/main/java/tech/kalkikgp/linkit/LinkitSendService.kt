@@ -26,9 +26,15 @@ import java.util.UUID
 import kotlin.math.max
 import kotlin.math.roundToLong
 
+/** One unit of outbound work: either a file upload or a clipboard/text/link action. */
+private sealed interface SendJob {
+    @JvmInline value class File(val uri: Uri) : SendJob
+    data class Action(val type: String, val text: String) : SendJob
+}
+
 class LinkitSendService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val queue = ArrayDeque<Uri>()
+    private val queue = ArrayDeque<SendJob>()
     private val queueLock = Any()
     private var workerJob: Job? = null
     private lateinit var identityStore: IdentityStore
@@ -46,9 +52,9 @@ class LinkitSendService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val uris = intent?.extractUris().orEmpty()
-        if (uris.isNotEmpty()) {
-            synchronized(queueLock) { uris.forEach(queue::add) }
+        val jobs = intent?.extractJobs().orEmpty()
+        if (jobs.isNotEmpty()) {
+            synchronized(queueLock) { jobs.forEach(queue::add) }
             ensureWorker()
         } else if (workerJob?.isActive != true && synchronized(queueLock) { queue.isEmpty() }) {
             stopSelfSafely()
@@ -77,10 +83,39 @@ class LinkitSendService : Service() {
             return
         }
         while (true) {
-            val uri = synchronized(queueLock) { queue.pollFirst() } ?: break
-            sendOne(mac, uri)
+            when (val job = synchronized(queueLock) { queue.pollFirst() } ?: break) {
+                is SendJob.File -> sendOne(mac, job.uri)
+                is SendJob.Action -> sendAction(mac, job)
+            }
         }
         stopSelfSafely()
+    }
+
+    /** Clipboard / plain-text / link handoff — a single signed action, no file body. */
+    private suspend fun sendAction(mac: TrustedMac, job: SendJob.Action) {
+        val isLink = job.type == "open_url"
+        startForegroundWithProgress(
+            title = "Sending to ${mac.deviceName}",
+            text = if (isLink) "Opening link" else "Sending text",
+            sub = null,
+            progress = 0,
+            max = 0
+        )
+        runCatching { client.sendAction(mac, identityStore, job.type, job.text) }
+            .onSuccess {
+                postCompletionNotification(
+                    title = if (isLink) "Opened on ${mac.deviceName}" else "Sent to ${mac.deviceName}",
+                    text = job.text.take(ACTION_PREVIEW_CHARS),
+                    success = true
+                )
+            }
+            .onFailure { error ->
+                postCompletionNotification(
+                    title = if (isLink) "Could not open link" else "Could not send text",
+                    text = error.message ?: "Handoff failed",
+                    success = false
+                )
+            }
     }
 
     private suspend fun sendOne(mac: TrustedMac, uri: Uri) {
@@ -264,6 +299,9 @@ class LinkitSendService : Service() {
         private const val CHANNEL_RESULT_ID = "linkit_sender_result"
         private const val PROGRESS_NOTIFICATION_ID = 4272
         private const val EXTRA_CONTENT_URIS = "tech.kalkikgp.linkit.extra.CONTENT_URIS"
+        private const val EXTRA_ACTION_TYPE = "tech.kalkikgp.linkit.extra.ACTION_TYPE"
+        private const val EXTRA_ACTION_TEXT = "tech.kalkikgp.linkit.extra.ACTION_TEXT"
+        private const val ACTION_PREVIEW_CHARS = 120
 
         fun enqueue(context: Context, uris: List<Uri>) {
             if (uris.isEmpty()) return
@@ -274,11 +312,39 @@ class LinkitSendService : Service() {
                     uris.drop(1).forEach { addItem(ClipData.Item(it)) }
                 }
             }
+            start(context, intent)
+        }
+
+        /**
+         * Queues a signed `text` / `open_url` handoff. Runs here rather than on a caller
+         * thread so the share activity can finish immediately and the work survives it.
+         */
+        fun enqueueText(context: Context, type: String, text: String) {
+            if (text.isBlank()) return
+            start(
+                context,
+                Intent(context, LinkitSendService::class.java).apply {
+                    putExtra(EXTRA_ACTION_TYPE, type)
+                    putExtra(EXTRA_ACTION_TEXT, text)
+                }
+            )
+        }
+
+        private fun start(context: Context, intent: Intent) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
+        }
+
+        private fun Intent.extractJobs(): List<SendJob> {
+            val type = getStringExtra(EXTRA_ACTION_TYPE)
+            val text = getStringExtra(EXTRA_ACTION_TEXT)
+            if (!type.isNullOrBlank() && !text.isNullOrBlank()) {
+                return listOf(SendJob.Action(type, text))
+            }
+            return extractUris().map(SendJob::File)
         }
 
         private fun Intent.extractUris(): List<Uri> {

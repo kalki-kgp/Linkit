@@ -68,7 +68,6 @@ final class PanelViewModel: ObservableObject {
 
     // MARK: Actions (wired by the delegate)
     var onSendFile: () -> Void = {}
-    var onSendClipboard: () -> Void = {}
     var onToggleClipboardSync: () -> Void = {}
     /// Engage Do Not Disturb for the given number of hours.
     var onSetDoNotDisturb: (Int) -> Void = { _ in }

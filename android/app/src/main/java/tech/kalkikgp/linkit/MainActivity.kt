@@ -299,7 +299,11 @@ data class LinkitUiState(
     val networkHint: String? = null,
     val clipboardSyncEnabled: Boolean = true,
     val localFeatures: List<FeatureStatus> = emptyList(),
-    val macFeatures: List<FeatureStatus> = emptyList()
+    val macFeatures: List<FeatureStatus> = emptyList(),
+    /** The Mac's live battery/link/storage snapshot; null until the first registration lands. */
+    val macStatus: MacSystemStatus? = null,
+    /** When the Mac last answered, for the device card's "Last sync" reading. */
+    val macLastSeenMillis: Long? = null
 )
 
 private const val UPDATE_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
@@ -347,6 +351,9 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         }
         viewModelScope.launch {
             MacPresence.lastSeenMillis.collect { seenAt ->
+                // Mirrored before the guards below so the device card's "Last sync" keeps
+                // ticking even on the paths that skip the reconnect bookkeeping.
+                _uiState.update { it.copy(macLastSeenMillis = seenAt) }
                 if (seenAt == null) return@collect
                 if (_uiState.value.trustedMac == null) return@collect
                 // The receiver service may have rediscovered the Mac at a new address
@@ -419,6 +426,11 @@ class LinkitViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             MacPresence.macFeatures.collect { features ->
                 _uiState.update { it.copy(macFeatures = features) }
+            }
+        }
+        viewModelScope.launch {
+            MacPresence.macStatus.collect { status ->
+                _uiState.update { it.copy(macStatus = status) }
             }
         }
         viewModelScope.launch {
@@ -1242,7 +1254,7 @@ private fun Intent.streamUris(): List<Uri> {
  * ------------------------------------------------------------------------- */
 
 /** Top-level destinations shown in the bottom navigation bar. */
-private enum class TopTab { HOME, ACTIVITY, SETTINGS }
+enum class TopTab { HOME, ACTIVITY, SETTINGS }
 
 /** The Settings tab is a hub that pushes one of these focused detail screens. */
 private enum class SettingsRoute { HUB, DEVICE, CLIPBOARD, NOTIFICATIONS, PHONE, APPEARANCE, BACKGROUND, UPDATES, ABOUT }
@@ -1313,22 +1325,14 @@ private fun LinkitScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        bottomBar = {
-            LinkitBottomBar(
-                current = topTab,
-                onSelect = { tab ->
-                    // Tapping the Settings tab always returns to the hub.
-                    if (tab == TopTab.SETTINGS) settingsRoute = SettingsRoute.HUB
-                    topTab = tab
-                }
-            )
-        }
+        containerColor = MaterialTheme.colorScheme.background
     ) { innerPadding ->
+        // Only the top inset is applied here: the glass bar below floats over the content and
+        // handles the bottom inset itself, so the page can scroll underneath it.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(top = innerPadding.calculateTopPadding())
         ) {
             when (topTab) {
                 TopTab.HOME -> HomeTab(
@@ -1340,9 +1344,15 @@ private fun LinkitScreen(
                     onReconnect = viewModel::discoverAndReconnect,
                     onReconnectNotificationListener = viewModel::reconnectNotificationListener,
                     onEnablePhoneControls = onEnablePhoneControls,
-                    onResolveMacFeature = viewModel::resolveMacFeature
+                    onResolveMacFeature = viewModel::resolveMacFeature,
+                    onOpenDeviceSettings = { openSettingsDetail(SettingsRoute.DEVICE) }
                 )
-                TopTab.ACTIVITY -> ActivityTab(history = history, onClear = viewModel::clearHistory)
+                TopTab.ACTIVITY -> ActivityTab(
+                    history = history,
+                    state = state,
+                    onClear = viewModel::clearHistory,
+                    onCancel = viewModel::cancelActive
+                )
                 TopTab.SETTINGS -> SettingsTab(
                     route = settingsRoute,
                     state = state,
@@ -1363,45 +1373,28 @@ private fun LinkitScreen(
                 )
             }
 
+            // The Activity tab shows the live transfer inline in the timeline, so the floating
+            // bar would be a second copy of the same progress there.
             AnimatedVisibility(
-                visible = state.isSending,
+                visible = state.isSending && topTab != TopTab.ACTIVITY,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
                 exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(16.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = GlassBarContentPadding)
             ) {
                 TransferBar(state = state, onCancel = viewModel::cancelActive)
             }
-        }
-    }
-}
 
-/** The persistent bottom navigation — the app's always-visible map. */
-@Composable
-private fun LinkitBottomBar(current: TopTab, onSelect: (TopTab) -> Unit) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 0.dp
-    ) {
-        val items = listOf(
-            Triple(TopTab.HOME, Icons.Rounded.Home, "Home"),
-            Triple(TopTab.ACTIVITY, Icons.Rounded.SwapVert, "Activity"),
-            Triple(TopTab.SETTINGS, Icons.Rounded.Settings, "Settings")
-        )
-        items.forEach { (tab, icon, label) ->
-            NavigationBarItem(
-                selected = current == tab,
-                onClick = { onSelect(tab) },
-                icon = { Icon(icon, contentDescription = label, modifier = Modifier.size(22.dp)) },
-                label = { Text(label, fontSize = 11.sp, fontWeight = FontWeight.Medium) },
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = MaterialTheme.colorScheme.onPrimary,
-                    selectedTextColor = MaterialTheme.colorScheme.primary,
-                    indicatorColor = MaterialTheme.colorScheme.primary,
-                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            LinkitGlassBottomBar(
+                current = topTab,
+                onSelect = { tab ->
+                    // Tapping the Settings tab always returns to the hub.
+                    if (tab == TopTab.SETTINGS) settingsRoute = SettingsRoute.HUB
+                    topTab = tab
+                },
+                modifier = Modifier.align(Alignment.BottomCenter)
             )
         }
     }
@@ -1494,7 +1487,8 @@ private fun HomeTab(
     onReconnect: () -> Unit,
     onReconnectNotificationListener: () -> Unit,
     onEnablePhoneControls: () -> Unit,
-    onResolveMacFeature: (FeatureStatus) -> Unit
+    onResolveMacFeature: (FeatureStatus) -> Unit,
+    onOpenDeviceSettings: () -> Unit
 ) {
     val context = LocalContext.current
     var resolveTarget by remember { mutableStateOf<FeatureStatus?>(null) }
@@ -1504,11 +1498,16 @@ private fun HomeTab(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
-            .padding(bottom = if (state.isSending) 120.dp else 24.dp)
+            // Clear the floating nav bar, plus the transfer bar that parks just above it.
+            .padding(bottom = GlassBarContentPadding + if (state.isSending) 76.dp else 0.dp)
     ) {
         HomeWordmark()
         Spacer(modifier = Modifier.height(4.dp))
-        DeviceCard(state = state, onReconnect = onReconnect)
+        MacStatusCard(
+            state = state,
+            onReconnect = onReconnect,
+            onOpenDeviceSettings = onOpenDeviceSettings
+        )
         Spacer(modifier = Modifier.height(20.dp))
         ActionGrid(
             enabled = state.isConnectedToMac,
@@ -1784,178 +1783,26 @@ private fun HomeWordmark() {
 }
 
 @Composable
-private fun ActivityTab(history: List<TransferHistoryEntry>, onClear: () -> Unit) {
+private fun ActivityTab(
+    history: List<TransferHistoryEntry>,
+    state: LinkitUiState,
+    onClear: () -> Unit,
+    onCancel: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
-            .padding(top = 8.dp, bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
+            .padding(top = 8.dp, bottom = GlassBarContentPadding)
     ) {
-        LinkitLargeHeader(title = "Activity", subtitle = "Files sent and received between your devices.")
-        SettingsGroupCard(label = "Received files") {
-            LinkitCardRow(
-                icon = Icons.Rounded.Download,
-                title = "Save location",
-                subtitle = "Downloads/Linkit Drop",
-                accent = MaterialTheme.colorScheme.primary
-            ) {}
-        }
-        RecentActivity(entries = history, onClear = onClear)
-    }
-}
-
-@Composable
-private fun DeviceCard(state: LinkitUiState, onReconnect: () -> Unit) {
-    val mac = state.trustedMac ?: return
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(
-                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                RoundedCornerShape(20.dp)
-            )
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(13.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            DeviceAvatar(name = mac.deviceName, connected = state.isConnectedToMac)
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
-            ) {
-                Text(
-                    mac.deviceName,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                StatusLine(state)
-            }
-        }
-        if (!state.isConnectedToMac) {
-            Button(
-                onClick = onReconnect,
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-            ) {
-                val isWorking = state.status.startsWith("Looking") ||
-                    state.status.startsWith("Connecting") ||
-                    state.status.startsWith("Trying")
-                Text(
-                    if (isWorking) state.status else "Reconnect",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DeviceAvatar(name: String, connected: Boolean) {
-    val accent = MaterialTheme.colorScheme.primary
-    Box(modifier = Modifier.size(52.dp)) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(15.dp))
-                .background(if (connected) accentGradient(accent) else accentGradient(MaterialTheme.colorScheme.outline)),
-            contentAlignment = Alignment.Center
-        ) {
-            // The paired peer is a Mac — mirror the Mac app, which shows this phone with an
-            // iPhone glyph on the same accent-gradient tile.
-            Icon(
-                imageVector = Icons.Rounded.LaptopMac,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(26.dp)
-            )
-        }
-        if (connected) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .size(14.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.background)
-                    .padding(2.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.tertiary)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatusLine(state: LinkitUiState) {
-    val (label, dotColor, animated) = when {
-        state.isConnectedToMac -> StatusVisual("Connected", MaterialTheme.colorScheme.tertiary, true)
-        state.status.startsWith("Looking") ||
-            state.status.startsWith("Connecting") ||
-            state.status.startsWith("Trying") ||
-            state.status.startsWith("Disconnecting") ||
-            state.status == "Discovering" ->
-                StatusVisual(state.status, MaterialTheme.colorScheme.primary, true)
-        else -> StatusVisual("Offline", MaterialTheme.colorScheme.outline, false)
-    }
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        PulseDot(color = dotColor, animated = animated)
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+        ActivityTimeline(
+            entries = history,
+            state = state,
+            onClear = onClear,
+            onCancel = onCancel
         )
     }
-}
-
-private data class StatusVisual(val label: String, val color: Color, val animated: Boolean)
-
-@Composable
-private fun PulseDot(color: Color, animated: Boolean) {
-    val alpha = if (animated) {
-        val transition = rememberInfiniteTransition(label = "status-pulse")
-        val anim = transition.animateFloat(
-            initialValue = 1f,
-            targetValue = 0.35f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 1400, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "alpha"
-        )
-        anim.value
-    } else 1f
-    Box(
-        modifier = Modifier
-            .size(8.dp)
-            .clip(CircleShape)
-            .background(color.copy(alpha = alpha))
-    )
 }
 
 @Composable
@@ -2166,161 +2013,6 @@ private fun UpdateSection(state: LinkitUiState, onCheck: () -> Unit, onInstall: 
 }
 
 @Composable
-private fun RecentActivity(entries: List<TransferHistoryEntry>, onClear: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "RECENT",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.9.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 6.dp)
-            )
-            if (entries.isNotEmpty()) {
-                TextButton(onClick = onClear) {
-                    Text(
-                        "Clear",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-        }
-        if (entries.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
-                    .border(
-                        BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                        RoundedCornerShape(18.dp)
-                    )
-                    .padding(vertical = 28.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "Files and handoffs will appear here.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(
-                        BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        RoundedCornerShape(18.dp)
-                    )
-            ) {
-                val shown = entries.take(8)
-                shown.forEachIndexed { index, entry ->
-                    ActivityRow(entry)
-                    if (index < shown.lastIndex) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(1.dp)
-                                .background(MaterialTheme.colorScheme.outlineVariant)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ActivityRow(entry: TransferHistoryEntry) {
-    val isSent = entry.direction == TransferHistoryEntry.DIRECTION_SENT
-    val accent = if (isSent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
-    val context = LocalContext.current
-    val openableUri = entry.contentUri
-        ?.takeIf { entry.direction == TransferHistoryEntry.DIRECTION_RECEIVED && entry.status == TransferHistoryEntry.STATUS_COMPLETE }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .let { base ->
-                if (openableUri != null) base.clickable { openReceivedFile(context, openableUri) } else base
-            }
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .clip(CircleShape)
-                .background(accent.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                if (isSent) "↑" else "↓",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = accent
-            )
-        }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                entry.filename,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                buildString {
-                    append(formatBytes(entry.size))
-                    append("  ·  ")
-                    append(formatRelative(entry.completedAt))
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        when (entry.status) {
-            TransferHistoryEntry.STATUS_FAILED -> Text(
-                "Failed",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error
-            )
-            TransferHistoryEntry.STATUS_COMPLETE -> Unit
-            else -> Text(
-                entry.status.replaceFirstChar { it.uppercase() },
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-private fun openReceivedFile(context: Context, uriString: String) {
-    val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
-    val mimeType = context.contentResolver.getType(uri) ?: "*/*"
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, mimeType)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    val opened = runCatching { context.startActivity(intent); true }.getOrDefault(false)
-    if (!opened) {
-        Toast.makeText(context, "No app can open this file", Toast.LENGTH_SHORT).show()
-    }
-}
-
-@Composable
 private fun TransferBar(state: LinkitUiState, onCancel: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -2472,7 +2164,7 @@ private fun SettingsHub(state: LinkitUiState, onOpenDetail: (SettingsRoute) -> U
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
-            .padding(top = 8.dp, bottom = 24.dp),
+            .padding(top = 8.dp, bottom = GlassBarContentPadding),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         LinkitLargeHeader(title = "Settings", subtitle = "Manage your Linkit connection and preferences.")
@@ -2551,7 +2243,7 @@ private fun SettingsDetailScaffold(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
-            .padding(bottom = 24.dp),
+            .padding(bottom = GlassBarContentPadding),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3171,26 +2863,4 @@ private object LinkitPalette {
     val DangerContainerDark = Color(0xFF6B2A2A)
 }
 
-@Composable
-private fun formatBytes(bytes: Long): String {
-    return Formatter.formatFileSize(LocalContext.current, bytes)
-}
-
-private fun formatEta(seconds: Long): String {
-    if (seconds <= 0) return "0s"
-    val minutes = seconds / 60
-    val rest = seconds % 60
-    return if (minutes > 0) "${minutes}m ${rest}s" else "${rest}s"
-}
-
-private fun formatRelative(epochMillis: Long): String {
-    val deltaSeconds = ((System.currentTimeMillis() - epochMillis) / 1000).coerceAtLeast(0)
-    return when {
-        deltaSeconds < 60 -> "just now"
-        deltaSeconds < 3600 -> "${deltaSeconds / 60}m ago"
-        deltaSeconds < 86_400 -> "${deltaSeconds / 3600}h ago"
-        deltaSeconds < 7 * 86_400 -> "${deltaSeconds / 86_400}d ago"
-        else -> java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault()).format(java.util.Date(epochMillis))
-    }
-}
 
