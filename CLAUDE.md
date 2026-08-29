@@ -8,7 +8,7 @@ A private, cloud-free local device link between **one** Android phone and **one*
 
 The README is product-facing. **`docs/current-state.md`** is the technical feature snapshot (keep it updated when shipping). When behavior and docs disagree, trust the code and update the docs.
 
-**Latest release:** v0.9.5 on GitHub Releases (in-app updaters on both platforms).
+**Latest release:** v0.9.6 on GitHub Releases (in-app updaters on both platforms).
 
 ## Repository layout
 
@@ -94,6 +94,9 @@ Streamed with constant memory and end-to-end SHA-256 verification; the upload sl
 ### Notable platform constraints (don't "fix" these — they're OS limits)
 - **Clipboard:** Android 10+ blocks background clipboard reads. Mac→Android clipboard push works anytime; automatic Android→Mac clipboard sync is foreground-only. `ClipboardActionActivity` defers the read to `onWindowFocusChanged(true)` so notification-button copies work.
 - No TLS/mTLS/Noise — transport is plain local HTTP. Signing authenticates requests; application-layer AES-256-GCM encrypts control payloads and AES-256-CTR encrypts file bodies. Filenames, sizes, history entries, and control responses remain cleartext metadata.
+
+### Free-floating panels (macOS menu-bar app)
+The call panel, transfer banner, and notification banners are borderless `NSPanel`s at `.statusBar` level, shown with `orderFrontRegardless()`. **An animation completion handler that tears one down must capture the panel, not `self`.** `LinkitNotificationBannerManager` drops its last reference the moment `dismiss()` returns, so the banner is deallocated ~0.2s before the fade finishes: a `[weak self]` completion then runs against a nil self, `orderOut` never fires, and AppKit keeps the ordered-in panel forever. That leaked one invisible alpha-0 window per phone notification — 295 of them after 35 hours of uptime, all composited every frame, WindowServer pinned at 28% CPU. It presents as *system-wide* animation stutter that only a reboot clears, which is nowhere near Linkit in the symptom. `LinkitCallPanel` and the transfer panel are singletons the delegate retains, so `[weak self]` is genuinely safe there — the rule bites only where the panel's owner is transient. Do not add `panel.close()` alongside `orderOut`: these panels default to `isReleasedWhenClosed = true`, and closing one while a closure still holds a strong capture is an over-release crash.
 
 ### Android debug telemetry
 Hidden panel: tap the **Linkit** wordmark 7× (`DebugActivity` / `DebugTelemetry` process-scoped singleton). Surfaces CPU, per-UID network bytes, FGS uptime windows, battery samples, an event log, and a 500-line ring buffer. In-app numbers are PID/UID proxies; real mAh needs `adb shell dumpsys batterystats --charged tech.kalkikgp.linkit`.

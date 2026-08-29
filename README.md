@@ -111,7 +111,7 @@ Some of these may come later. The first version is about making one phone and on
 
 ## Status
 
-Open source under the **[GPLv3](LICENSE)**. **Latest release: [v0.9.1](https://github.com/kalki-kgp/Linkit/releases/tag/v0.9.1)** (July 2026) — a signed Android APK and a macOS app (ad-hoc signed, **not** Apple-notarized — see [install notes](docs/SETUP.md#installing-the-macos-app)) on GitHub Releases, with in-app updaters on both platforms.
+Open source under the **[GPLv3](LICENSE)**. **Latest release: [v0.9.6](https://github.com/kalki-kgp/Linkit/releases/tag/v0.9.6)** (August 2026) — a signed Android APK and a macOS app (ad-hoc signed, **not** Apple-notarized — see [install notes](docs/SETUP.md#installing-the-macos-app)) on GitHub Releases, with in-app updaters on both platforms.
 
 For the technical feature snapshot, see [`docs/current-state.md`](docs/current-state.md).
 

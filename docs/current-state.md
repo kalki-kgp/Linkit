@@ -9,9 +9,9 @@ v0.9.1 ships the Android Home feature-status compact list and tap-to-resolve dia
 
 ## Distribution
 
-- **GitHub Releases** — signed `linkit-release.apk` and `linkit-macos.zip` per tag; the current release is v0.9.1.
+- **GitHub Releases** — signed `linkit-release.apk` and `linkit-macos.zip` per tag; the current release is v0.9.6.
 - **In-app updaters** — both apps fetch `releases/latest/download/linkit-*-update.json`, verify SHA-256, and install (Android requires user approval; Mac swaps `Linkit.app` and relaunches).
-- **CI** — `.github/workflows/ci.yml` runs `./scripts/verify.sh` on pull requests and pushes to `main`. `.github/workflows/release.yml` runs platform tests, builds both platforms, and uploads assets. Use workflow dispatch with an explicit, increasing `version_code` (v0.9.1 = build **18**).
+- **CI** — `.github/workflows/ci.yml` runs `./scripts/verify.sh` on pull requests and pushes to `main`. `.github/workflows/release.yml` runs platform tests, builds both platforms, and uploads assets. Use workflow dispatch with an explicit, increasing `version_code` (v0.9.1 = build **18**, v0.9.5 = build **22**, v0.9.6 = build **23**).
 - Not on Play Store; macOS app is not notarized. Personal sideload / GitHub download only.
 
 ## What Works

@@ -2560,13 +2560,18 @@ private final class LinkitNotificationBanner {
         isClosing = true
         var end = panel.frame
         end.origin.x += 24
+        // The manager drops its last reference the moment `dismiss()` returns, so this
+        // banner is deallocated well before the 0.2s fade completes. Capture the panel
+        // instead of `self` — with `[weak self]` the completion ran against a nil self,
+        // `orderOut` never happened, and AppKit held the ordered-in panel forever: one
+        // leaked alpha-0 window per notification, all of them composited every frame.
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.2
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             self.panel.animator().alphaValue = 0
             self.panel.animator().setFrame(end, display: true)
-        }, completionHandler: { [weak self] in
-            self?.panel.orderOut(nil)
+        }, completionHandler: { [panel = self.panel] in
+            panel.orderOut(nil)
         })
     }
 }
